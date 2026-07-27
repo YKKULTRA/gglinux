@@ -129,12 +129,29 @@ Still unverified: physical unplug/replug (no one at the machine). `diff()` is un
 add/remove/swap/interface-churn instead, and the udev wake path is confirmed live (the monitor thread
 parks in `poll()`, no busy-spin).
 
-### M1 — Mouse: Rival 3 Wireless Gen 2  *(quick win)*
+### M1 — Mouse: Rival 3 Wireless Gen 2  *(quick win)*  — **daemon side done; UI panel + on-device write test outstanding**
 Port the rivalcfg `0x1872` table into `gg-device-mouse`: DPI stages (X/Y, the **fixed** `xxyy` encoder —
 avoid the #273 vertical-axis bug), polling rate, 6-button remap, save. Battery poller (`0xAA 01`,
 Solaar-style, publish % + charging over IPC). Mouse UI panel.
 **Accept:** set DPI/polling/bindings from the UI and confirm on-device (e.g. DPI change measurable);
 battery % shows and updates; settings persist across replug.
+
+Done: `gg-device-mouse` (DPI/polling/buttons/save + battery, 12 unit tests over the packet builders,
+DPI codes machine-generated from rivalcfg rather than guessed); the `gglinuxd` mouse worker thread;
+the `get_mouse_state` / `set_mouse_*` / `save_mouse` IPC methods; the `ggctl mouse` client.
+
+Verified on hardware: transport (open iface 3, write, read input report) and battery, repeatedly and
+stably. **Not yet verified: any write.** The protocol has no getters, so a write cannot be confirmed
+in software — it needs a human watching the pointer speed change. Two hazards make that a deliberate
+step rather than a casual one:
+- Applying settings is **not restorable** — we cannot read the current values first, so whatever was
+  configured before is gone.
+- Bug #273 territory. `sensitivity_packet` pads to five presets using fixed-size arrays, so a short
+  packet is structurally unrepresentable (test `short_preset_lists_still_pad_the_x_block`), but the
+  failure mode it guards against — permanent loss of the vertical axis — is not one to test casually.
+
+Also outstanding: settings do not yet persist across a daemon restart (no config file — that is M7),
+so `applied` starts empty each run.
 
 ### M2 — Headset: Arctis Nova Pro Wireless  *(quick win)*
 Port HeadsetControl + loteran/Dymstro into `gg-device-headset` (iface 4, `06 …` TX / `07 …` RX). Setters:

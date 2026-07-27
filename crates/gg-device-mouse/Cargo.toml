@@ -1,0 +1,16 @@
+[package]
+name = "gg-device-mouse"
+description = "SteelSeries Rival 3 Wireless Gen 2 control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hidapi.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

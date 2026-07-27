@@ -40,7 +40,52 @@ pub struct DeviceInfo {
     pub interfaces: Vec<InterfaceInfo>,
 }
 
+/// One DPI stage. X and Y sensitivity can be set independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DpiStage {
+    pub x: u16,
+    pub y: u16,
+}
+
+/// Battery reading from a wireless device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatteryState {
+    /// Charge percentage, 1..=100.
+    pub level: u8,
+    pub charging: bool,
+}
+
+/// Mouse settings, as written by gglinux.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseSettings {
+    pub dpi_stages: Vec<DpiStage>,
+    /// 0-based index into `dpi_stages`.
+    pub active_stage: usize,
+    pub polling_hz: u16,
+    /// One action name per physical button, in button order.
+    pub buttons: Vec<String>,
+}
+
+/// What the daemon knows about the mouse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseState {
+    pub connected: bool,
+    /// `None` while the mouse is asleep or has not reported yet.
+    pub battery: Option<BatteryState>,
+    /// Settings this daemon has written since it started.
+    ///
+    /// `None` means we have not written any: the mouse is running whatever is in
+    /// its onboard memory. The vendor protocol is write-only — there is no command
+    /// to read settings back — so this is the only honest answer available, and it
+    /// deliberately does not pretend to reflect the hardware's actual state.
+    pub applied: Option<MouseSettings>,
+}
+
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
+///
+/// The `set_mouse_*` methods address "the connected Rival 3 Wireless Gen 2" without
+/// a device id — only one mouse model is supported so far. Addressing gains a device
+/// id when a second controllable device lands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
@@ -48,6 +93,29 @@ pub enum Request {
     ListDevices,
     /// Liveness check.
     Ping,
+    /// Battery + whatever settings we have applied.
+    GetMouseState,
+    /// Set the DPI stages and which one is active.
+    SetMouseDpi {
+        stages: Vec<DpiStage>,
+        /// 0-based.
+        active: usize,
+        #[serde(default)]
+        save: bool,
+    },
+    SetMousePolling {
+        hz: u16,
+        #[serde(default)]
+        save: bool,
+    },
+    /// One action name per button, e.g. `["button1", ..., "dpi"]`.
+    SetMouseButtons {
+        actions: Vec<String>,
+        #[serde(default)]
+        save: bool,
+    },
+    /// Commit current settings to the mouse's onboard memory.
+    SaveMouse,
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -63,6 +131,9 @@ pub struct RequestFrame {
 pub enum ResponseData {
     Devices { devices: Vec<DeviceInfo> },
     Pong,
+    Mouse { state: MouseState },
+    /// A command was accepted and applied.
+    Success,
     Error { message: String },
 }
 
@@ -74,6 +145,8 @@ pub enum Event {
     DeviceRemoved { id: String },
     /// Full current list — sent on connect and after a lag/resync.
     DevicesChanged { devices: Vec<DeviceInfo> },
+    /// Mouse battery changed (or became unknown when it went to sleep).
+    MouseBattery { battery: Option<BatteryState> },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -122,6 +195,53 @@ mod tests {
         let f: RequestFrame = serde_json::from_str(line).unwrap();
         assert_eq!(f.id, 7);
         assert!(matches!(f.req, Request::ListDevices));
+    }
+
+    /// Pins the exact JSON a UI has to send for each mouse method.
+    #[test]
+    fn mouse_requests_parse_from_their_documented_json() {
+        let dpi = r#"{"id":1,"req":{"method":"set_mouse_dpi","params":
+            {"stages":[{"x":800,"y":800},{"x":1600,"y":1600}],"active":1,"save":true}}}"#;
+        match serde_json::from_str::<RequestFrame>(dpi).unwrap().req {
+            Request::SetMouseDpi { stages, active, save } => {
+                assert_eq!(stages, vec![DpiStage { x: 800, y: 800 }, DpiStage { x: 1600, y: 1600 }]);
+                assert_eq!(active, 1);
+                assert!(save);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+
+        let buttons = r#"{"id":2,"req":{"method":"set_mouse_buttons","params":
+            {"actions":["button1","button2","button3","button4","button5","dpi"]}}}"#;
+        match serde_json::from_str::<RequestFrame>(buttons).unwrap().req {
+            Request::SetMouseButtons { actions, save } => {
+                assert_eq!(actions.len(), 6);
+                // Omitted `save` must default to "do not persist", never to a write
+                // into the mouse's onboard memory.
+                assert!(!save);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+
+        for (line, label) in [
+            (r#"{"id":3,"req":{"method":"get_mouse_state"}}"#, "get_mouse_state"),
+            (r#"{"id":4,"req":{"method":"save_mouse"}}"#, "save_mouse"),
+        ] {
+            serde_json::from_str::<RequestFrame>(line)
+                .unwrap_or_else(|e| panic!("{label} should parse: {e}"));
+        }
+    }
+
+    #[test]
+    fn mouse_state_reports_unwritten_settings_as_null() {
+        let state = MouseState {
+            connected: true,
+            battery: Some(BatteryState { level: 12, charging: false }),
+            applied: None,
+        };
+        let json = serde_json::to_string(&ResponseData::Mouse { state }).unwrap();
+        assert!(json.contains(r#""applied":null"#), "{json}");
+        assert!(json.contains(r#""level":12"#), "{json}");
     }
 
     #[test]

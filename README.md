@@ -4,9 +4,10 @@ An open-source **SteelSeries GG** replacement for Linux — device control (Engi
 (Sonar), game-event lighting (GameSense), and clip capture (Moments) — for the hardware SteelSeries
 never supported on Linux.
 
-**Status:** early. Milestone **M0 (skeleton)** is done — the daemon enumerates all three devices,
-tracks hotplug, and serves them over its socket; the UI shell is scaffolded. Device *control* starts
-at M1. See [PLAN.md](PLAN.md) for the roadmap.
+**Status:** early. **M0 (skeleton)** is done — the daemon enumerates all three devices, tracks hotplug,
+and serves them over its socket. **M1 (mouse)** has its daemon side done: DPI stages, polling rate,
+button remap, onboard save, and a battery poller for the Rival 3 Wireless Gen 2, driveable from the
+`ggctl` CLI; the mouse UI panel is still to come. See [PLAN.md](PLAN.md) for the roadmap.
 
 ## Supported hardware (initial targets)
 
@@ -50,11 +51,20 @@ systemctl --user enable --now gglinuxd
 Without that udev rule the hidraw nodes stay `root:root 0600`: devices will still be *listed* (that
 only reads sysfs) but cannot be opened or controlled.
 
-Poke at it without the UI:
+Poke at it without the UI, via the `ggctl` client:
 
 ```sh
-cargo run -p gglinuxd --example ggctl   # prints the device list + live hotplug events
+cargo run -p gglinuxd --example ggctl                    # device list + live hotplug events
+cargo run -p gglinuxd --example ggctl -- mouse           # battery + applied settings
+cargo run -p gglinuxd --example ggctl -- mouse dpi 800,1600 --select 0 --save
+cargo run -p gglinuxd --example ggctl -- mouse polling 1000 --save
+cargo run -p gglinuxd --example ggctl -- mouse buttons button1,button2,button3,button4,button5,dpi
 ```
+
+Settings apply immediately but are lost when the mouse sleeps unless you pass `--save`, which commits
+them to its onboard memory. There is **no way to read settings back** off this mouse — the vendor
+protocol is write-only — so `ggctl mouse` reports what *gglinux* has applied this session rather than
+pretending to know what is on the device.
 
 ### UI
 
