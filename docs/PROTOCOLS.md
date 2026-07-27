@@ -7,21 +7,47 @@ where we port *code*. All three devices are USB VID `0x1038` (SteelSeries).
 > Legend: `hidraw` = `/dev/hidrawN`; "feature report" = `SET_FEATURE` (report id byte first);
 > "output report" = interrupt/`write()` (report id byte first). "iface N" = USB `bInterfaceNumber`.
 
+> **⚠ hidraw framing — byte 0 is always a report id, never protocol data.** A `write()` to hidraw
+> must begin with the report id. The kernel (`hidraw_send_report`) treats `0x00` as "this device
+> doesn't use numbered reports" and **strips** that byte before putting the rest on the wire; any
+> non-zero byte 0 is kept *and* sent. So the framing differs per device, and getting it wrong fails
+> silently (the write succeeds, the device just ignores it):
+>
+> | Device | Descriptor | Buffer to write | Wire payload |
+> |---|---|---|---|
+> | Mouse `1038:1872`, keyboard `1038:1642` | **unnumbered** | `[0x00] + payload`, pad to **65** | 64 B, starts at the opcode |
+> | Headset `1038:12e0` | **numbered** (`0x06`/`0x07`) | `[0x06] + payload`, pad to **64** | 63 B after the id |
+>
+> For the headset the leading `0x06` really *is* a report id, so it is both the buffer's byte 0 and
+> what the descriptor declares — do not additionally repeat it in the payload.
+
 ---
 
 ## 1. Rival 3 Wireless Gen 2 — mouse — `1038:1872`
 
-**Status: fully solved.** Port `rivalcfg/devices/rival3_wireless_gen2.py` (WTFPL) verbatim.
-Transport: **HID output reports to iface 3** (the 4th of 4 dongle HID interfaces). rivalcfg selects
-purely by `interface_number == 3` (no usage-page filter) and prepends a leading report-id byte
-`0x02` for output writes (`0x03` for feature). Only works over the 2.4 GHz dongle, not Bluetooth.
+**Status: fully solved, and verified on real hardware (2026-07-27).** Port
+`rivalcfg/devices/rival3_wireless_gen2.py` (WTFPL). Transport: **HID output reports to iface 3**
+(the 4th of 4 dongle HID interfaces, `/dev/hidraw3` here, usage page `0xFFC0`). rivalcfg selects
+purely by `interface_number == 3`, no usage-page filter. Only works over the 2.4 GHz dongle, not
+Bluetooth.
+
+**Framing (measured, supersedes an earlier note in this file):** the descriptor is **unnumbered**
+(Input 64 B, Output 64 B, Feature 514 B). Write `[0x00] + payload` padded to **65 bytes**; the kernel
+strips byte 0 and the device receives a 64-byte report beginning with the opcode. Responses arrive as
+**input reports** — plain `read()` on the same fd, 64 bytes, first payload byte at index 0.
+
+> An earlier draft of this file claimed output writes are prefixed with `0x02` (and features `0x03`).
+> That was wrong: `0x02`/`0x03` are rivalcfg's *internal* `HID_REPORT_TYPE_OUTPUT`/`_FEATURE` enum
+> values naming which report type to use, not bytes that go on the wire. Sending `02 aa 01` gets no
+> reply; `aa 01` gets one. Feature reports are not used for reads at all here — `GET_FEATURE`
+> returns 0 bytes.
 
 | Function | Command bytes | Notes |
 |---|---|---|
 | Sensitivity / DPI | `0x2C` | `multidpi_range_choice_xy`, `xy_mapping="xxyy"`, `dpi_length_byte=1`, range `[100,18000,100]`, ≤5 presets, default `800:800,1600:1600`. TrueMove Air 18K. |
 | Polling rate | `0x17` | `{1000:0x00, 500:0x01, 250:0x02, 125:0x03}` |
 | Buttons (6) | `0x19` | `button_field_length=5`, offsets `0x00/05/0A/0F/14/19`; codes: disable `0x00`, keyboard `0x51`, multimedia `0x61`, dpi-cycle `0x30`, scroll-up `0x31`, scroll-down `0x32` |
-| Battery read | `0xAA 0x01` | 3-byte response: `level=data[0]` (%), `charging=bool(data[2])` |
+| Battery read | `0xAA 0x01` | response: `level=data[0]` (%), `charging=bool(data[2])`. **Verified:** reply `10 00 00 …` = 16%, not charging. |
 | Save / commit | `0x09` | no args |
 
 - **⚠ Bug to replicate the *fix* for (rivalcfg #273):** setting fewer than 5 DPI presets with the
