@@ -129,7 +129,7 @@ Still unverified: physical unplug/replug (no one at the machine). `diff()` is un
 add/remove/swap/interface-churn instead, and the udev wake path is confirmed live (the monitor thread
 parks in `poll()`, no busy-spin).
 
-### M1 — Mouse: Rival 3 Wireless Gen 2  *(quick win)*  — **daemon side done; UI panel + on-device write test outstanding**
+### M1 — Mouse: Rival 3 Wireless Gen 2  *(quick win)*  — **built; on-device write test outstanding**
 Port the rivalcfg `0x1872` table into `gg-device-mouse`: DPI stages (X/Y, the **fixed** `xxyy` encoder —
 avoid the #273 vertical-axis bug), polling rate, 6-button remap, save. Battery poller (`0xAA 01`,
 Solaar-style, publish % + charging over IPC). Mouse UI panel.
@@ -138,7 +138,12 @@ battery % shows and updates; settings persist across replug.
 
 Done: `gg-device-mouse` (DPI/polling/buttons/save + battery, 12 unit tests over the packet builders,
 DPI codes machine-generated from rivalcfg rather than guessed); the `gglinuxd` mouse worker thread;
-the `get_mouse_state` / `set_mouse_*` / `save_mouse` IPC methods; the `ggctl mouse` client.
+the `get_mouse_state` / `set_mouse_*` / `save_mouse` IPC methods; the `ggctl mouse` client; and the
+`MousePanel` UI (battery, DPI stages, polling rate, button remap, onboard save).
+
+The panel separates *what will be written* (the form) from *what has been written* (`applied`), and
+says so on screen, because there is no third thing — the state of the hardware — that either one can
+stand in for.
 
 Verified on hardware: transport (open iface 3, write, read input report) and battery, repeatedly and
 stably. **Not yet verified: any write.** The protocol has no getters, so a write cannot be confirmed

@@ -5,9 +5,10 @@ An open-source **SteelSeries GG** replacement for Linux — device control (Engi
 never supported on Linux.
 
 **Status:** early. **M0 (skeleton)** is done — the daemon enumerates all three devices, tracks hotplug,
-and serves them over its socket. **M1 (mouse)** has its daemon side done: DPI stages, polling rate,
-button remap, onboard save, and a battery poller for the Rival 3 Wireless Gen 2, driveable from the
-`ggctl` CLI; the mouse UI panel is still to come. See [PLAN.md](PLAN.md) for the roadmap.
+and serves them over its socket. **M1 (mouse)** is built: DPI stages, polling rate, button remap,
+onboard save, and a battery poller for the Rival 3 Wireless Gen 2, driveable from either the desktop
+UI or the `ggctl` CLI. Its acceptance test — confirming a write on the physical mouse — is still
+outstanding. See [PLAN.md](PLAN.md) for the roadmap.
 
 ## Supported hardware (initial targets)
 
@@ -80,6 +81,12 @@ It needs `webkit2gtk-4.1` and an appindicator for the tray. On Arch:
 ```sh
 sudo pacman -S webkit2gtk-4.1 libayatana-appindicator
 ```
+
+On the **NVIDIA proprietary driver**, WebKit's DMABUF renderer cannot allocate its buffers: on a
+native Wayland session that takes the process down with `Gdk-Message: Error 71 (Protocol error)`, and
+on XWayland the window comes up empty. gglinux detects that driver and sets
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself, so this needs no action — but if you set that variable
+yourself, your value wins.
 
 The UI is optional — the daemon runs headless and keeps applying your settings with the UI closed.
 

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { daemon } from "./lib/daemon.svelte";
   import DeviceCard from "./lib/DeviceCard.svelte";
+  import MousePanel from "./lib/MousePanel.svelte";
   import Icon from "./lib/Icon.svelte";
   import type { IconName } from "./lib/icons";
 
@@ -22,6 +23,10 @@
   };
 
   let page = $state<Page>("engine");
+
+  /** Rival 3 Wireless Gen 2 — so far the only device with a control panel. */
+  const RIVAL3_PID = 0x1872;
+  let hasRival3 = $derived(daemon.devices.some((d) => d.product_id === RIVAL3_PID));
 
   onMount(() => {
     void daemon.start();
@@ -77,6 +82,12 @@ sudo udevadm control --reload
 sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
         </section>
       {:else}
+        {#if hasRival3}
+          <section class="controls">
+            <MousePanel />
+          </section>
+        {/if}
+
         <div class="grid">
           {#each daemon.devices as device (device.id)}
             <DeviceCard {device} />
@@ -202,6 +213,13 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
     display: grid;
     gap: 0.85rem;
     grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  }
+
+  /* Capped: the controls are a column of short rows, and stretching them across a
+     wide window leaves each label marooned from its input. */
+  .controls {
+    max-width: 560px;
+    margin-bottom: 1.1rem;
   }
 
   .notice {

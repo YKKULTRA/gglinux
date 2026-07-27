@@ -126,7 +126,32 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Work around webkit2gtk's DMABUF renderer on the NVIDIA proprietary driver.
+///
+/// WebKit cannot allocate its GBM buffers there. Under a native Wayland session
+/// that kills the process outright — `Gdk-Message: Error 71 (Protocol error)` —
+/// and under XWayland it survives but logs `Failed to create GBM buffer` and
+/// renders nothing. Disabling the DMABUF renderer costs some compositing
+/// performance and is the workaround upstream recommends.
+///
+/// Scoped as narrowly as the fix allows: only when that driver is loaded, and
+/// never over a value the user set themselves.
+fn disable_dmabuf_renderer_on_nvidia() {
+    const VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    if std::env::var_os(VAR).is_some() {
+        return;
+    }
+    // nouveau is unaffected, so probe for the proprietary module specifically.
+    if std::path::Path::new("/sys/module/nvidia").exists() {
+        std::env::set_var(VAR, "1");
+    }
+}
+
 fn main() {
+    // Before the builder: WebKit reads this when it initialises, and setting an
+    // env var is only sound while the process is still single-threaded.
+    disable_dmabuf_renderer_on_nvidia();
+
     let bridge = Arc::new(Bridge::default());
 
     tauri::Builder::default()

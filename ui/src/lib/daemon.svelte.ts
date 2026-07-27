@@ -7,7 +7,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { DeviceInfo, Request, ResponseData, ServerMessage } from "./types";
+import type { DeviceInfo, DpiStage, MouseState, Request, ResponseData, ServerMessage } from "./types";
 
 /** Reject a pending request if the daemon never answers. */
 const REQUEST_TIMEOUT_MS = 5000;
@@ -23,6 +23,8 @@ class Daemon {
   connected = $state(false);
   /** Latest device snapshot, kept current by push notifications. */
   devices = $state<DeviceInfo[]>([]);
+  /** Mouse battery + applied settings; null until first fetched. */
+  mouse = $state<MouseState | null>(null);
   /** Last transport/protocol error, for surfacing in the UI. */
   lastError = $state<string | null>(null);
 
@@ -40,6 +42,9 @@ class Daemon {
       this.connected = e.payload.connected;
       if (!this.connected) {
         this.devices = [];
+        // `applied` describes what *that* daemon process wrote. If it restarted it
+        // has written nothing, so keeping the old value would be a lie.
+        this.mouse = null;
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -76,6 +81,41 @@ class Daemon {
     return res.devices;
   }
 
+  /** Refresh {@link mouse}. The daemon rate-limits the underlying battery read,
+   *  so calling this on a timer is cheap. */
+  async getMouseState(): Promise<MouseState> {
+    const res = await this.request({ method: "get_mouse_state" });
+    if (res.type !== "mouse") throw new Error(`unexpected response: ${res.type}`);
+    this.mouse = res.state;
+    return res.state;
+  }
+
+  // Each mutation refreshes `mouse` afterwards: the daemon owns the record of what
+  // has been applied, and only it knows whether the write actually landed.
+
+  async setMouseDpi(stages: DpiStage[], active: number, save: boolean): Promise<void> {
+    await this.#command({ method: "set_mouse_dpi", params: { stages, active, save } });
+  }
+
+  async setMousePolling(hz: number, save: boolean): Promise<void> {
+    await this.#command({ method: "set_mouse_polling", params: { hz, save } });
+  }
+
+  async setMouseButtons(actions: string[], save: boolean): Promise<void> {
+    await this.#command({ method: "set_mouse_buttons", params: { actions, save } });
+  }
+
+  /** Commit whatever is currently applied to the mouse's onboard memory. */
+  async saveMouse(): Promise<void> {
+    await this.#command({ method: "save_mouse" });
+  }
+
+  async #command(req: Request): Promise<void> {
+    const res = await this.request(req);
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getMouseState();
+  }
+
   #onMessage(msg: ServerMessage): void {
     if (msg.kind === "response") {
       const p = this.#pending.get(msg.id);
@@ -104,6 +144,10 @@ class Daemon {
         break;
       case "device_removed":
         this.devices = this.devices.filter((d) => d.id !== ev.data.id);
+        break;
+      case "mouse_battery":
+        // Dropped if we have no state yet; the panel fetches one when it mounts.
+        if (this.mouse) this.mouse = { ...this.mouse, battery: ev.data.battery };
         break;
     }
   }
