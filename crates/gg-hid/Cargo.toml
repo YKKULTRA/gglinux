@@ -1,0 +1,15 @@
+[package]
+name = "gg-hid"
+description = "HID enumeration, classification, and hotplug monitoring for gglinux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+gg-ipc = { path = "../gg-ipc" }
+hidapi.workspace = true
+udev.workspace = true
+libc.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

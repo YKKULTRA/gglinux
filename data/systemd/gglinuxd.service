@@ -1,0 +1,28 @@
+[Unit]
+Description=gglinux device daemon
+Documentation=https://github.com/ykk/gglinux
+# Device ACLs (see 60-gglinux.rules) only exist once a graphical seat session is up,
+# so prefer to start after it — but don't hard-require it, since the daemon retries
+# opening devices and is still useful headless.
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/gglinuxd
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+# The socket lives in $XDG_RUNTIME_DIR/gglinux/ and is removed on clean shutdown.
+RuntimeDirectory=gglinux
+RuntimeDirectoryPreserve=no
+
+# Light hardening. Deliberately no ProtectHome/ProtectSystem: later milestones write
+# profiles to ~/.config/gglinux and clips to the user's video directory.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target

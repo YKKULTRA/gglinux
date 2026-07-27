@@ -1,0 +1,22 @@
+# gglinux — grant the logged-in desktop user access to SteelSeries HID devices.
+#
+# Install:
+#   sudo install -Dm644 60-gglinux.rules /etc/udev/rules.d/60-gglinux.rules
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=hidraw --action=add
+#
+# TAG+="uaccess" asks systemd-logind to place an ACL on the device node for whoever
+# owns the active local session. No root, no polkit, no plugdev group — and the ACL
+# is revoked automatically when the session ends. This must be evaluated *before*
+# /usr/lib/udev/rules.d/70-uaccess.rules, hence the 60- prefix.
+#
+# Fallback for systems without systemd-logind: replace TAG+="uaccess" with
+#   MODE="0660", GROUP="plugdev"
+# and add yourself to the plugdev group.
+
+ACTION=="remove", GOTO="gglinux_end"
+
+# Every SteelSeries HID interface (VID 0x1038). ATTRS{} walks up to the USB device.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", TAG+="uaccess"
+
+LABEL="gglinux_end"

@@ -1,0 +1,16 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+
+# Tauri / node frontend
+ui/node_modules/
+ui/dist/
+ui/src-tauri/target/
+ui/src-tauri/gen/
+
+# Editors / OS / tooling
+*.swp
+*.log
+.DS_Store
+.claude/
