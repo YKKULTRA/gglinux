@@ -56,10 +56,17 @@ const MAX_DRAIN_REPORTS: usize = 16;
 /// and is usually not the first. This has to be a deadline rather than a count of
 /// reports: a fixed budget is spent by whatever the stream happens to be emitting,
 /// which makes the read succeed or fail depending on timing.
-const REPLY_DEADLINE: Duration = Duration::from_millis(1000);
+const REPLY_DEADLINE: Duration = Duration::from_millis(400);
 
 /// Backstop against a device streaming faster than we can drain.
 const MAX_REPLY_REPORTS: usize = 256;
+
+/// How many times to re-send a request that drew no reply.
+///
+/// Nothing acknowledges a write, so a request the base station never acted on is
+/// indistinguishable from one whose reply we missed — and reading for longer
+/// cannot recover the first case, only re-asking can. Observed once in ~44 reads.
+const REQUEST_ATTEMPTS: usize = 3;
 
 /// An open handle to the base station's control interface.
 pub struct Headset {
@@ -148,6 +155,20 @@ impl Headset {
     /// Returns `None` if the base sent nothing recognisable before
     /// [`MAX_STATUS_ATTEMPTS`] reports went by.
     pub fn status(&self) -> Result<Option<Status>> {
+        for attempt in 1..=REQUEST_ATTEMPTS {
+            if let Some(status) = self.status_once()? {
+                if attempt > 1 {
+                    debug!(attempt, "status needed a retry");
+                }
+                return Ok(Some(status));
+            }
+        }
+        debug!(attempts = REQUEST_ATTEMPTS, "no status reply");
+        Ok(None)
+    }
+
+    /// One request/reply exchange. `None` if no status block arrived in time.
+    fn status_once(&self) -> Result<Option<Status>> {
         self.drain();
         self.send(&proto::status_packet())?;
 
@@ -164,7 +185,6 @@ impl Headset {
             }
             skipped += 1;
         }
-        debug!(skipped, "no status reply within the deadline");
         Ok(None)
     }
 
