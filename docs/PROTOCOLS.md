@@ -67,9 +67,33 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 ## 2. Arctis Nova Pro Wireless — headset + base station (GameDAC Gen 2) — `1038:12e0`
 
 **Status: best-documented SteelSeries device on Linux.** One vendor HID protocol on **iface 4**
-(OUT `0x04` / IN `0x84`). TX prefix byte0 = `0x06`, RX prefix byte0 = `0x07`. Output reports
-zero-padded (HeadsetControl uses 31 bytes, Dymstro 63, loteran 64 — all work). Sibling PIDs:
-`0x12e5` (Nova Pro Wireless X), `0x225d`.
+(OUT `0x04` / IN `0x84`). TX prefix byte0 = `0x06`. Output reports zero-padded (HeadsetControl uses
+31 bytes, Dymstro 63, loteran 64 — all work). Sibling PIDs: `0x12e5` (Nova Pro Wireless X), `0x225d`.
+
+> ### ⚠ Verified on hardware 2026-08-12 — two corrections to the reference implementations
+>
+> **1. Command replies come back on report `0x06`, not `0x07`.** The sources describe the status
+> readback as `07 b0 ..`; the real device answers `06 b0 ..`, echoing the opcode. Report `0x07` is a
+> *separate, unsolicited* stream. **Decode by opcode, not by report id or arrival order.**
+>
+> **2. The base station streams interrupts unprompted.** `07 25 <n>` arrives roughly every 16 ms
+> with `n` fluctuating (observed 2–8) whether or not anything was requested. `0x25` is master volume
+> in the setter table, but a value changing that fast is not a volume setting — most likely a level
+> meter. **Unidentified; do not treat `07 25` as a volume readback.**
+>
+> Together these break any request/response loop that reads the *next* report after a request: the
+> next report is almost never the reply. Worse, it fails intermittently rather than outright — a
+> fixed retry budget succeeds or fails depending on what the stream is doing. Read to a **deadline**,
+> and match the opcode. (`Headset::status` does both; 10/10 reads after, versus intermittent before.)
+>
+> **Report descriptor** (iface 4, one hidraw node, two usage collections):
+> `85 06` on usage page `0xFFC0` — In/Out 63 B + report id = **64 B writes**;
+> `85 07` on usage page `0xFF00`. Reports are genuinely **numbered**, so byte 0 of a hidraw write is
+> `0x06` and is transmitted (unlike the Rival 3, where byte 0 is `0x00` and the kernel strips it).
+>
+> Sample decode, headset docked: `06 b0 00 00 01 00 08 08 08 00 02 0a 05 00 08 08`
+> → battery 8/8 = 100%, spare 8/8 = 100%, mic LED 10, auto-off `05` = 30 min, mode `00` = speed,
+> power `08` = online.
 
 ### Setters (TX `0x06 ..`)
 | Function | Bytes | Notes |
