@@ -76,6 +76,11 @@ cd ui && npm install
 npm run tauri dev
 ```
 
+Use that, or `npm run tauri build` — **not** `cargo build && ./target/debug/gglinux`. A debug binary
+loads the frontend from `devUrl` (`http://localhost:1420`), not from the embedded `dist`, so without
+Vite running it comes up as a blank window: no error, no log line, and the tray and daemon socket all
+behave normally. Only a release build embeds the frontend.
+
 It needs `webkit2gtk-4.1` and an appindicator for the tray. On Arch:
 
 ```sh
@@ -89,6 +94,26 @@ on XWayland the window comes up empty. gglinux detects that driver and sets
 yourself, your value wins.
 
 The UI is optional — the daemon runs headless and keeps applying your settings with the UI closed.
+
+### Testing without hardware
+
+`fakemouse` stands in for the daemon: same socket, same protocol, no devices. Stop `gglinuxd` first
+(it refuses to start if anything else is listening), then:
+
+```sh
+cargo run -p gglinuxd --example fakemouse                 # battery drifts down from 87%
+cargo run -p gglinuxd --example fakemouse -- --battery 12 # start low
+cargo run -p gglinuxd --example fakemouse -- --charging
+cargo run -p gglinuxd --example fakemouse -- --fail set_mouse_dpi
+cargo run -p gglinuxd --example fakemouse -- --no-mouse
+```
+
+It logs every request it receives, decoded — so it shows what the UI actually sent, not just which
+method was called. Two reasons to prefer it over the real daemon while working on the UI: applying a
+setting to the real mouse cannot be undone (the protocol has no getters, so the previous values are
+unrecoverable), and the battery paths are otherwise only reachable by waiting for the battery to
+move. It deserializes with the same `gg-ipc` types the daemon uses, so a frame it accepts is a frame
+the daemon accepts.
 
 ## License
 
