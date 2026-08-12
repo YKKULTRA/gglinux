@@ -129,7 +129,16 @@ Still unverified: physical unplug/replug (no one at the machine). `diff()` is un
 add/remove/swap/interface-churn instead, and the udev wake path is confirmed live (the monitor thread
 parks in `poll()`, no busy-spin).
 
-### M1 — Mouse: Rival 3 Wireless Gen 2  *(quick win)*  — **built; on-device write test outstanding**
+### M1 — Mouse: Rival 3 Wireless Gen 2  *(quick win)*  — **built; parked, hardware retired**
+
+> **Parked 2026-07-27.** The Rival 3 is no longer in use — the owner moved to a Razer mouse — so the
+> acceptance test below cannot be run and M1 stops here rather than counting as complete. The code is
+> finished, tested and reachable from the UI and CLI; only the on-hardware confirmation is missing.
+> Nothing else depends on it. Unparking needs the mouse back for one session.
+>
+> Razer support is a separate question, not a continuation of this: different vendor protocol, and
+> [OpenRazer](https://openrazer.github.io/) (GPL-2.0) already covers that hardware on Linux — so the
+> honest options are to integrate it or to leave mice to it entirely.
 Port the rivalcfg `0x1872` table into `gg-device-mouse`: DPI stages (X/Y, the **fixed** `xxyy` encoder —
 avoid the #273 vertical-axis bug), polling rate, 6-button remap, save. Battery poller (`0xAA 01`,
 Solaar-style, publish % + charging over IPC). Mouse UI panel.

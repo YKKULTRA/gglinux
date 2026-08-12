@@ -4,18 +4,18 @@ An open-source **SteelSeries GG** replacement for Linux — device control (Engi
 (Sonar), game-event lighting (GameSense), and clip capture (Moments) — for the hardware SteelSeries
 never supported on Linux.
 
-**Status:** early. **M0 (skeleton)** is done — the daemon enumerates all three devices, tracks hotplug,
-and serves them over its socket. **M1 (mouse)** is built: DPI stages, polling rate, button remap,
-onboard save, and a battery poller for the Rival 3 Wireless Gen 2, driveable from either the desktop
-UI or the `ggctl` CLI. Its acceptance test — confirming a write on the physical mouse — is still
-outstanding. See [PLAN.md](PLAN.md) for the roadmap.
+**Status:** early. **M0 (skeleton)** is done — the daemon enumerates devices, tracks hotplug, and
+serves them over its socket. **M1 (mouse)** is built but **parked**: DPI stages, polling rate, button
+remap, onboard save and a battery poller for the Rival 3 Wireless Gen 2, driveable from the desktop
+UI or the `ggctl` CLI, but never confirmed against the physical mouse — that hardware is no longer in
+use here. See [PLAN.md](PLAN.md) for the roadmap.
 
 ## Supported hardware (initial targets)
 
 | Device | USB ID | Highlights |
 |---|---|---|
 | Apex Pro TKL Gen 3 (keyboard) | `1038:1642` | OmniPoint actuation, Rapid Trigger, per-key RGB, 128×40 OLED |
-| Rival 3 Wireless Gen 2 (mouse) | `1038:1872` | DPI/polling/buttons, battery |
+| Rival 3 Wireless Gen 2 (mouse) | `1038:1872` | DPI/polling/buttons, battery *(parked — see PLAN.md)* |
 | Arctis Nova Pro Wireless (headset + base) | `1038:12e0` | ANC, sidetone, EQ, ChatMix, OLED, battery |
 
 ## Design
