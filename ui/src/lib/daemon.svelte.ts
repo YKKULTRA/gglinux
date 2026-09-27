@@ -11,6 +11,8 @@ import type {
   Channel,
   DeviceInfo,
   DpiStage,
+  EqBand,
+  HeadphoneEq,
   HeadsetChange,
   HeadsetState,
   MouseState,
@@ -180,6 +182,18 @@ class Daemon {
 
   setAppChannel(binary: string, channel: Channel): Promise<void> {
     return this.#sonarCommand({ method: "set_app_channel", params: { binary, channel } });
+  }
+
+  setChannelEq(channel: Channel, bands: EqBand[]): Promise<void> {
+    return this.#sonarCommand({ method: "set_channel_eq", params: { channel, bands } });
+  }
+
+  setHeadphoneEq(eq: HeadphoneEq): Promise<void> {
+    return this.#sonarCommand({ method: "set_headphone_eq", params: { eq } });
+  }
+
+  importAutoEq(text: string, name: string | null): Promise<void> {
+    return this.#sonarCommand({ method: "import_auto_eq", params: { text, name } });
   }
 
   async #command(req: Request): Promise<void> {

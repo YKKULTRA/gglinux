@@ -2,8 +2,9 @@
   // Sonar: Game / Chat / Media / Aux channels hosted by PipeWire, apps routed
   // into them by rule, and ChatMix between Game and Chat.
 
+  import EqEditor from "./EqEditor.svelte";
   import { daemon } from "./daemon.svelte";
-  import type { Channel } from "./types";
+  import type { Channel, EqBand } from "./types";
 
   const CHANNELS: { value: Channel; label: string }[] = [
     { value: "game", label: "Game" },
@@ -37,6 +38,45 @@
   }
 
   const pct = (v: number | null) => (v === null ? "–" : `${Math.round(v * 100)}%`);
+
+  type EqTab = Channel | "headphone";
+  let eqTab = $state<EqTab>("game");
+  let importText = $state("");
+  let importName = $state("");
+
+  /** EQ edits skip `busy`, so a drag isn't cut short by its own request. */
+  async function quietly(op: () => Promise<void>) {
+    error = null;
+    try {
+      await op();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  const flatten = (bands: EqBand[]) => bands.map((b) => ({ ...b, gain: 0 }));
+  let tabBands = $derived(
+    !sonar ? [] : eqTab === "headphone" ? sonar.headphone.bands : (sonar.eq.find((c) => c.channel === eqTab)?.bands ?? []),
+  );
+
+  function setBands(bands: EqBand[]) {
+    const s = sonar;
+    if (!s) return;
+    void quietly(() =>
+      eqTab === "headphone"
+        ? daemon.setHeadphoneEq({ ...s.headphone, bands })
+        : daemon.setChannelEq(eqTab, bands),
+    );
+  }
+
+  function importAutoEq() {
+    const text = importText;
+    const name = importName.trim() || null;
+    void run("import", async () => {
+      await daemon.importAutoEq(text, name);
+      importText = "";
+    });
+  }
 </script>
 
 <article class="panel">
@@ -142,6 +182,58 @@
             {/each}
           </ul>
           <p class="hint">A change applies now and is remembered for that app.</p>
+        {/if}
+      </section>
+
+      <section>
+        <div class="head">
+          <h4>Equalizer</h4>
+          <button class="ghost" onclick={() => setBands(flatten(tabBands))}>Reset gains</button>
+        </div>
+        <div class="tabs">
+          {#each [...CHANNELS, { value: "headphone" as const, label: "Headphone" }] as t (t.value)}
+            <button class:on={eqTab === t.value} onclick={() => (eqTab = t.value)}>{t.label}</button>
+          {/each}
+        </div>
+        <EqEditor
+          bands={tabBands}
+          gainLimit={eqTab === "headphone" ? 20 : 12}
+          preamp={eqTab === "headphone" ? sonar.headphone.preamp : 0}
+          onchange={setBands}
+        />
+        {#if eqTab === "headphone"}
+          <div class="row">
+            <span class="label">Preamp</span>
+            <input
+              type="range"
+              min="-20"
+              max="20"
+              step="0.5"
+              value={sonar.headphone.preamp}
+              onchange={(e) =>
+                quietly(() =>
+                  daemon.setHeadphoneEq({ ...sonar!.headphone, preamp: e.currentTarget.valueAsNumber }),
+                )}
+            />
+            <span class="unit">{sonar.headphone.preamp} dB</span>
+          </div>
+          <p class="hint">
+            Correction for {sonar.headphone.name ?? "your headphones"}, applied to every channel.
+          </p>
+          <textarea
+            class="autoeq"
+            rows="5"
+            placeholder="Paste an AutoEQ ParametricEQ.txt (Preamp: … / Filter 1: ON PK Fc … )"
+            bind:value={importText}
+          ></textarea>
+          <div class="row">
+            <input class="name" placeholder="Headphone name (optional)" bind:value={importName} />
+            <button class="apply" disabled={busy !== null || !importText.trim()} onclick={importAutoEq}>
+              {busy === "import" ? "Importing…" : "Import AutoEQ"}
+            </button>
+          </div>
+        {:else}
+          <p class="hint">Drag a point to move it; scroll over it to change its width (Q).</p>
         {/if}
       </section>
     {/if}
@@ -270,6 +362,51 @@
     border: 1px solid var(--line);
     border-radius: 7px;
     cursor: pointer;
+  }
+  .tabs {
+    display: inline-flex;
+    flex-wrap: wrap;
+    margin-bottom: 0.6rem;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .tabs button {
+    padding: 0.35rem 0.75rem;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+  .tabs button.on {
+    color: var(--bg);
+    background: var(--accent);
+    font-weight: 600;
+  }
+  .autoeq {
+    width: 100%;
+    max-width: 44rem;
+    margin-top: 0.6rem;
+    padding: 0.45rem 0.55rem;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    resize: vertical;
+  }
+  .name {
+    flex: 1;
+    max-width: 20rem;
+    padding: 0.3rem 0.45rem;
+    font-size: 0.85rem;
+    color: var(--text);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 7px;
   }
   .error {
     margin: 0.8rem 0 0;

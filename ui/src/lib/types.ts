@@ -128,6 +128,26 @@ export interface AppStream {
   channel: Channel;
 }
 
+export type BandKind = "low_shelf" | "peaking" | "high_shelf";
+
+export interface EqBand {
+  kind: BandKind;
+  freq: number;
+  q: number;
+  gain: number;
+}
+
+export interface ChannelEq {
+  channel: Channel;
+  bands: EqBand[];
+}
+
+export interface HeadphoneEq {
+  preamp: number;
+  bands: EqBand[];
+  name: string | null;
+}
+
 export interface SonarState {
   available: boolean;
   enabled: boolean;
@@ -137,6 +157,9 @@ export interface SonarState {
   /** -1 all Game … 0 both full … 1 all Chat. */
   chatmix: number;
   apps: AppStream[];
+  /** Per-channel EQ, in Game, Chat, Media, Aux order. */
+  eq: ChannelEq[];
+  headphone: HeadphoneEq;
 }
 
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
@@ -156,7 +179,10 @@ export type Request =
   | { method: "set_sonar_output"; params: { name: string } }
   | { method: "set_channel_volume"; params: { channel: Channel; volume: number } }
   | { method: "set_chat_mix"; params: { balance: number } }
-  | { method: "set_app_channel"; params: { binary: string; channel: Channel } };
+  | { method: "set_app_channel"; params: { binary: string; channel: Channel } }
+  | { method: "set_channel_eq"; params: { channel: Channel; bands: EqBand[] } }
+  | { method: "set_headphone_eq"; params: { eq: HeadphoneEq } }
+  | { method: "import_auto_eq"; params: { text: string; name: string | null } };
 
 export interface RequestFrame {
   id: number;
