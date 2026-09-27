@@ -1,13 +1,16 @@
 //! The PipeWire drop-in that declares Sonar's channels.
 //!
 //! PipeWire hosts the channels itself, so they keep working while gglinux is
-//! not running. Each channel is a loopback: a virtual sink apps play into, and
-//! an outlet stream that plays it into the chosen physical output.
+//! not running. Each channel is a filter chain: a virtual sink apps play into,
+//! the EQ stages, and an outlet stream that plays the result into the chosen
+//! physical output.
 
 use std::path::PathBuf;
 
 use anyhow::{ensure, Result};
-use gg_ipc::Channel;
+use gg_ipc::{BandKind, Channel};
+
+use crate::eq;
 
 /// Sorts after the stock drop-ins.
 pub const FILE_NAME: &str = "60-gglinux-sonar.conf";
@@ -71,13 +74,17 @@ pub fn dropin(output: &str) -> Result<String> {
     );
     for channel in Channel::ALL {
         text.push_str(&format!(
-            r#"    {{ name = libpipewire-module-loopback
+            r#"    {{ name = libpipewire-module-filter-chain
       args = {{
         node.description = "gglinux {label}"
+        audio.channels   = 2
+        audio.position   = [ FL FR ]
+        filter.graph = {{
+{graph}
+        }}
         capture.props = {{
           node.name      = "{sink}"
           media.class    = "Audio/Sink"
-          audio.position = [ FL FR ]
         }}
         playback.props = {{
           node.name          = "{outlet}"
@@ -86,7 +93,6 @@ pub fn dropin(output: &str) -> Result<String> {
           node.dont-fallback = true
           node.passive       = true
           stream.dont-remix  = true
-          audio.position     = [ FL FR ]
         }}
       }}
     }}
@@ -94,19 +100,64 @@ pub fn dropin(output: &str) -> Result<String> {
             label = label(channel),
             sink = sink_name(channel),
             outlet = outlet_name(channel),
+            graph = filter_graph(),
         ));
     }
     text.push_str("]\n");
     Ok(text)
 }
+/// The chain every channel runs: preamp, headphone correction, channel EQ.
+/// Everything starts flat; gglinux sets the controls live.
+fn filter_graph() -> String {
+    let headphone = eq::flat_headphone().bands;
+    let channel = eq::flat_channel();
+    let stages: Vec<(String, gg_ipc::EqBand)> = headphone
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (format!("hp_{}", i + 1), *b))
+        .chain(channel.iter().enumerate().map(|(i, b)| (format!("eq_{}", i + 1), *b)))
+        .collect();
+
+    let mut nodes =
+        vec![r#"            { type = builtin name = pre label = linear control = { "Mult" = 1.0 } }"#.to_string()];
+    for (name, band) in &stages {
+        nodes.push(format!(
+            r#"            {{ type = builtin name = {name} label = {label} control = {{ "Freq" = {freq:.1} "Q" = {q:.3} "Gain" = 0.0 }} }}"#,
+            label = filter_label(band.kind),
+            freq = band.freq,
+            q = band.q,
+        ));
+    }
+    let names: Vec<&str> =
+        std::iter::once("pre").chain(stages.iter().map(|(n, _)| n.as_str())).collect();
+    let links: Vec<String> = names
+        .windows(2)
+        .map(|w| format!(r#"            {{ output = "{}:Out" input = "{}:In" }}"#, w[0], w[1]))
+        .collect();
+    format!(
+        "          nodes = [\n{}\n          ]\n          links = [\n{}\n          ]",
+        nodes.join("\n"),
+        links.join("\n")
+    )
+}
+
+fn filter_label(kind: BandKind) -> &'static str {
+    match kind {
+        BandKind::LowShelf => "bq_lowshelf",
+        BandKind::Peaking => "bq_peaking",
+        BandKind::HighShelf => "bq_highshelf",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn dropin_declares_four_loopbacks_into_the_output() {
+    fn dropin_declares_four_filter_chains_into_the_output() {
         let text = dropin("alsa_output.usb-SteelSeries_Arctis").unwrap();
-        assert_eq!(text.matches("libpipewire-module-loopback").count(), 4);
+        assert_eq!(text.matches("libpipewire-module-filter-chain").count(), 4);
+        assert!(!text.contains("libpipewire-module-loopback"));
         for c in Channel::ALL {
             assert!(text.contains(&format!("node.name      = \"gglinux_{}\"", c.key())), "{text}");
             assert!(text.contains(&format!("node.name          = \"gglinux_{}.out\"", c.key())), "{text}");
@@ -120,6 +171,17 @@ mod tests {
             4,
             "an outlet must never fall back into a channel"
         );
+    }
+
+    #[test]
+    fn every_channel_runs_the_same_chain() {
+        let text = dropin("alsa_output.x").unwrap();
+        assert_eq!(text.matches("name = pre label = linear").count(), 4);
+        assert_eq!(text.matches("name = hp_1 label = bq_lowshelf").count(), 4);
+        assert_eq!(text.matches("name = hp_12 label = bq_highshelf").count(), 4);
+        assert_eq!(text.matches("name = eq_10 label = bq_highshelf").count(), 4);
+        assert_eq!(text.matches(r#"{ output = "hp_12:Out" input = "eq_1:In" }"#).count(), 4);
+        assert_eq!(text.matches("input = ").count(), 4 * 22, "23 stages, 22 links each");
     }
 
     #[test]
