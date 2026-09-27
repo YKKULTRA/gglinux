@@ -139,10 +139,66 @@ pub enum HeadsetPower {
     Unknown,
 }
 
+/// Headset noise control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseMode {
+    Off,
+    Transparency,
+    Anc,
+}
+
+/// 2.4 GHz link profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioMode {
+    Speed,
+    Range,
+}
+
+/// One headset setting to change: `{"setting":"sidetone","value":2}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "setting", content = "value", rename_all = "snake_case")]
+pub enum HeadsetChange {
+    NoiseMode(NoiseMode),
+    /// 1..=10.
+    Transparency(u8),
+    /// 0 off, 1 low, 2 medium, 3 high.
+    Sidetone(u8),
+    /// 1 (muted)..=10.
+    MicVolume(u8),
+    /// 1..=10.
+    MicLed(u8),
+    /// 0 (never), 1, 5, 10, 15, 30 or 60.
+    AutoOffMinutes(u16),
+    RadioMode(RadioMode),
+    /// 0 Flat, 1 Bass Boost, 2 Focus, 3 Smiley, 4 Custom.
+    EqPreset(u8),
+    /// Ten gains in dB, -10.0..=10.0 in 0.5 steps. Selects the Custom preset.
+    EqBands(Vec<f32>),
+}
+
+/// Headset settings. The first group is read from the base station every
+/// second; the second is what gglinux wrote this session, because the device
+/// cannot report it. `None` means not known.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HeadsetControls {
+    pub noise_mode: Option<NoiseMode>,
+    pub transparency: Option<u8>,
+    pub mic_led: Option<u8>,
+    pub mic_muted: Option<bool>,
+    pub auto_off_minutes: Option<u16>,
+    pub radio_mode: Option<RadioMode>,
+    pub sidetone: Option<u8>,
+    pub mic_volume: Option<u8>,
+    pub eq_preset: Option<u8>,
+    pub eq_bands: Option<Vec<f32>>,
+}
+
 /// What the daemon knows about the headset and its base station.
 ///
 /// Unlike [`MouseState`], these are readings: the base station reports them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeadsetState {
     /// Whether the base station is plugged in and open.
     pub connected: bool,
@@ -154,6 +210,7 @@ pub struct HeadsetState {
     pub screen: ScreenSettings,
     /// Whether gglinux has the screen blanked right now.
     pub screen_dark: bool,
+    pub controls: HeadsetControls,
 }
 
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
@@ -195,6 +252,8 @@ pub enum Request {
     GetHeadsetState,
     /// Replace the base-station screen settings.
     SetHeadsetScreen { settings: ScreenSettings },
+    /// Change one headset setting and save it on the base station.
+    SetHeadset { change: HeadsetChange },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -358,6 +417,7 @@ mod tests {
             spare_battery: None,
             screen: ScreenSettings::default(),
             screen_dark: true,
+            controls: HeadsetControls::default(),
         };
         let json = serde_json::to_string(&ServerMessage::notify(Event::HeadsetChanged { state })).unwrap();
         assert!(json.contains(r#""event":"headset_changed""#), "{json}");
@@ -376,5 +436,34 @@ mod tests {
         assert!(ScreenSettings { brightness: Some(0), ..ok }.validate().is_err(), "0 is not off");
         assert!(ScreenSettings { brightness: Some(11), ..ok }.validate().is_err());
         assert!(ScreenSettings { brightness: Some(1), lit_seconds: 600, ..ok }.validate().is_ok());
+    }
+
+    #[test]
+    fn headset_changes_parse_from_their_documented_json() {
+        let cases = [
+            (r#"{"setting":"noise_mode","value":"anc"}"#, HeadsetChange::NoiseMode(NoiseMode::Anc)),
+            (r#"{"setting":"sidetone","value":2}"#, HeadsetChange::Sidetone(2)),
+            (r#"{"setting":"auto_off_minutes","value":0}"#, HeadsetChange::AutoOffMinutes(0)),
+            (r#"{"setting":"radio_mode","value":"range"}"#, HeadsetChange::RadioMode(RadioMode::Range)),
+            (
+                r#"{"setting":"eq_bands","value":[0,0,0,0,0,0,0,0,0,1.5]}"#,
+                HeadsetChange::EqBands(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.5]),
+            ),
+        ];
+        for (json, expected) in cases {
+            let line = format!(r#"{{"id":1,"req":{{"method":"set_headset","params":{{"change":{json}}}}}}}"#);
+            match serde_json::from_str::<RequestFrame>(&line).unwrap().req {
+                Request::SetHeadset { change } => assert_eq!(change, expected, "{json}"),
+                other => panic!("{json} parsed as {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_controls_serialize_as_null() {
+        let json = serde_json::to_string(&HeadsetControls::default()).unwrap();
+        assert!(json.contains(r#""sidetone":null"#), "{json}");
+        assert!(json.contains(r#""noise_mode":null"#), "{json}");
+        assert!(json.contains(r#""eq_bands":null"#), "{json}");
     }
 }

@@ -319,6 +319,7 @@ fn snapshot(state: &State) -> HeadsetState {
         spare_battery: status.and_then(|s| s.spare_battery),
         screen: state.settings,
         screen_dark: connected && state.screen.is_dark(),
+        controls: gg_ipc::HeadsetControls::default(),
     }
 }
 

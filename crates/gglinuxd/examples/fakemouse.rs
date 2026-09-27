@@ -28,8 +28,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    BatteryState, DeviceInfo, DeviceKind, DpiStage, Event, HeadsetPower, HeadsetState, InterfaceInfo,
-    MouseSettings, MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage,
+    BatteryState, DeviceInfo, DeviceKind, DpiStage, Event, HeadsetChange, HeadsetControls,
+    HeadsetPower, HeadsetState, InterfaceInfo, MouseSettings, MouseState, Request, RequestFrame,
+    ResponseData, ScreenSettings, ServerMessage,
 };
 
 /// How often to push a `mouse_battery` notification.
@@ -40,6 +41,8 @@ struct Fake {
     applied: Option<MouseSettings>,
     /// Screen settings as last sent, echoed back unvalidated.
     screen: ScreenSettings,
+    /// Headset settings as last sent, echoed back as the device would report them.
+    controls: HeadsetControls,
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
@@ -79,6 +82,7 @@ fn main() -> Result<()> {
         battery: Some(BatteryState { level, charging }),
         applied: None,
         screen: ScreenSettings::default(),
+        controls: HeadsetControls::default(),
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -196,6 +200,10 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.screen = settings;
             ResponseData::Success
         }
+        Request::SetHeadset { change } => {
+            fake_apply(&mut s.controls, change);
+            ResponseData::Success
+        }
     }
 }
 
@@ -221,6 +229,25 @@ fn headset_state(s: &Fake) -> HeadsetState {
         spare_battery: Some(100),
         screen: s.screen,
         screen_dark: false,
+        controls: s.controls.clone(),
+    }
+}
+
+/// Echo a change into the fake's controls, as the real device would report it.
+fn fake_apply(c: &mut HeadsetControls, change: HeadsetChange) {
+    match change {
+        HeadsetChange::NoiseMode(m) => c.noise_mode = Some(m),
+        HeadsetChange::Transparency(v) => c.transparency = Some(v),
+        HeadsetChange::Sidetone(v) => c.sidetone = Some(v),
+        HeadsetChange::MicVolume(v) => c.mic_volume = Some(v),
+        HeadsetChange::MicLed(v) => c.mic_led = Some(v),
+        HeadsetChange::AutoOffMinutes(v) => c.auto_off_minutes = Some(v),
+        HeadsetChange::RadioMode(m) => c.radio_mode = Some(m),
+        HeadsetChange::EqPreset(p) => c.eq_preset = Some(p),
+        HeadsetChange::EqBands(b) => {
+            c.eq_bands = Some(b);
+            c.eq_preset = Some(4);
+        }
     }
 }
 
@@ -252,6 +279,7 @@ fn method_name(req: &Request) -> &'static str {
         Request::SaveMouse => "save_mouse",
         Request::GetHeadsetState => "get_headset_state",
         Request::SetHeadsetScreen { .. } => "set_headset_screen",
+        Request::SetHeadset { .. } => "set_headset",
     }
 }
 
@@ -273,6 +301,7 @@ fn describe(req: &Request) -> String {
             "set_headset_screen protect={} lit={}s brightness={:?}",
             settings.protect, settings.lit_seconds, settings.brightness
         ),
+        Request::SetHeadset { change } => format!("set_headset {change:?}"),
         other => method_name(other).to_string(),
     }
 }
