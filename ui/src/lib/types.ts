@@ -63,6 +63,35 @@ export interface ScreenSettings {
 
 export type HeadsetPower = "offline" | "charging" | "online" | "unknown";
 
+export type NoiseMode = "off" | "transparency" | "anc";
+export type RadioMode = "speed" | "range";
+
+/** One setting change; mirrors gg-ipc HeadsetChange. */
+export type HeadsetChange =
+  | { setting: "noise_mode"; value: NoiseMode }
+  | { setting: "transparency"; value: number }
+  | { setting: "sidetone"; value: number }
+  | { setting: "mic_volume"; value: number }
+  | { setting: "mic_led"; value: number }
+  | { setting: "auto_off_minutes"; value: number }
+  | { setting: "radio_mode"; value: RadioMode }
+  | { setting: "eq_preset"; value: number }
+  | { setting: "eq_bands"; value: number[] };
+
+/** Read-back values first, then what gglinux wrote (the device can't report those). */
+export interface HeadsetControls {
+  noise_mode: NoiseMode | null;
+  transparency: number | null;
+  mic_led: number | null;
+  mic_muted: boolean | null;
+  auto_off_minutes: number | null;
+  radio_mode: RadioMode | null;
+  sidetone: number | null;
+  mic_volume: number | null;
+  eq_preset: number | null;
+  eq_bands: number[] | null;
+}
+
 /** Readings, unlike MouseState: the base station reports these. */
 export interface HeadsetState {
   connected: boolean;
@@ -74,6 +103,7 @@ export interface HeadsetState {
   screen: ScreenSettings;
   /** Whether gglinux has the screen blanked right now. */
   screen_dark: boolean;
+  controls: HeadsetControls;
 }
 
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
@@ -86,7 +116,8 @@ export type Request =
   | { method: "set_mouse_buttons"; params: { actions: string[]; save: boolean } }
   | { method: "save_mouse" }
   | { method: "get_headset_state" }
-  | { method: "set_headset_screen"; params: { settings: ScreenSettings } };
+  | { method: "set_headset_screen"; params: { settings: ScreenSettings } }
+  | { method: "set_headset"; params: { change: HeadsetChange } };
 
 export interface RequestFrame {
   id: number;

@@ -10,6 +10,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   DeviceInfo,
   DpiStage,
+  HeadsetChange,
   HeadsetState,
   MouseState,
   Request,
@@ -131,6 +132,12 @@ class Daemon {
 
   async setHeadsetScreen(settings: ScreenSettings): Promise<void> {
     const res = await this.request({ method: "set_headset_screen", params: { settings } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getHeadsetState();
+  }
+
+  async setHeadset(change: HeadsetChange): Promise<void> {
+    const res = await this.request({ method: "set_headset", params: { change } });
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
     await this.getHeadsetState();
   }
