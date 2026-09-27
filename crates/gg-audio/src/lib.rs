@@ -7,6 +7,7 @@
 //! fake.
 
 pub mod config;
+pub mod eq;
 pub mod mix;
 pub mod rules;
 pub mod tools;

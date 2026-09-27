@@ -61,6 +61,11 @@ pub fn set_default(id: u32) -> Vec<String> {
     argv(&["wpctl", "set-default", &id.to_string()])
 }
 
+/// Set filter controls on a node (`pw-cli set-param <id> Props <props>`).
+pub fn set_params(id: u32, props: &str) -> Vec<String> {
+    argv(&["pw-cli", "set-param", &id.to_string(), "Props", props])
+}
+
 /// Restart PipeWire so it re-reads its config: a 1–2 s gap in all audio.
 pub fn restart_pipewire() -> Vec<String> {
     argv(&["systemctl", "--user", "restart", "pipewire.service", "pipewire-pulse.service", "wireplumber.service"])
@@ -75,6 +80,10 @@ mod tests {
         assert_eq!(set_volume(57, 1.7), ["wpctl", "set-volume", "57", "1.000"], "clamped");
         assert_eq!(set_target(99, "gglinux_chat"), ["pw-metadata", "99", "target.object", "gglinux_chat"]);
         assert_eq!(set_default(20), ["wpctl", "set-default", "20"]);
+        assert_eq!(
+            set_params(21, "{ params = [ ] }"),
+            ["pw-cli", "set-param", "21", "Props", "{ params = [ ] }"]
+        );
         assert_eq!(
             restart_pipewire(),
             ["systemctl", "--user", "restart", "pipewire.service", "pipewire-pulse.service", "wireplumber.service"]
