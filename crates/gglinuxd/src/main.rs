@@ -305,9 +305,18 @@ async fn dispatch(
                 .send::<()>(|reply| SonarCommand::ImportAutoEq { text, name, reply })
                 .await,
         ),
-        Request::SetMicInput { .. } | Request::SetMicSettings { .. } | Request::SetMicVolume { .. } => {
-            ResponseData::Error { message: "the mic is not wired up yet".into() }
-        }
+        Request::SetMicInput { name } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetMicInput { name, reply }).await,
+        ),
+        Request::SetMicSettings { settings } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetMicSettings { settings, reply })
+                .await,
+        ),
+        Request::SetMicVolume { volume } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetMicVolume { volume, reply }).await,
+        ),
     };
     ServerMessage::response(frame.id, result)
 }
