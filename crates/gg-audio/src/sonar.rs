@@ -120,6 +120,9 @@ impl<T: PwTools> Sonar<T> {
                     }
                 })
                 .collect(),
+            // Filled in by the EQ work; empty until then.
+            eq: Vec::new(),
+            headphone: gg_ipc::HeadphoneEq { preamp: 0.0, bands: Vec::new(), name: None },
         }
     }
 

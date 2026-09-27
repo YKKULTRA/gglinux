@@ -290,6 +290,9 @@ async fn dispatch(
                 .send::<()>(|reply| SonarCommand::SetAppChannel { binary, channel, reply })
                 .await,
         ),
+        Request::SetChannelEq { .. } | Request::SetHeadphoneEq { .. } | Request::ImportAutoEq { .. } => {
+            ResponseData::Error { message: "EQ is not wired up yet".into() }
+        }
     };
     ServerMessage::response(frame.id, result)
 }

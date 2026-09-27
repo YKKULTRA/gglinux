@@ -265,6 +265,44 @@ pub struct AppStream {
     pub channel: Channel,
 }
 
+/// The shape of an EQ band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BandKind {
+    LowShelf,
+    Peaking,
+    HighShelf,
+}
+
+/// One parametric EQ band.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EqBand {
+    pub kind: BandKind,
+    /// Centre (peaking) or corner (shelf) frequency, Hz.
+    pub freq: f32,
+    pub q: f32,
+    /// dB.
+    pub gain: f32,
+}
+
+/// One channel's EQ.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelEq {
+    pub channel: Channel,
+    pub bands: Vec<EqBand>,
+}
+
+/// Headphone correction, shared by every channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeadphoneEq {
+    /// dB applied before the bands (AutoEQ's "Preamp").
+    pub preamp: f32,
+    /// Low shelf, ten peaking bands, high shelf.
+    pub bands: Vec<EqBand>,
+    /// What it corrects, e.g. an AutoEQ headphone name.
+    pub name: Option<String>,
+}
+
 /// Sonar as the daemon sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SonarState {
@@ -278,6 +316,9 @@ pub struct SonarState {
     /// -1.0 all Game … 0.0 both full … 1.0 all Chat.
     pub chatmix: f32,
     pub apps: Vec<AppStream>,
+    /// Per-channel EQ, in `Channel::ALL` order.
+    pub eq: Vec<ChannelEq>,
+    pub headphone: HeadphoneEq,
 }
 
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
@@ -333,6 +374,12 @@ pub enum Request {
     SetChatMix { balance: f32 },
     /// Route an app (by `application.process.binary`) to a channel, and remember it.
     SetAppChannel { binary: String, channel: Channel },
+    /// Replace a channel's EQ bands.
+    SetChannelEq { channel: Channel, bands: Vec<EqBand> },
+    /// Replace the headphone correction.
+    SetHeadphoneEq { eq: HeadphoneEq },
+    /// Parse an AutoEQ ParametricEQ.txt and make it the headphone correction.
+    ImportAutoEq { text: String, name: Option<String> },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -575,5 +622,32 @@ mod tests {
         let keys: Vec<_> = Channel::ALL.iter().map(|c| c.key()).collect();
         assert_eq!(keys, ["game", "chat", "media", "aux"]);
         assert_eq!(serde_json::to_string(&Channel::Media).unwrap(), r#""media""#);
+    }
+
+    #[test]
+    fn eq_requests_parse_from_their_documented_json() {
+        let band = r#"{"kind":"peaking","freq":250.0,"q":1.0,"gain":-3.5}"#;
+        let set = format!(
+            r#"{{"id":1,"req":{{"method":"set_channel_eq","params":{{"channel":"game","bands":[{band}]}}}}}}"#
+        );
+        match serde_json::from_str::<RequestFrame>(&set).unwrap().req {
+            Request::SetChannelEq { channel, bands } => {
+                assert_eq!(channel, Channel::Game);
+                assert_eq!(bands, vec![EqBand { kind: BandKind::Peaking, freq: 250.0, q: 1.0, gain: -3.5 }]);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        for line in [
+            r#"{"id":2,"req":{"method":"import_auto_eq","params":{"text":"Preamp: -1 dB","name":"HD 650"}}}"#,
+            r#"{"id":3,"req":{"method":"set_headphone_eq","params":{"eq":{"preamp":0.0,"bands":[],"name":null}}}}"#,
+        ] {
+            serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+        }
+    }
+
+    #[test]
+    fn band_kinds_are_snake_case() {
+        assert_eq!(serde_json::to_string(&BandKind::LowShelf).unwrap(), r#""low_shelf""#);
+        assert_eq!(serde_json::to_string(&BandKind::HighShelf).unwrap(), r#""high_shelf""#);
     }
 }

@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    AppStream, AudioOutput, BatteryState, Channel, ChannelState, DeviceInfo, DeviceKind, DpiStage,
-    Event, HeadsetChange, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, MouseSettings,
+    AppStream, AudioOutput, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
+    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, MouseSettings,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
@@ -232,6 +232,20 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             }
             ResponseData::Success
         }
+        Request::SetChannelEq { channel, bands } => {
+            if let Some(c) = s.sonar.eq.iter_mut().find(|c| c.channel == channel) {
+                c.bands = bands;
+            }
+            ResponseData::Success
+        }
+        Request::SetHeadphoneEq { eq } => {
+            s.sonar.headphone = eq;
+            ResponseData::Success
+        }
+        Request::ImportAutoEq { name, .. } => {
+            s.sonar.headphone.name = name;
+            ResponseData::Success
+        }
     }
 }
 
@@ -280,7 +294,27 @@ fn fake_sonar() -> SonarState {
             AppStream { id: 90, name: "Discord".into(), binary: Some("discord".into()), channel: Channel::Chat },
             AppStream { id: 91, name: "Firefox".into(), binary: Some("firefox".into()), channel: Channel::Media },
         ],
+        eq: Channel::ALL.iter().map(|&channel| ChannelEq { channel, bands: fake_bands(10) }).collect(),
+        headphone: HeadphoneEq { preamp: 0.0, bands: fake_bands(12), name: None },
     }
+}
+
+/// Flat bands shaped like the daemon's: a low shelf, peaks, a high shelf.
+fn fake_bands(n: usize) -> Vec<EqBand> {
+    (0..n)
+        .map(|i| EqBand {
+            kind: if i == 0 {
+                BandKind::LowShelf
+            } else if i == n - 1 {
+                BandKind::HighShelf
+            } else {
+                BandKind::Peaking
+            },
+            freq: 31.25 * 2f32.powi(i as i32),
+            q: 1.0,
+            gain: 0.0,
+        })
+        .collect()
 }
 
 /// Echo a change into the fake's controls, as the real device would report it.
@@ -336,6 +370,9 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetChannelVolume { .. } => "set_channel_volume",
         Request::SetChatMix { .. } => "set_chat_mix",
         Request::SetAppChannel { .. } => "set_app_channel",
+        Request::SetChannelEq { .. } => "set_channel_eq",
+        Request::SetHeadphoneEq { .. } => "set_headphone_eq",
+        Request::ImportAutoEq { .. } => "import_auto_eq",
     }
 }
 
