@@ -46,16 +46,16 @@ const READ_SIZE: usize = 64;
 /// headset itself is off, since the base is what we are talking to.
 const READ_TIMEOUT_MS: i32 = 300;
 
-/// Upper bound on reports discarded by [`Headset::drain`] in one go.
+/// Upper bound on queued reports sorted before each request.
 const MAX_DRAIN_REPORTS: usize = 16;
 
 /// How long to keep reading while hunting for a command's reply.
 ///
-/// The base station emits an unsolicited report roughly every 16 ms whether or
-/// not anything was asked of it, so the reply is never the only report in flight
-/// and is usually not the first. This has to be a deadline rather than a count of
-/// reports: a fixed budget is spent by whatever the stream happens to be emitting,
-/// which makes the read succeed or fail depending on timing.
+/// Unsolicited reports — a turning volume wheel sends one every ~16 ms — can land
+/// ahead of the reply, so it is not reliably the first report to arrive. This has
+/// to be a deadline rather than a count of reports: a fixed budget is spent by
+/// whatever the stream happens to be emitting, which makes the read succeed or
+/// fail depending on timing.
 const REPLY_DEADLINE: Duration = Duration::from_millis(400);
 
 /// Backstop against a device streaming faster than we can drain.
@@ -71,6 +71,17 @@ const REQUEST_ATTEMPTS: usize = 3;
 /// An open handle to the base station's control interface.
 pub struct Headset {
     device: HidDevice,
+}
+
+/// One polling round: see [`Headset::poll`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Poll {
+    /// `None` if the base station did not answer in time.
+    pub status: Option<Status>,
+    /// Master volume as attenuation, 0 loudest; `None` if unanswered.
+    pub volume: Option<u8>,
+    /// Unsolicited `07 ..` reports read along the way, oldest first.
+    pub events: Vec<Vec<u8>>,
 }
 
 impl Headset {
@@ -125,73 +136,89 @@ impl Headset {
         Ok(())
     }
 
-    /// Discard input reports queued before we asked for anything.
-    ///
-    /// The protocol carries no correlation id, so a report left over from an
-    /// earlier exchange would otherwise be decoded as the answer to this one.
-    fn drain(&self) {
-        let mut buf = [0u8; READ_SIZE];
-        for _ in 0..MAX_DRAIN_REPORTS {
-            match self.device.read_timeout(&mut buf, 0) {
-                Ok(n) if n > 0 => continue,
-                _ => break,
-            }
-        }
+    /// Send a frame payload as a feature report. Frames are 1024 bytes, far past
+    /// the 64-byte output reports [`Headset::send`] writes.
+    fn send_feature(&self, payload: &[u8]) -> Result<()> {
+        let mut buf = Vec::with_capacity(payload.len() + 1);
+        buf.push(REPORT_TX);
+        buf.extend_from_slice(payload);
+        self.device
+            .send_feature_report(&buf)
+            .with_context(|| format!("writing frame command 0x{:02X}", payload[0]))
     }
 
-    /// Read one input report. `None` on timeout.
-    fn recv(&self) -> Result<Option<Vec<u8>>> {
+    /// Read one input report, waiting at most `timeout_ms`. `None` on timeout.
+    pub fn read_event_timeout(&self, timeout_ms: i32) -> Result<Option<Vec<u8>>> {
         let mut buf = [0u8; READ_SIZE];
         let n = self
             .device
-            .read_timeout(&mut buf, READ_TIMEOUT_MS)
-            .context("reading device reply")?;
+            .read_timeout(&mut buf, timeout_ms)
+            .context("reading from the base station")?;
         Ok((n > 0).then(|| buf[..n].to_vec()))
     }
 
-    /// Query the base station: battery for both packs, power state, and the
-    /// settings it reports back.
-    ///
-    /// Returns `None` if the base sent nothing recognisable before
-    /// [`MAX_STATUS_ATTEMPTS`] reports went by.
-    pub fn status(&self) -> Result<Option<Status>> {
-        for attempt in 1..=REQUEST_ATTEMPTS {
-            if let Some(status) = self.status_once()? {
-                if attempt > 1 {
-                    debug!(attempt, "status needed a retry");
-                }
-                return Ok(Some(status));
-            }
-        }
-        debug!(attempts = REQUEST_ATTEMPTS, "no status reply");
-        Ok(None)
-    }
-
-    /// One request/reply exchange. `None` if no status block arrived in time.
-    fn status_once(&self) -> Result<Option<Status>> {
-        self.drain();
-        self.send(&proto::status_packet())?;
-
-        // Read past the ambient interrupt stream until the status block turns up.
-        // Matching on the opcode is what makes this safe -- without it the next
-        // report to arrive, almost always an unrelated one, would be decoded as a
-        // status block and yield plausible but invented values.
-        let deadline = Instant::now() + REPLY_DEADLINE;
-        let mut skipped = 0usize;
-        while Instant::now() < deadline && skipped < MAX_REPLY_REPORTS {
-            let Some(report) = self.recv()? else { continue };
-            if let Some(status) = Status::decode(&report) {
-                return Ok(Some(status));
-            }
-            skipped += 1;
-        }
-        Ok(None)
-    }
-
     /// Read one input report without sending anything, for the event stream
-    /// (ChatMix dial, volume, ANC changes made on the device itself).
+    /// (volume, ANC changes made on the device itself).
     pub fn read_event(&self) -> Result<Option<Vec<u8>>> {
-        self.recv()
+        self.read_event_timeout(READ_TIMEOUT_MS)
+    }
+
+    /// Query the base station: battery for both packs, power state, and the
+    /// settings it reports back. `None` if it never answered.
+    pub fn status(&self) -> Result<Option<Status>> {
+        let reply = self.request(&proto::status_packet(), &mut Vec::new())?;
+        Ok(reply.and_then(|r| Status::decode(&r)))
+    }
+
+    /// Status and volume in one round, plus every unsolicited report that arrived
+    /// meanwhile — which [`Headset::status`] throws away, and a caller watching the
+    /// device cannot afford to lose.
+    pub fn poll(&self) -> Result<Poll> {
+        let mut events = Vec::new();
+        let status = self
+            .request(&proto::status_packet(), &mut events)?
+            .and_then(|r| Status::decode(&r));
+        let volume = self
+            .request(&proto::audio_settings_packet(), &mut events)?
+            .and_then(|r| proto::decode_volume(&r));
+        Ok(Poll { status, volume, events })
+    }
+
+    /// Send a request and return its reply, filing events that arrive around it.
+    ///
+    /// The protocol carries no correlation id, so a reply is recognised by the
+    /// opcode it echoes. Reports already queued predate the request and are sorted
+    /// first, so a leftover reply to an earlier exchange is never taken for this
+    /// one. Nothing acknowledges a write, so a request that drew no reply is sent
+    /// again: reading longer cannot recover one the base station never acted on.
+    fn request(&self, payload: &[u8], events: &mut Vec<Vec<u8>>) -> Result<Option<Vec<u8>>> {
+        let opcode = payload[0];
+        for attempt in 1..=REQUEST_ATTEMPTS {
+            for _ in 0..MAX_DRAIN_REPORTS {
+                match self.read_event_timeout(0)? {
+                    Some(report) => {
+                        proto::sort_report(report, None, events);
+                    }
+                    None => break,
+                }
+            }
+            self.send(payload)?;
+
+            let deadline = Instant::now() + REPLY_DEADLINE;
+            let mut seen = 0usize;
+            while Instant::now() < deadline && seen < MAX_REPLY_REPORTS {
+                let Some(report) = self.read_event_timeout(READ_TIMEOUT_MS)? else { continue };
+                seen += 1;
+                if let Some(reply) = proto::sort_report(report, Some(opcode), events) {
+                    if attempt > 1 {
+                        debug!(attempt, opcode, "request needed a retry");
+                    }
+                    return Ok(Some(reply));
+                }
+            }
+        }
+        debug!(attempts = REQUEST_ATTEMPTS, opcode, "no reply");
+        Ok(None)
     }
 
     /// Send the vendor tool's init sequence.
@@ -262,5 +289,24 @@ impl Headset {
     /// Master volume as attenuation: 0 is loudest, 56 silent.
     pub fn set_volume(&self, attenuation: u8) -> Result<()> {
         self.send(&proto::volume_packet(attenuation)?)
+    }
+
+    /// Blank the screen with an all-black frame. Brightness cannot do this — its
+    /// floor is still lit — and an unlit OLED pixel does not wear.
+    pub fn oled_blank(&self) -> Result<()> {
+        for strip in proto::oled_blank_packets() {
+            self.send_feature(&strip)?;
+        }
+        Ok(())
+    }
+
+    /// Hand the screen back to the firmware's own display.
+    pub fn oled_show_stock(&self) -> Result<()> {
+        self.send(&proto::oled_return_to_ui_packet())
+    }
+
+    /// OLED brightness, 1..=10. Not readable back, so callers track what they set.
+    pub fn set_oled_brightness(&self, level: u8) -> Result<()> {
+        self.send(&proto::oled_brightness_packet(level)?)
     }
 }

@@ -7,9 +7,10 @@
 //!
 //! **Replies come back on report `0x06` too**, echoing the opcode, which is not
 //! what the reference implementations describe (they document `07 b0`). Report
-//! `0x07` carries the *unsolicited* stream instead — the base station emits
-//! `07 25 <n>` roughly every 16 ms whether or not anything was asked of it.
-//! Verified on hardware 2026-08-12; see `docs/PROTOCOLS.md`.
+//! `0x07` carries the *unsolicited* stream instead: `07 25 <attenuation>` whenever
+//! the volume wheel moves — and only then — plus other device-side changes. The
+//! steady ~16 ms `07 25` stream seen on 2026-08-12 was a wheel in motion, not a
+//! periodic report. Verified on hardware; see `docs/PROTOCOLS.md`.
 //!
 //! Decoding therefore keys on the opcode rather than the report id, and accepts
 //! either id: matching on arrival order instead would decode an ambient interrupt
@@ -21,6 +22,7 @@ use anyhow::{bail, ensure, Result};
 
 const CMD_SAVE: u8 = 0x09;
 const CMD_STATUS: u8 = 0xb0;
+const CMD_AUDIO_SETTINGS: u8 = 0x20;
 const CMD_VOLUME: u8 = 0x25;
 const CMD_ANALOG_GAIN: u8 = 0x27;
 const CMD_EQ_PRESET: u8 = 0x2e;
@@ -28,6 +30,9 @@ const CMD_EQ_BANDS: u8 = 0x33;
 const CMD_MIC_VOLUME: u8 = 0x37;
 const CMD_SIDETONE: u8 = 0x39;
 const CMD_CHATMIX: u8 = 0x49;
+const CMD_OLED_BRIGHTNESS: u8 = 0x85;
+const CMD_OLED_FRAME: u8 = 0x93;
+const CMD_OLED_RETURN_TO_UI: u8 = 0x95;
 const CMD_TRANSPARENCY: u8 = 0xb9;
 const CMD_ANC: u8 = 0xbd;
 const CMD_MIC_LED: u8 = 0xbf;
@@ -51,6 +56,22 @@ pub const VOLUME_ATTEN_MAX: u8 = 56;
 
 /// The battery gauge reports eighths, not percent.
 const BATTERY_STEPS: u8 = 8;
+
+/// Report id of the unsolicited event stream (commands and replies use `0x06`).
+pub const REPORT_EVENT: u8 = 0x07;
+
+/// Bytes in one OLED frame report after its report id. Frame reports are
+/// 1024-byte *feature* reports, unlike the 64-byte output reports commands use.
+pub const OLED_FRAME_PAYLOAD: usize = 1023;
+
+/// Widest strip one frame report can carry, and the panel height.
+const OLED_STRIP_WIDTH: u8 = 64;
+const OLED_HEIGHT: u8 = 64;
+
+/// OLED brightness range. There is no "off": 0 is refused by ggoled and behaves
+/// like 1 on this unit (verified 2026-09-27) — blank with a black frame instead.
+pub const OLED_BRIGHTNESS_MIN: u8 = 1;
+pub const OLED_BRIGHTNESS_MAX: u8 = 10;
 
 // --- setters ------------------------------------------------------------------
 
@@ -167,6 +188,84 @@ pub fn volume_packet(attenuation: u8) -> Result<Vec<u8>> {
         "volume attenuation {attenuation} out of range (0..={VOLUME_ATTEN_MAX})"
     );
     Ok(vec![CMD_VOLUME, attenuation])
+}
+
+/// Ask for the audio settings, whose reply carries the master volume.
+pub fn audio_settings_packet() -> Vec<u8> {
+    vec![CMD_AUDIO_SETTINGS]
+}
+
+/// Master volume from a `06 20` reply, as attenuation (0 loudest, 56 silent).
+///
+/// Byte 2 is the audio input; byte 3 is the volume, on the same scale as the
+/// `07 25` event, so it is known before the wheel first moves.
+pub fn decode_volume(report: &[u8]) -> Option<u8> {
+    match report {
+        [_, CMD_AUDIO_SETTINGS, _, atten, ..] if *atten <= VOLUME_ATTEN_MAX => Some(*atten),
+        _ => None,
+    }
+}
+
+/// The volume carried by a `07 25 <attenuation>` event.
+pub fn decode_volume_event(report: &[u8]) -> Option<u8> {
+    match report {
+        [REPORT_EVENT, CMD_VOLUME, atten, ..] => Some(*atten),
+        _ => None,
+    }
+}
+
+/// OLED brightness, [`OLED_BRIGHTNESS_MIN`]..=[`OLED_BRIGHTNESS_MAX`].
+pub fn oled_brightness_packet(level: u8) -> Result<Vec<u8>> {
+    ensure!(
+        (OLED_BRIGHTNESS_MIN..=OLED_BRIGHTNESS_MAX).contains(&level),
+        "screen brightness {level} out of range ({OLED_BRIGHTNESS_MIN}..={OLED_BRIGHTNESS_MAX}) \
+         — the lowest level is still lit, so there is no brightness that turns it off"
+    );
+    Ok(vec![CMD_OLED_BRIGHTNESS, level])
+}
+
+/// Hand the screen back to the firmware's own display.
+pub fn oled_return_to_ui_packet() -> Vec<u8> {
+    vec![CMD_OLED_RETURN_TO_UI]
+}
+
+/// The two strips of an all-black frame, each the payload of one frame report.
+///
+/// Frames go out in strips at most 64 px wide — `93 <x> 00 <width> <height>`, then
+/// the pixels column-major, LSB at the top — and here every pixel is off, which is
+/// the point: an unlit OLED pixel does not wear. One frame holds until something
+/// makes the firmware redraw (a volume change does).
+pub fn oled_blank_packets() -> [Vec<u8>; 2] {
+    [0, OLED_STRIP_WIDTH].map(|x| {
+        let mut packet = vec![0u8; OLED_FRAME_PAYLOAD];
+        packet[..5].copy_from_slice(&[CMD_OLED_FRAME, x, 0, OLED_STRIP_WIDTH, OLED_HEIGHT]);
+        packet
+    })
+}
+
+/// Whether a report came from the unsolicited event stream.
+pub fn is_event(report: &[u8]) -> bool {
+    report.len() >= 2 && report[0] == REPORT_EVENT
+}
+
+/// Sort one report read while waiting for the reply to `awaiting`.
+///
+/// Returns the report if it is that reply. Otherwise an event is appended to
+/// `events` and anything else — a late reply to an earlier request — is dropped,
+/// so it can neither be mistaken for this reply nor for something that happened
+/// on the device.
+pub fn sort_report(
+    report: Vec<u8>,
+    awaiting: Option<u8>,
+    events: &mut Vec<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if awaiting.is_some() && report.get(1) == awaiting.as_ref() {
+        return Some(report);
+    }
+    if is_event(&report) {
+        events.push(report);
+    }
+    None
 }
 
 /// The init sequence loteran sends before applying settings.
@@ -479,5 +578,65 @@ mod tests {
         assert_eq!(battery_percent(0), 0);
         assert_eq!(battery_percent(8), 100);
         assert_eq!(battery_percent(200), 100, "a bogus gauge must not exceed 100%");
+    }
+
+    #[test]
+    fn oled_brightness_is_one_to_ten() {
+        assert_eq!(oled_brightness_packet(1).unwrap(), vec![0x85, 0x01]);
+        assert_eq!(oled_brightness_packet(10).unwrap(), vec![0x85, 0x0a]);
+        assert!(oled_brightness_packet(0).is_err(), "0 does not turn the screen off");
+        assert!(oled_brightness_packet(11).is_err());
+        assert_eq!(oled_return_to_ui_packet(), vec![0x95]);
+        assert_eq!(audio_settings_packet(), vec![0x20]);
+    }
+
+    /// Two 64-px strips; with the report id each is a 1024-byte feature report.
+    #[test]
+    fn oled_blank_is_two_all_black_strips() {
+        let [left, right] = oled_blank_packets();
+        for (strip, x) in [(&left, 0x00), (&right, 0x40)] {
+            assert_eq!(strip.len(), OLED_FRAME_PAYLOAD);
+            assert_eq!(&strip[..5], &[0x93, x, 0x00, 0x40, 0x40]);
+            assert!(strip[5..].iter().all(|&b| b == 0), "every pixel off");
+        }
+        assert_eq!(OLED_FRAME_PAYLOAD + 1, 1024);
+    }
+
+    #[test]
+    fn volume_decodes_from_both_the_reply_and_the_event() {
+        // Captured on this unit 2026-09-27: 06 20 <input> <volume> ...
+        let reply = [0x06, 0x20, 0x00, 0x06, 0x01, 0x00, 0x00, 0x14, 0x14];
+        assert_eq!(decode_volume(&reply), Some(6));
+        assert_eq!(decode_volume(&[0x06, 0x20, 0x00, 57]), None, "past silent is not a volume");
+        assert_eq!(decode_volume(&[0x06, 0xb0, 0x00, 0x06]), None);
+        assert_eq!(decode_volume_event(&[0x07, 0x25, 0x07]), Some(7));
+        assert_eq!(decode_volume_event(&[0x06, 0x25, 0x07]), None, "a reply, not an event");
+    }
+
+    #[test]
+    fn events_that_arrive_before_a_reply_are_kept() {
+        let mut events = Vec::new();
+        let wheel = vec![0x07, 0x25, 0x06];
+        let status = vec![0x06, 0xb0, 0x00, 0x00, 0x01];
+        assert_eq!(sort_report(wheel.clone(), Some(0xb0), &mut events), None);
+        assert_eq!(sort_report(status.clone(), Some(0xb0), &mut events), Some(status));
+        assert_eq!(events, vec![wheel]);
+    }
+
+    #[test]
+    fn a_late_reply_to_another_request_is_dropped() {
+        let mut events = Vec::new();
+        let stale_status = vec![0x06, 0xb0, 0x00, 0x00, 0x01];
+        assert_eq!(sort_report(stale_status, Some(0x20), &mut events), None);
+        assert!(events.is_empty(), "a stale reply must not wake the screen");
+    }
+
+    #[test]
+    fn queued_reports_sort_with_nothing_awaited() {
+        let mut events = Vec::new();
+        assert_eq!(sort_report(vec![0x06, 0x20, 0x00, 0x06], None, &mut events), None);
+        assert_eq!(sort_report(vec![0x07, 0xbd, 0x01], None, &mut events), None);
+        assert_eq!(sort_report(vec![0x07], None, &mut events), None, "too short to be an event");
+        assert_eq!(events, vec![vec![0x07, 0xbd, 0x01]]);
     }
 }
