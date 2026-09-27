@@ -9,6 +9,7 @@
 //! and volume every second, turns what changed into [`screen::Input`]s, and
 //! carries out the [`screen::Action`]s that come back.
 
+mod controls;
 mod screen;
 mod wake;
 
@@ -16,7 +17,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use gg_device_headset::{proto, Headset, PowerStatus, Status};
-use gg_ipc::{Event, HeadsetPower, HeadsetState, ScreenSettings};
+use gg_ipc::{Event, HeadsetChange, HeadsetControls, HeadsetPower, HeadsetState, ScreenSettings};
 use hidapi::HidApi;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
@@ -39,6 +40,8 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 pub enum Command {
     GetState(Reply<HeadsetState>),
     SetScreen { settings: ScreenSettings, reply: Reply<()> },
+    /// Apply one setting and save it on the base station.
+    SetControl { change: HeadsetChange, reply: Reply<()> },
     /// Leave the screen dark and stop. Replies once the device has been told.
     Shutdown(Reply<()>),
 }
@@ -85,6 +88,8 @@ struct State {
     volume: Option<u8>,
     settings: ScreenSettings,
     screen: Screen,
+    /// Settings the device cannot report, as last written here.
+    written: controls::WriteOnly,
     /// Last state sent to clients, so unchanged iterations stay quiet.
     published: Option<HeadsetState>,
 }
@@ -107,6 +112,7 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
         volume: None,
         settings,
         screen: Screen::new(&settings, Instant::now()),
+        written: controls::WriteOnly::default(),
         published: None,
     };
 
@@ -170,6 +176,10 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
         }
+        Command::SetControl { change, reply } => {
+            let _ = reply.send(set_control(state, &change));
+            publish(state, event_tx);
+        }
         Command::Shutdown(reply) => {
             shutdown(state);
             let _ = reply.send(Ok(()));
@@ -177,6 +187,25 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
         }
     }
     true
+}
+
+/// Validate, apply with save, remember write-only values, and show the change.
+fn set_control(state: &mut State, change: &HeadsetChange) -> Result<(), String> {
+    let setting = controls::validated(change)?;
+    let Some(device) = state.device.as_ref() else {
+        return Err("base station not connected".into());
+    };
+    if let Err(e) = device.apply(&setting) {
+        warn!(?change, error = %format!("{e:#}"), "setting write failed; reopening");
+        drop_device(state);
+        return Err(format!("{e:#}"));
+    }
+    controls::record(&mut state.written, change);
+    // The change is shown for one lit period, and read-back values refresh now.
+    let action = state.screen.on(Input::OurEvent, Instant::now());
+    perform(state, action);
+    state.last_poll = None;
+    Ok(())
 }
 
 /// Open the base station if it has appeared, at most every [`REOPEN_INTERVAL`].
@@ -319,7 +348,18 @@ fn snapshot(state: &State) -> HeadsetState {
         spare_battery: status.and_then(|s| s.spare_battery),
         screen: state.settings,
         screen_dark: connected && state.screen.is_dark(),
-        controls: gg_ipc::HeadsetControls::default(),
+        controls: HeadsetControls {
+            noise_mode: status.and_then(|s| s.noise_mode()).map(controls::noise_mode),
+            transparency: status.map(|s| s.transparency_raw).filter(|v| (1..=10).contains(v)),
+            mic_led: status.map(|s| s.mic_led_brightness),
+            mic_muted: status.and_then(|s| s.mic_muted()),
+            auto_off_minutes: status.and_then(|s| s.auto_off).map(|a| a.minutes()),
+            radio_mode: status.and_then(|s| s.wireless_mode).map(controls::radio_mode),
+            sidetone: state.written.sidetone,
+            mic_volume: state.written.mic_volume,
+            eq_preset: state.written.eq_preset,
+            eq_bands: state.written.eq_bands.clone(),
+        },
     }
 }
 

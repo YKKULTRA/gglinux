@@ -254,9 +254,12 @@ async fn dispatch(
                 .send::<()>(|reply| HeadsetCommand::SetScreen { settings, reply })
                 .await,
         ),
-        Request::SetHeadset { .. } => ResponseData::Error {
-            message: "not wired up yet".into(),
-        },
+        Request::SetHeadset { change } => outcome(
+            workers
+                .headset
+                .send::<()>(|reply| HeadsetCommand::SetControl { change, reply })
+                .await,
+        ),
     };
     ServerMessage::response(frame.id, result)
 }
