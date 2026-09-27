@@ -2,7 +2,10 @@
   import { onMount } from "svelte";
   import { daemon } from "./lib/daemon.svelte";
   import DeviceCard from "./lib/DeviceCard.svelte";
+  import HeadsetPanel from "./lib/HeadsetPanel.svelte";
+  import KeyboardPanel from "./lib/KeyboardPanel.svelte";
   import MousePanel from "./lib/MousePanel.svelte";
+  import SonarPanel from "./lib/SonarPanel.svelte";
   import Icon from "./lib/Icon.svelte";
   import type { IconName } from "./lib/icons";
 
@@ -16,17 +19,20 @@
   ];
 
   // Milestones that will fill the not-yet-built pages (see PLAN.md).
-  const COMING: Record<Exclude<Page, "engine">, string> = {
-    sonar: "M3 — PipeWire virtual sinks, per-app routing, parametric EQ",
+  const COMING: Record<Exclude<Page, "engine" | "sonar">, string> = {
     moments: "M7 — gpu-screen-recorder replay buffer and clip library",
     settings: "M6/M7 — GameSense server, Proton discovery, profile sync",
   };
 
   let page = $state<Page>("engine");
 
-  /** Rival 3 Wireless Gen 2 — so far the only device with a control panel. */
+  /** Devices with a control panel so far. */
   const RIVAL3_PID = 0x1872;
+  const NOVA_PRO_PID = 0x12e0;
+  const APEX_PID = 0x1642;
   let hasRival3 = $derived(daemon.devices.some((d) => d.product_id === RIVAL3_PID));
+  let hasNovaPro = $derived(daemon.devices.some((d) => d.product_id === NOVA_PRO_PID));
+  let hasApex = $derived(daemon.devices.some((d) => d.product_id === APEX_PID));
 
   onMount(() => {
     void daemon.start();
@@ -88,6 +94,18 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
           </section>
         {/if}
 
+        {#if hasNovaPro}
+          <section class="controls">
+            <HeadsetPanel />
+          </section>
+        {/if}
+
+        {#if hasApex}
+          <section class="controls">
+            <KeyboardPanel />
+          </section>
+        {/if}
+
         <div class="grid">
           {#each daemon.devices as device (device.id)}
             <DeviceCard {device} />
@@ -97,6 +115,16 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
 
       {#if daemon.lastError}
         <p class="error">{daemon.lastError}</p>
+      {/if}
+    {:else if page === "sonar"}
+      <header class="page-head">
+        <h1>Sonar</h1>
+        <p>{NAV[1].blurb}</p>
+      </header>
+      {#if daemon.connected}
+        <SonarPanel />
+      {:else}
+        <section class="notice"><h2>gglinuxd isn&rsquo;t running</h2></section>
       {/if}
     {:else}
       {@const item = NAV.find((n) => n.id === page)!}

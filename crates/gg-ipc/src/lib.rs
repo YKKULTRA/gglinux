@@ -81,6 +81,381 @@ pub struct MouseState {
     pub applied: Option<MouseSettings>,
 }
 
+/// Burn-in protection for the headset base station's screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenSettings {
+    /// Keep the screen dark, lighting it briefly after events.
+    pub protect: bool,
+    /// How long the screen stays lit after an event.
+    pub lit_seconds: u16,
+    /// OLED brightness, or `None` to leave the device's own level alone — it
+    /// cannot be read back, so gglinux never assumes one.
+    pub brightness: Option<u8>,
+}
+
+impl ScreenSettings {
+    pub const LIT_SECONDS: std::ops::RangeInclusive<u16> = 3..=600;
+    /// There is no "off" level; see `gg_device_headset::proto::OLED_BRIGHTNESS_MIN`.
+    pub const BRIGHTNESS: std::ops::RangeInclusive<u8> = 1..=10;
+
+    /// Check ranges, with a message meant for the user.
+    pub fn validate(&self) -> Result<(), String> {
+        if !Self::LIT_SECONDS.contains(&self.lit_seconds) {
+            return Err(format!(
+                "screen lit period {} s out of range ({}..={})",
+                self.lit_seconds,
+                Self::LIT_SECONDS.start(),
+                Self::LIT_SECONDS.end()
+            ));
+        }
+        if let Some(level) = self.brightness {
+            if !Self::BRIGHTNESS.contains(&level) {
+                return Err(format!(
+                    "screen brightness {level} out of range ({}..={}) — the lowest level is \
+                     still lit, so no brightness turns the screen off",
+                    Self::BRIGHTNESS.start(),
+                    Self::BRIGHTNESS.end()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for ScreenSettings {
+    fn default() -> Self {
+        ScreenSettings { protect: true, lit_seconds: 10, brightness: None }
+    }
+}
+
+/// Where the headset is, as the base station reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadsetPower {
+    Offline,
+    Charging,
+    Online,
+    /// Not reported yet, or a value we have not seen.
+    Unknown,
+}
+
+/// Headset noise control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseMode {
+    Off,
+    Transparency,
+    Anc,
+}
+
+/// 2.4 GHz link profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadioMode {
+    Speed,
+    Range,
+}
+
+/// One headset setting to change: `{"setting":"sidetone","value":2}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "setting", content = "value", rename_all = "snake_case")]
+pub enum HeadsetChange {
+    NoiseMode(NoiseMode),
+    /// 1..=10.
+    Transparency(u8),
+    /// 0 off, 1 low, 2 medium, 3 high.
+    Sidetone(u8),
+    /// 1 (muted)..=10.
+    MicVolume(u8),
+    /// 1..=10.
+    MicLed(u8),
+    /// 0 (never), 1, 5, 10, 15, 30 or 60.
+    AutoOffMinutes(u16),
+    RadioMode(RadioMode),
+    /// 0 Flat, 1 Bass Boost, 2 Focus, 3 Smiley, 4 Custom.
+    EqPreset(u8),
+    /// Ten gains in dB, -10.0..=10.0 in 0.5 steps. Selects the Custom preset.
+    EqBands(Vec<f32>),
+}
+
+/// Headset settings. The first group is read from the base station every
+/// second; the second is what gglinux wrote this session, because the device
+/// cannot report it. `None` means not known.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HeadsetControls {
+    pub noise_mode: Option<NoiseMode>,
+    pub transparency: Option<u8>,
+    pub mic_led: Option<u8>,
+    pub mic_muted: Option<bool>,
+    pub auto_off_minutes: Option<u16>,
+    pub radio_mode: Option<RadioMode>,
+    pub sidetone: Option<u8>,
+    pub mic_volume: Option<u8>,
+    pub eq_preset: Option<u8>,
+    pub eq_bands: Option<Vec<f32>>,
+}
+
+/// What the daemon knows about the headset and its base station.
+///
+/// Unlike [`MouseState`], these are readings: the base station reports them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeadsetState {
+    /// Whether the base station is plugged in and open.
+    pub connected: bool,
+    pub power: HeadsetPower,
+    /// Percent; `None` while the headset is off.
+    pub headset_battery: Option<u8>,
+    /// Percent; `None` when no spare pack is seated.
+    pub spare_battery: Option<u8>,
+    pub screen: ScreenSettings,
+    /// Whether gglinux has the screen blanked right now.
+    pub screen_dark: bool,
+    pub controls: HeadsetControls,
+}
+
+/// A Sonar output channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    Game,
+    Chat,
+    Media,
+    Aux,
+}
+
+impl Channel {
+    pub const ALL: [Channel; 4] = [Channel::Game, Channel::Chat, Channel::Media, Channel::Aux];
+
+    /// Lower-case name, as used in node names and settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            Channel::Game => "game",
+            Channel::Chat => "chat",
+            Channel::Media => "media",
+            Channel::Aux => "aux",
+        }
+    }
+}
+
+/// A physical audio device: an output the channels play into, or an input the mic reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioDevice {
+    /// PipeWire `node.name`.
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelState {
+    pub channel: Channel,
+    /// Whether PipeWire currently has this channel's sink.
+    pub present: bool,
+    /// 0..=1 on the desktop mixer's scale; `None` when absent.
+    pub volume: Option<f32>,
+}
+
+/// An app playing audio, and the channel its rule sends it to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppStream {
+    /// PipeWire node id; changes when the app reopens its stream.
+    pub id: u32,
+    pub name: String,
+    /// `application.process.binary`, the key routing rules match on.
+    pub binary: Option<String>,
+    pub channel: Channel,
+}
+
+/// The shape of an EQ band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BandKind {
+    LowShelf,
+    Peaking,
+    HighShelf,
+}
+
+/// One parametric EQ band.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EqBand {
+    pub kind: BandKind,
+    /// Centre (peaking) or corner (shelf) frequency, Hz.
+    pub freq: f32,
+    pub q: f32,
+    /// dB.
+    pub gain: f32,
+}
+
+/// One channel's EQ.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelEq {
+    pub channel: Channel,
+    pub bands: Vec<EqBand>,
+}
+
+/// Headphone correction, shared by every channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeadphoneEq {
+    /// dB applied before the bands (AutoEQ's "Preamp").
+    pub preamp: f32,
+    /// Low shelf, ten peaking bands, high shelf.
+    pub bands: Vec<EqBand>,
+    /// What it corrects, e.g. an AutoEQ headphone name.
+    pub name: Option<String>,
+}
+
+/// Processing on the virtual mic.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MicSettings {
+    /// RNNoise noise suppression.
+    pub denoise: bool,
+    /// RNNoise's voice-detection threshold, 0..=95 %: higher cuts more non-voice sound.
+    pub denoise_strength: f32,
+    /// Noise gate: silence below `gate_threshold_db`.
+    pub gate: bool,
+    /// -80..=-10 dB.
+    pub gate_threshold_db: f32,
+    /// Compressor (4:1 above -18 dB) plus makeup gain.
+    pub compressor: bool,
+    /// 0..=18 dB.
+    pub makeup_db: f32,
+}
+
+impl Default for MicSettings {
+    fn default() -> Self {
+        MicSettings {
+            denoise: true,
+            denoise_strength: 50.0,
+            gate: false,
+            gate_threshold_db: -45.0,
+            compressor: false,
+            makeup_db: 6.0,
+        }
+    }
+}
+
+/// The virtual mic as the daemon sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MicState {
+    /// Whether the mic chain's plugins are installed.
+    pub available: bool,
+    /// Whether PipeWire has the virtual mic right now.
+    pub present: bool,
+    /// `node.name` of the physical mic it reads.
+    pub input: Option<String>,
+    pub inputs: Vec<AudioDevice>,
+    /// 0..=1 on the mixer's scale; `None` when absent.
+    pub volume: Option<f32>,
+    pub settings: MicSettings,
+}
+
+/// Sonar as the daemon sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SonarState {
+    /// Whether PipeWire's tools answered.
+    pub available: bool,
+    pub enabled: bool,
+    /// `node.name` of the physical output the channels play into.
+    pub output: Option<String>,
+    pub outputs: Vec<AudioDevice>,
+    pub channels: Vec<ChannelState>,
+    /// -1.0 all Game … 0.0 both full … 1.0 all Chat.
+    pub chatmix: f32,
+    pub apps: Vec<AppStream>,
+    /// Per-channel EQ, in `Channel::ALL` order.
+    pub eq: Vec<ChannelEq>,
+    pub headphone: HeadphoneEq,
+    pub mic: MicState,
+}
+
+/// An sRGB colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+/// What the keyboard lighting does.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Effect {
+    /// Each key its own colour, from [`Lighting::keys`].
+    Static,
+    /// Every key pulses one colour, one breath per `period_s`.
+    Breathing { color: Rgb, period_s: f32 },
+    /// A rainbow moving across the keyboard, one pass per `period_s`.
+    Wave { period_s: f32 },
+    /// Every key cycles the rainbow together, once per `period_s`.
+    Spectrum { period_s: f32 },
+}
+
+/// One key's static colour, by HID usage code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyColor {
+    pub code: u8,
+    pub color: Rgb,
+}
+
+/// Keyboard lighting as gglinux runs it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Lighting {
+    /// `false` leaves the lighting to the keyboard's own onboard profile.
+    pub enabled: bool,
+    pub effect: Effect,
+    /// Static colours; keys not listed are dark.
+    pub keys: Vec<KeyColor>,
+    /// 0..=100 %, applied to every frame.
+    pub brightness: u8,
+}
+
+impl Lighting {
+    pub const PERIOD_S: std::ops::RangeInclusive<f32> = 0.5..=60.0;
+
+    /// Check ranges, with a message meant for the user.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.brightness > 100 {
+            return Err(format!("brightness {}% out of range (0..=100)", self.brightness));
+        }
+        let period = match self.effect {
+            Effect::Static => None,
+            Effect::Breathing { period_s, .. } | Effect::Wave { period_s } | Effect::Spectrum { period_s } => {
+                Some(period_s)
+            }
+        };
+        if let Some(p) = period {
+            if !(p.is_finite() && Self::PERIOD_S.contains(&p)) {
+                return Err(format!("effect period {p} s out of range (0.5..=60)"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for Lighting {
+    fn default() -> Self {
+        Lighting { enabled: false, effect: Effect::Wave { period_s: 4.0 }, keys: Vec::new(), brightness: 100 }
+    }
+}
+
+/// A key on the keyboard picture, in key units (a standard key is 1 × 1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyInfo {
+    pub code: u8,
+    pub label: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+}
+
+/// The keyboard as the daemon sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyboardState {
+    pub connected: bool,
+    /// Every key and where it is, for drawing.
+    pub layout: Vec<KeyInfo>,
+    pub lighting: Lighting,
+}
+
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
 ///
 /// The `set_mouse_*` methods address "the connected Rival 3 Wireless Gen 2" without
@@ -116,6 +491,39 @@ pub enum Request {
     },
     /// Commit current settings to the mouse's onboard memory.
     SaveMouse,
+    /// Headset battery, power, and screen settings.
+    GetHeadsetState,
+    /// Replace the base-station screen settings.
+    SetHeadsetScreen { settings: ScreenSettings },
+    /// Change one headset setting and save it on the base station.
+    SetHeadset { change: HeadsetChange },
+    /// Sonar channels, routing, and ChatMix.
+    GetSonarState,
+    /// Turn Sonar on or off. Restarts PipeWire.
+    SetSonarEnabled { enabled: bool },
+    /// The physical output the channels play into (a `node.name`).
+    SetSonarOutput { name: String },
+    /// 0..=1.
+    SetChannelVolume { channel: Channel, volume: f32 },
+    /// -1.0 all Game … 1.0 all Chat.
+    SetChatMix { balance: f32 },
+    /// Route an app (by `application.process.binary`) to a channel, and remember it.
+    SetAppChannel { binary: String, channel: Channel },
+    /// Replace a channel's EQ bands.
+    SetChannelEq { channel: Channel, bands: Vec<EqBand> },
+    /// Replace the headphone correction.
+    SetHeadphoneEq { eq: HeadphoneEq },
+    /// Parse an AutoEQ ParametricEQ.txt and make it the headphone correction.
+    ImportAutoEq { text: String, name: Option<String> },
+    /// The physical mic the virtual mic reads (a source `node.name`).
+    SetMicInput { name: String },
+    SetMicSettings { settings: MicSettings },
+    /// 0..=1.
+    SetMicVolume { volume: f32 },
+    /// Keyboard connection, layout and lighting.
+    GetKeyboardState,
+    /// Replace the keyboard lighting.
+    SetLighting { lighting: Lighting },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -132,6 +540,9 @@ pub enum ResponseData {
     Devices { devices: Vec<DeviceInfo> },
     Pong,
     Mouse { state: MouseState },
+    Headset { state: HeadsetState },
+    Sonar { state: SonarState },
+    Keyboard { state: KeyboardState },
     /// A command was accepted and applied.
     Success,
     Error { message: String },
@@ -147,6 +558,12 @@ pub enum Event {
     DevicesChanged { devices: Vec<DeviceInfo> },
     /// Mouse battery changed (or became unknown when it went to sleep).
     MouseBattery { battery: Option<BatteryState> },
+    /// Headset state changed: battery, power, connection, or screen.
+    HeadsetChanged { state: HeadsetState },
+    /// Sonar changed: channels, apps, volumes, or on/off.
+    SonarChanged { state: SonarState },
+    /// Keyboard connection or lighting changed.
+    KeyboardChanged { state: KeyboardState },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -178,6 +595,17 @@ pub fn socket_path() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", unsafe { geteuid() })));
     base.join("gglinux").join("gglinuxd.sock")
+}
+
+/// gglinux's config directory: `$XDG_CONFIG_HOME/gglinux`, else `~/.config/gglinux`.
+pub fn config_dir() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(".config")
+        });
+    base.join("gglinux")
 }
 
 // Avoid a libc dependency in this leaf crate just for one call.
@@ -253,5 +681,187 @@ mod tests {
             .unwrap();
         assert!(note.contains("\"kind\":\"notification\""));
         assert!(note.contains("\"event\":\"device_removed\""));
+    }
+
+    #[test]
+    fn headset_requests_parse_from_their_documented_json() {
+        let set = r#"{"id":5,"req":{"method":"set_headset_screen","params":
+            {"settings":{"protect":true,"lit_seconds":10,"brightness":null}}}}"#;
+        match serde_json::from_str::<RequestFrame>(set).unwrap().req {
+            Request::SetHeadsetScreen { settings } => assert_eq!(settings, ScreenSettings::default()),
+            other => panic!("parsed as {other:?}"),
+        }
+        serde_json::from_str::<RequestFrame>(r#"{"id":6,"req":{"method":"get_headset_state"}}"#)
+            .expect("get_headset_state should parse");
+    }
+
+    #[test]
+    fn headset_state_serializes_for_the_ui() {
+        let state = HeadsetState {
+            connected: true,
+            power: HeadsetPower::Online,
+            headset_battery: Some(12),
+            spare_battery: None,
+            screen: ScreenSettings::default(),
+            screen_dark: true,
+            controls: HeadsetControls::default(),
+        };
+        let json = serde_json::to_string(&ServerMessage::notify(Event::HeadsetChanged { state })).unwrap();
+        assert!(json.contains(r#""event":"headset_changed""#), "{json}");
+        assert!(json.contains(r#""power":"online""#), "{json}");
+        assert!(json.contains(r#""spare_battery":null"#), "{json}");
+        assert!(json.contains(r#""screen_dark":true"#), "{json}");
+        assert!(json.contains(r#""lit_seconds":10"#), "{json}");
+    }
+
+    #[test]
+    fn screen_settings_reject_out_of_range_values() {
+        let ok = ScreenSettings::default();
+        assert!(ok.validate().is_ok());
+        assert!(ScreenSettings { lit_seconds: 2, ..ok }.validate().is_err());
+        assert!(ScreenSettings { lit_seconds: 601, ..ok }.validate().is_err());
+        assert!(ScreenSettings { brightness: Some(0), ..ok }.validate().is_err(), "0 is not off");
+        assert!(ScreenSettings { brightness: Some(11), ..ok }.validate().is_err());
+        assert!(ScreenSettings { brightness: Some(1), lit_seconds: 600, ..ok }.validate().is_ok());
+    }
+
+    #[test]
+    fn headset_changes_parse_from_their_documented_json() {
+        let cases = [
+            (r#"{"setting":"noise_mode","value":"anc"}"#, HeadsetChange::NoiseMode(NoiseMode::Anc)),
+            (r#"{"setting":"sidetone","value":2}"#, HeadsetChange::Sidetone(2)),
+            (r#"{"setting":"auto_off_minutes","value":0}"#, HeadsetChange::AutoOffMinutes(0)),
+            (r#"{"setting":"radio_mode","value":"range"}"#, HeadsetChange::RadioMode(RadioMode::Range)),
+            (
+                r#"{"setting":"eq_bands","value":[0,0,0,0,0,0,0,0,0,1.5]}"#,
+                HeadsetChange::EqBands(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.5]),
+            ),
+        ];
+        for (json, expected) in cases {
+            let line = format!(r#"{{"id":1,"req":{{"method":"set_headset","params":{{"change":{json}}}}}}}"#);
+            match serde_json::from_str::<RequestFrame>(&line).unwrap().req {
+                Request::SetHeadset { change } => assert_eq!(change, expected, "{json}"),
+                other => panic!("{json} parsed as {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_controls_serialize_as_null() {
+        let json = serde_json::to_string(&HeadsetControls::default()).unwrap();
+        assert!(json.contains(r#""sidetone":null"#), "{json}");
+        assert!(json.contains(r#""noise_mode":null"#), "{json}");
+        assert!(json.contains(r#""eq_bands":null"#), "{json}");
+    }
+
+    #[test]
+    fn sonar_requests_parse_from_their_documented_json() {
+        for (line, label) in [
+            (r#"{"id":1,"req":{"method":"get_sonar_state"}}"#, "get"),
+            (r#"{"id":2,"req":{"method":"set_sonar_enabled","params":{"enabled":true}}}"#, "enable"),
+            (r#"{"id":4,"req":{"method":"set_chat_mix","params":{"balance":-0.25}}}"#, "chatmix"),
+            (r#"{"id":5,"req":{"method":"set_app_channel","params":{"binary":"discord","channel":"chat"}}}"#, "app"),
+            (r#"{"id":6,"req":{"method":"set_sonar_output","params":{"name":"alsa_output.x"}}}"#, "output"),
+        ] {
+            serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{label}: {e}"));
+        }
+        let volume = r#"{"id":3,"req":{"method":"set_channel_volume","params":{"channel":"chat","volume":0.5}}}"#;
+        match serde_json::from_str::<RequestFrame>(volume).unwrap().req {
+            Request::SetChannelVolume { channel, volume } => {
+                assert_eq!(channel, Channel::Chat);
+                assert_eq!(volume, 0.5);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channels_have_stable_keys() {
+        let keys: Vec<_> = Channel::ALL.iter().map(|c| c.key()).collect();
+        assert_eq!(keys, ["game", "chat", "media", "aux"]);
+        assert_eq!(serde_json::to_string(&Channel::Media).unwrap(), r#""media""#);
+    }
+
+    #[test]
+    fn eq_requests_parse_from_their_documented_json() {
+        let band = r#"{"kind":"peaking","freq":250.0,"q":1.0,"gain":-3.5}"#;
+        let set = format!(
+            r#"{{"id":1,"req":{{"method":"set_channel_eq","params":{{"channel":"game","bands":[{band}]}}}}}}"#
+        );
+        match serde_json::from_str::<RequestFrame>(&set).unwrap().req {
+            Request::SetChannelEq { channel, bands } => {
+                assert_eq!(channel, Channel::Game);
+                assert_eq!(bands, vec![EqBand { kind: BandKind::Peaking, freq: 250.0, q: 1.0, gain: -3.5 }]);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        for line in [
+            r#"{"id":2,"req":{"method":"import_auto_eq","params":{"text":"Preamp: -1 dB","name":"HD 650"}}}"#,
+            r#"{"id":3,"req":{"method":"set_headphone_eq","params":{"eq":{"preamp":0.0,"bands":[],"name":null}}}}"#,
+        ] {
+            serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+        }
+    }
+
+    #[test]
+    fn band_kinds_are_snake_case() {
+        assert_eq!(serde_json::to_string(&BandKind::LowShelf).unwrap(), r#""low_shelf""#);
+        assert_eq!(serde_json::to_string(&BandKind::HighShelf).unwrap(), r#""high_shelf""#);
+    }
+
+    #[test]
+    fn mic_requests_parse_from_their_documented_json() {
+        let line = r#"{"id":1,"req":{"method":"set_mic_settings","params":{"settings":
+            {"denoise":true,"denoise_strength":60.0,"gate":true,"gate_threshold_db":-40.0,"compressor":false,"makeup_db":6.0}}}}"#;
+        match serde_json::from_str::<RequestFrame>(line).unwrap().req {
+            Request::SetMicSettings { settings } => {
+                assert!(settings.gate);
+                assert_eq!(settings.denoise_strength, 60.0);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        for line in [
+            r#"{"id":2,"req":{"method":"set_mic_input","params":{"name":"alsa_input.x"}}}"#,
+            r#"{"id":3,"req":{"method":"set_mic_volume","params":{"volume":0.8}}}"#,
+        ] {
+            serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+        }
+    }
+
+    #[test]
+    fn mic_defaults_suppress_noise_and_leave_the_rest_off() {
+        let d = MicSettings::default();
+        assert!(d.denoise && !d.gate && !d.compressor);
+        assert_eq!((d.denoise_strength, d.gate_threshold_db, d.makeup_db), (50.0, -45.0, 6.0));
+    }
+
+    #[test]
+    fn lighting_requests_parse_from_their_documented_json() {
+        let line = r#"{"id":1,"req":{"method":"set_lighting","params":{"lighting":{"enabled":true,
+            "effect":{"kind":"breathing","color":{"r":255,"g":0,"b":0},"period_s":3.0},
+            "keys":[{"code":10,"color":{"r":0,"g":255,"b":0}}],"brightness":80}}}}"#;
+        match serde_json::from_str::<RequestFrame>(line).unwrap().req {
+            Request::SetLighting { lighting } => {
+                assert!(lighting.enabled);
+                assert_eq!(lighting.effect, Effect::Breathing { color: Rgb { r: 255, g: 0, b: 0 }, period_s: 3.0 });
+                assert_eq!(lighting.keys, vec![KeyColor { code: 10, color: Rgb { r: 0, g: 255, b: 0 } }]);
+                assert_eq!(lighting.brightness, 80);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        serde_json::from_str::<RequestFrame>(r#"{"id":2,"req":{"method":"get_keyboard_state"}}"#)
+            .expect("get_keyboard_state should parse");
+        assert_eq!(serde_json::to_string(&Effect::Static).unwrap(), r#"{"kind":"static"}"#);
+    }
+
+    #[test]
+    fn lighting_is_off_by_default_and_validated() {
+        let d = Lighting::default();
+        assert!(!d.enabled, "gglinux never takes the lighting until asked");
+        assert!(d.validate().is_ok());
+        assert!(Lighting { brightness: 101, ..d.clone() }.validate().is_err());
+        assert!(Lighting { effect: Effect::Wave { period_s: 0.1 }, ..d.clone() }.validate().is_err());
+        assert!(Lighting { effect: Effect::Spectrum { period_s: f32::NAN }, ..d.clone() }.validate().is_err());
+        assert!(Lighting { effect: Effect::Static, ..d }.validate().is_ok());
     }
 }

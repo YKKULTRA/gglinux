@@ -52,6 +52,178 @@ export interface MouseState {
   applied: MouseSettings | null;
 }
 
+export interface ScreenSettings {
+  /** Keep the base-station screen dark, lighting it briefly after events. */
+  protect: boolean;
+  /** Seconds the screen stays lit after an event, 3..=600. */
+  lit_seconds: number;
+  /** 1..=10, or null to leave the device's own level alone (it can't be read back). */
+  brightness: number | null;
+}
+
+export type HeadsetPower = "offline" | "charging" | "online" | "unknown";
+
+export type NoiseMode = "off" | "transparency" | "anc";
+export type RadioMode = "speed" | "range";
+
+/** One setting change; mirrors gg-ipc HeadsetChange. */
+export type HeadsetChange =
+  | { setting: "noise_mode"; value: NoiseMode }
+  | { setting: "transparency"; value: number }
+  | { setting: "sidetone"; value: number }
+  | { setting: "mic_volume"; value: number }
+  | { setting: "mic_led"; value: number }
+  | { setting: "auto_off_minutes"; value: number }
+  | { setting: "radio_mode"; value: RadioMode }
+  | { setting: "eq_preset"; value: number }
+  | { setting: "eq_bands"; value: number[] };
+
+/** Read-back values first, then what gglinux wrote (the device can't report those). */
+export interface HeadsetControls {
+  noise_mode: NoiseMode | null;
+  transparency: number | null;
+  mic_led: number | null;
+  mic_muted: boolean | null;
+  auto_off_minutes: number | null;
+  radio_mode: RadioMode | null;
+  sidetone: number | null;
+  mic_volume: number | null;
+  eq_preset: number | null;
+  eq_bands: number[] | null;
+}
+
+/** Readings, unlike MouseState: the base station reports these. */
+export interface HeadsetState {
+  connected: boolean;
+  power: HeadsetPower;
+  /** Percent; null while the headset is off. */
+  headset_battery: number | null;
+  /** Percent; null when no spare pack is seated. */
+  spare_battery: number | null;
+  screen: ScreenSettings;
+  /** Whether gglinux has the screen blanked right now. */
+  screen_dark: boolean;
+  controls: HeadsetControls;
+}
+
+export type Channel = "game" | "chat" | "media" | "aux";
+
+export interface AudioDevice {
+  name: string;
+  description: string;
+}
+
+export interface ChannelState {
+  channel: Channel;
+  present: boolean;
+  /** 0..=1 on the desktop mixer's scale; null when absent. */
+  volume: number | null;
+}
+
+export interface AppStream {
+  id: number;
+  name: string;
+  /** What routing rules match on; null if the app can't be told apart. */
+  binary: string | null;
+  channel: Channel;
+}
+
+export type BandKind = "low_shelf" | "peaking" | "high_shelf";
+
+export interface EqBand {
+  kind: BandKind;
+  freq: number;
+  q: number;
+  gain: number;
+}
+
+export interface ChannelEq {
+  channel: Channel;
+  bands: EqBand[];
+}
+
+export interface HeadphoneEq {
+  preamp: number;
+  bands: EqBand[];
+  name: string | null;
+}
+
+export interface MicSettings {
+  denoise: boolean;
+  /** 0..=95 % */
+  denoise_strength: number;
+  gate: boolean;
+  /** -80..=-10 dB */
+  gate_threshold_db: number;
+  compressor: boolean;
+  /** 0..=18 dB */
+  makeup_db: number;
+}
+
+export interface MicState {
+  available: boolean;
+  present: boolean;
+  input: string | null;
+  inputs: AudioDevice[];
+  volume: number | null;
+  settings: MicSettings;
+}
+
+export interface SonarState {
+  available: boolean;
+  enabled: boolean;
+  output: string | null;
+  outputs: AudioDevice[];
+  channels: ChannelState[];
+  /** -1 all Game … 0 both full … 1 all Chat. */
+  chatmix: number;
+  apps: AppStream[];
+  /** Per-channel EQ, in Game, Chat, Media, Aux order. */
+  eq: ChannelEq[];
+  headphone: HeadphoneEq;
+  mic: MicState;
+}
+
+export interface Rgb {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export type Effect =
+  | { kind: "static" }
+  | { kind: "breathing"; color: Rgb; period_s: number }
+  | { kind: "wave"; period_s: number }
+  | { kind: "spectrum"; period_s: number };
+
+export interface KeyColor {
+  code: number;
+  color: Rgb;
+}
+
+export interface Lighting {
+  /** false leaves the lighting to the keyboard's own profile. */
+  enabled: boolean;
+  effect: Effect;
+  keys: KeyColor[];
+  /** 0..=100 % */
+  brightness: number;
+}
+
+export interface KeyInfo {
+  code: number;
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+}
+
+export interface KeyboardState {
+  connected: boolean;
+  layout: KeyInfo[];
+  lighting: Lighting;
+}
+
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
 export type Request =
   | { method: "list_devices" }
@@ -60,7 +232,24 @@ export type Request =
   | { method: "set_mouse_dpi"; params: { stages: DpiStage[]; active: number; save: boolean } }
   | { method: "set_mouse_polling"; params: { hz: number; save: boolean } }
   | { method: "set_mouse_buttons"; params: { actions: string[]; save: boolean } }
-  | { method: "save_mouse" };
+  | { method: "save_mouse" }
+  | { method: "get_headset_state" }
+  | { method: "set_headset_screen"; params: { settings: ScreenSettings } }
+  | { method: "set_headset"; params: { change: HeadsetChange } }
+  | { method: "get_sonar_state" }
+  | { method: "set_sonar_enabled"; params: { enabled: boolean } }
+  | { method: "set_sonar_output"; params: { name: string } }
+  | { method: "set_channel_volume"; params: { channel: Channel; volume: number } }
+  | { method: "set_chat_mix"; params: { balance: number } }
+  | { method: "set_app_channel"; params: { binary: string; channel: Channel } }
+  | { method: "set_channel_eq"; params: { channel: Channel; bands: EqBand[] } }
+  | { method: "set_headphone_eq"; params: { eq: HeadphoneEq } }
+  | { method: "import_auto_eq"; params: { text: string; name: string | null } }
+  | { method: "set_mic_input"; params: { name: string } }
+  | { method: "set_mic_settings"; params: { settings: MicSettings } }
+  | { method: "set_mic_volume"; params: { volume: number } }
+  | { method: "get_keyboard_state" }
+  | { method: "set_lighting"; params: { lighting: Lighting } };
 
 export interface RequestFrame {
   id: number;
@@ -71,6 +260,9 @@ export type ResponseData =
   | { type: "devices"; devices: DeviceInfo[] }
   | { type: "pong" }
   | { type: "mouse"; state: MouseState }
+  | { type: "headset"; state: HeadsetState }
+  | { type: "sonar"; state: SonarState }
+  | { type: "keyboard"; state: KeyboardState }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -78,7 +270,10 @@ export type DaemonEvent =
   | { event: "device_added"; data: DeviceInfo }
   | { event: "device_removed"; data: { id: string } }
   | { event: "devices_changed"; data: { devices: DeviceInfo[] } }
-  | { event: "mouse_battery"; data: { battery: BatteryState | null } };
+  | { event: "mouse_battery"; data: { battery: BatteryState | null } }
+  | { event: "headset_changed"; data: { state: HeadsetState } }
+  | { event: "sonar_changed"; data: { state: SonarState } }
+  | { event: "keyboard_changed"; data: { state: KeyboardState } };
 
 export type ServerMessage =
   | { kind: "response"; id: number; result: ResponseData }

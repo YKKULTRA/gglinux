@@ -28,8 +28,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    BatteryState, DeviceInfo, DeviceKind, DpiStage, Event, InterfaceInfo, MouseSettings, MouseState,
-    Request, RequestFrame, ResponseData, ServerMessage,
+    AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
+    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings,
+    MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
 /// How often to push a `mouse_battery` notification.
@@ -38,6 +39,14 @@ const BATTERY_TICK: Duration = Duration::from_secs(5);
 struct Fake {
     battery: Option<BatteryState>,
     applied: Option<MouseSettings>,
+    /// Screen settings as last sent, echoed back unvalidated.
+    screen: ScreenSettings,
+    /// Headset settings as last sent, echoed back as the device would report them.
+    controls: HeadsetControls,
+    /// Sonar as last changed by the client.
+    sonar: SonarState,
+    /// Keyboard lighting as last set; no layout, since nothing draws it here.
+    keyboard: KeyboardState,
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
@@ -76,6 +85,10 @@ fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(Fake {
         battery: Some(BatteryState { level, charging }),
         applied: None,
+        screen: ScreenSettings::default(),
+        controls: HeadsetControls::default(),
+        sonar: fake_sonar(),
+        keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default() },
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -188,6 +201,71 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             eprintln!(">>   (would commit to onboard memory)");
             ResponseData::Success
         }
+        Request::GetHeadsetState => ResponseData::Headset { state: headset_state(&s) },
+        Request::SetHeadsetScreen { settings } => {
+            s.screen = settings;
+            ResponseData::Success
+        }
+        Request::SetHeadset { change } => {
+            fake_apply(&mut s.controls, change);
+            ResponseData::Success
+        }
+        Request::GetSonarState => ResponseData::Sonar { state: s.sonar.clone() },
+        Request::SetSonarEnabled { enabled } => {
+            s.sonar.enabled = enabled;
+            ResponseData::Success
+        }
+        Request::SetSonarOutput { name } => {
+            s.sonar.output = Some(name);
+            ResponseData::Success
+        }
+        Request::SetChannelVolume { channel, volume } => {
+            if let Some(c) = s.sonar.channels.iter_mut().find(|c| c.channel == channel) {
+                c.volume = Some(volume);
+            }
+            ResponseData::Success
+        }
+        Request::SetChatMix { balance } => {
+            s.sonar.chatmix = balance;
+            ResponseData::Success
+        }
+        Request::SetAppChannel { binary, channel } => {
+            for app in s.sonar.apps.iter_mut().filter(|a| a.binary.as_deref() == Some(binary.as_str())) {
+                app.channel = channel;
+            }
+            ResponseData::Success
+        }
+        Request::SetChannelEq { channel, bands } => {
+            if let Some(c) = s.sonar.eq.iter_mut().find(|c| c.channel == channel) {
+                c.bands = bands;
+            }
+            ResponseData::Success
+        }
+        Request::SetHeadphoneEq { eq } => {
+            s.sonar.headphone = eq;
+            ResponseData::Success
+        }
+        Request::ImportAutoEq { name, .. } => {
+            s.sonar.headphone.name = name;
+            ResponseData::Success
+        }
+        Request::SetMicInput { name } => {
+            s.sonar.mic.input = Some(name);
+            ResponseData::Success
+        }
+        Request::SetMicSettings { settings } => {
+            s.sonar.mic.settings = settings;
+            ResponseData::Success
+        }
+        Request::SetMicVolume { volume } => {
+            s.sonar.mic.volume = Some(volume);
+            ResponseData::Success
+        }
+        Request::GetKeyboardState => ResponseData::Keyboard { state: s.keyboard.clone() },
+        Request::SetLighting { lighting } => {
+            s.keyboard.lighting = lighting;
+            ResponseData::Success
+        }
     }
 }
 
@@ -202,6 +280,86 @@ fn mouse_state(s: &Fake) -> MouseState {
         connected: s.devices.iter().any(|d| d.kind == DeviceKind::Mouse),
         battery: s.battery,
         applied: s.applied.clone(),
+    }
+}
+
+fn headset_state(s: &Fake) -> HeadsetState {
+    HeadsetState {
+        connected: s.devices.iter().any(|d| d.kind == DeviceKind::Headset),
+        power: HeadsetPower::Online,
+        headset_battery: Some(75),
+        spare_battery: Some(100),
+        screen: s.screen,
+        screen_dark: false,
+        controls: s.controls.clone(),
+    }
+}
+
+/// A plausible Sonar: on, two outputs, two apps.
+fn fake_sonar() -> SonarState {
+    SonarState {
+        available: true,
+        enabled: true,
+        output: Some("alsa_output.fake-headset".into()),
+        outputs: vec![
+            AudioDevice { name: "alsa_output.fake-headset".into(), description: "Fake Headset".into() },
+            AudioDevice { name: "alsa_output.fake-speakers".into(), description: "Fake Speakers".into() },
+        ],
+        channels: Channel::ALL
+            .iter()
+            .map(|&channel| ChannelState { channel, present: true, volume: Some(1.0) })
+            .collect(),
+        chatmix: 0.0,
+        apps: vec![
+            AppStream { id: 90, name: "Discord".into(), binary: Some("discord".into()), channel: Channel::Chat },
+            AppStream { id: 91, name: "Firefox".into(), binary: Some("firefox".into()), channel: Channel::Media },
+        ],
+        eq: Channel::ALL.iter().map(|&channel| ChannelEq { channel, bands: fake_bands(10) }).collect(),
+        headphone: HeadphoneEq { preamp: 0.0, bands: fake_bands(12), name: None },
+        mic: MicState {
+            available: true,
+            present: true,
+            input: Some("alsa_input.fake-headset".into()),
+            inputs: vec![AudioDevice { name: "alsa_input.fake-headset".into(), description: "Fake Headset Mic".into() }],
+            volume: Some(1.0),
+            settings: MicSettings::default(),
+        },
+    }
+}
+
+/// Flat bands shaped like the daemon's: a low shelf, peaks, a high shelf.
+fn fake_bands(n: usize) -> Vec<EqBand> {
+    (0..n)
+        .map(|i| EqBand {
+            kind: if i == 0 {
+                BandKind::LowShelf
+            } else if i == n - 1 {
+                BandKind::HighShelf
+            } else {
+                BandKind::Peaking
+            },
+            freq: 31.25 * 2f32.powi(i as i32),
+            q: 1.0,
+            gain: 0.0,
+        })
+        .collect()
+}
+
+/// Echo a change into the fake's controls, as the real device would report it.
+fn fake_apply(c: &mut HeadsetControls, change: HeadsetChange) {
+    match change {
+        HeadsetChange::NoiseMode(m) => c.noise_mode = Some(m),
+        HeadsetChange::Transparency(v) => c.transparency = Some(v),
+        HeadsetChange::Sidetone(v) => c.sidetone = Some(v),
+        HeadsetChange::MicVolume(v) => c.mic_volume = Some(v),
+        HeadsetChange::MicLed(v) => c.mic_led = Some(v),
+        HeadsetChange::AutoOffMinutes(v) => c.auto_off_minutes = Some(v),
+        HeadsetChange::RadioMode(m) => c.radio_mode = Some(m),
+        HeadsetChange::EqPreset(p) => c.eq_preset = Some(p),
+        HeadsetChange::EqBands(b) => {
+            c.eq_bands = Some(b);
+            c.eq_preset = Some(4);
+        }
     }
 }
 
@@ -231,6 +389,23 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetMousePolling { .. } => "set_mouse_polling",
         Request::SetMouseButtons { .. } => "set_mouse_buttons",
         Request::SaveMouse => "save_mouse",
+        Request::GetHeadsetState => "get_headset_state",
+        Request::SetHeadsetScreen { .. } => "set_headset_screen",
+        Request::SetHeadset { .. } => "set_headset",
+        Request::GetSonarState => "get_sonar_state",
+        Request::SetSonarEnabled { .. } => "set_sonar_enabled",
+        Request::SetSonarOutput { .. } => "set_sonar_output",
+        Request::SetChannelVolume { .. } => "set_channel_volume",
+        Request::SetChatMix { .. } => "set_chat_mix",
+        Request::SetAppChannel { .. } => "set_app_channel",
+        Request::SetChannelEq { .. } => "set_channel_eq",
+        Request::SetHeadphoneEq { .. } => "set_headphone_eq",
+        Request::ImportAutoEq { .. } => "import_auto_eq",
+        Request::SetMicInput { .. } => "set_mic_input",
+        Request::SetMicSettings { .. } => "set_mic_settings",
+        Request::SetMicVolume { .. } => "set_mic_volume",
+        Request::GetKeyboardState => "get_keyboard_state",
+        Request::SetLighting { .. } => "set_lighting",
     }
 }
 
@@ -248,6 +423,11 @@ fn describe(req: &Request) -> String {
         Request::SetMouseButtons { actions, save } => {
             format!("set_mouse_buttons {} save={save}", actions.join(","))
         }
+        Request::SetHeadsetScreen { settings } => format!(
+            "set_headset_screen protect={} lit={}s brightness={:?}",
+            settings.protect, settings.lit_seconds, settings.brightness
+        ),
+        Request::SetHeadset { change } => format!("set_headset {change:?}"),
         other => method_name(other).to_string(),
     }
 }

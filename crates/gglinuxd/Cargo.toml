@@ -11,6 +11,9 @@ default-run = "gglinuxd"
 gg-ipc = { path = "../gg-ipc" }
 gg-hid = { path = "../gg-hid" }
 gg-device-mouse = { path = "../gg-device-mouse" }
+gg-device-headset = { path = "../gg-device-headset" }
+gg-audio = { path = "../gg-audio" }
+gg-device-keyboard = { path = "../gg-device-keyboard" }
 hidapi.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

@@ -7,7 +7,24 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { DeviceInfo, DpiStage, MouseState, Request, ResponseData, ServerMessage } from "./types";
+import type {
+  Channel,
+  DeviceInfo,
+  DpiStage,
+  EqBand,
+  HeadphoneEq,
+  HeadsetChange,
+  HeadsetState,
+  KeyboardState,
+  Lighting,
+  MicSettings,
+  MouseState,
+  Request,
+  ResponseData,
+  ScreenSettings,
+  ServerMessage,
+  SonarState,
+} from "./types";
 
 /** Reject a pending request if the daemon never answers. */
 const REQUEST_TIMEOUT_MS = 5000;
@@ -25,6 +42,12 @@ class Daemon {
   devices = $state<DeviceInfo[]>([]);
   /** Mouse battery + applied settings; null until first fetched. */
   mouse = $state<MouseState | null>(null);
+  /** Headset battery, power, and screen settings; null until first fetched. */
+  headset = $state<HeadsetState | null>(null);
+  /** Sonar channels, routing and ChatMix; null until first fetched. */
+  sonar = $state<SonarState | null>(null);
+  /** Keyboard layout and lighting; null until first fetched. */
+  keyboard = $state<KeyboardState | null>(null);
   /** Last transport/protocol error, for surfacing in the UI. */
   lastError = $state<string | null>(null);
 
@@ -45,6 +68,9 @@ class Daemon {
         // `applied` describes what *that* daemon process wrote. If it restarted it
         // has written nothing, so keeping the old value would be a lie.
         this.mouse = null;
+        this.headset = null;
+        this.sonar = null;
+        this.keyboard = null;
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -57,13 +83,13 @@ class Daemon {
   }
 
   /** Send a request and resolve with the daemon's response. */
-  request(req: Request): Promise<ResponseData> {
+  request(req: Request, timeoutMs = REQUEST_TIMEOUT_MS): Promise<ResponseData> {
     const id = this.#nextId++;
     return new Promise<ResponseData>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(new Error(`request ${req.method} timed out`));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       this.#pending.set(id, { resolve, reject, timer });
 
       invoke("daemon_send", { frame: { id, req } }).catch((e: unknown) => {
@@ -110,6 +136,97 @@ class Daemon {
     await this.#command({ method: "save_mouse" });
   }
 
+  async getHeadsetState(): Promise<HeadsetState> {
+    const res = await this.request({ method: "get_headset_state" });
+    if (res.type !== "headset") throw new Error(`unexpected response: ${res.type}`);
+    this.headset = res.state;
+    return res.state;
+  }
+
+  async setHeadsetScreen(settings: ScreenSettings): Promise<void> {
+    const res = await this.request({ method: "set_headset_screen", params: { settings } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getHeadsetState();
+  }
+
+  async setHeadset(change: HeadsetChange): Promise<void> {
+    const res = await this.request({ method: "set_headset", params: { change } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getHeadsetState();
+  }
+
+  async getSonarState(): Promise<SonarState> {
+    const res = await this.request({ method: "get_sonar_state" });
+    if (res.type !== "sonar") throw new Error(`unexpected response: ${res.type}`);
+    this.sonar = res.state;
+    return res.state;
+  }
+
+  /** Every Sonar change answers `success`, then the fresh state is fetched. */
+  async #sonarCommand(req: Request, timeoutMs?: number): Promise<void> {
+    const res = await this.request(req, timeoutMs);
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getSonarState();
+  }
+
+  /** Restarts PipeWire and waits for it, so it gets a longer timeout. */
+  setSonarEnabled(enabled: boolean): Promise<void> {
+    return this.#sonarCommand({ method: "set_sonar_enabled", params: { enabled } }, 15000);
+  }
+
+  setSonarOutput(name: string): Promise<void> {
+    return this.#sonarCommand({ method: "set_sonar_output", params: { name } });
+  }
+
+  setChannelVolume(channel: Channel, volume: number): Promise<void> {
+    return this.#sonarCommand({ method: "set_channel_volume", params: { channel, volume } });
+  }
+
+  setChatMix(balance: number): Promise<void> {
+    return this.#sonarCommand({ method: "set_chat_mix", params: { balance } });
+  }
+
+  setAppChannel(binary: string, channel: Channel): Promise<void> {
+    return this.#sonarCommand({ method: "set_app_channel", params: { binary, channel } });
+  }
+
+  setChannelEq(channel: Channel, bands: EqBand[]): Promise<void> {
+    return this.#sonarCommand({ method: "set_channel_eq", params: { channel, bands } });
+  }
+
+  setHeadphoneEq(eq: HeadphoneEq): Promise<void> {
+    return this.#sonarCommand({ method: "set_headphone_eq", params: { eq } });
+  }
+
+  importAutoEq(text: string, name: string | null): Promise<void> {
+    return this.#sonarCommand({ method: "import_auto_eq", params: { text, name } });
+  }
+
+  setMicInput(name: string): Promise<void> {
+    return this.#sonarCommand({ method: "set_mic_input", params: { name } });
+  }
+
+  setMicSettings(settings: MicSettings): Promise<void> {
+    return this.#sonarCommand({ method: "set_mic_settings", params: { settings } });
+  }
+
+  setMicVolume(volume: number): Promise<void> {
+    return this.#sonarCommand({ method: "set_mic_volume", params: { volume } });
+  }
+
+  async getKeyboardState(): Promise<KeyboardState> {
+    const res = await this.request({ method: "get_keyboard_state" });
+    if (res.type !== "keyboard") throw new Error(`unexpected response: ${res.type}`);
+    this.keyboard = res.state;
+    return res.state;
+  }
+
+  async setLighting(lighting: Lighting): Promise<void> {
+    const res = await this.request({ method: "set_lighting", params: { lighting } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getKeyboardState();
+  }
+
   async #command(req: Request): Promise<void> {
     const res = await this.request(req);
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
@@ -148,6 +265,15 @@ class Daemon {
       case "mouse_battery":
         // Dropped if we have no state yet; the panel fetches one when it mounts.
         if (this.mouse) this.mouse = { ...this.mouse, battery: ev.data.battery };
+        break;
+      case "headset_changed":
+        this.headset = ev.data.state;
+        break;
+      case "sonar_changed":
+        this.sonar = ev.data.state;
+        break;
+      case "keyboard_changed":
+        this.keyboard = ev.data.state;
         break;
     }
   }

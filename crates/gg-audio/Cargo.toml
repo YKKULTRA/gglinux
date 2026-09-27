@@ -1,0 +1,15 @@
+[package]
+name = "gg-audio"
+description = "Sonar-style audio channels on PipeWire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gg-ipc = { path = "../gg-ipc" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

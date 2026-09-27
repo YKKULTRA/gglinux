@@ -76,10 +76,10 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 > readback as `07 b0 ..`; the real device answers `06 b0 ..`, echoing the opcode. Report `0x07` is a
 > *separate, unsolicited* stream. **Decode by opcode, not by report id or arrival order.**
 >
-> **2. The base station streams interrupts unprompted.** `07 25 <n>` arrives roughly every 16 ms
-> with `n` fluctuating (observed 2–8) whether or not anything was requested. `0x25` is master volume
-> in the setter table, but a value changing that fast is not a volume setting — most likely a level
-> meter. **Unidentified; do not treat `07 25` as a volume readback.**
+> **2. `07 25 <n>` is the volume wheel, sent only while it moves.** On 2026-08-12 it arrived every
+> ~16 ms with `n` wandering 2–8 and was logged as a possible level meter; on 2026-09-27 it was
+> silent for minutes and burst only while the headset wheel turned. `n` is attenuation on the
+> 0–56 scale (0 = loudest), the same value `06 20` reports at byte 3.
 >
 > Together these break any request/response loop that reads the *next* report after a request: the
 > next report is almost never the reply. Worse, it fails intermittently rather than outright — a
@@ -103,20 +103,21 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 | Sidetone | `06 39 <lvl>` | `0=off,1=low,2=med,3=high` |
 | EQ preset select | `06 2e <preset>` | presets `0–3` stored on base; `4` = custom slot |
 | EQ 10-band custom | `06 33 <b0..b9>` | select custom first (`06 2e 04`); each byte = `0x14 + 2*dB`, range −10..+10 dB, 0.5 dB step |
-| ANC / noise-cancelling | `06 bd <val>` | on/off/level (exact range = on-device RE) |
-| Transparency level | `06 b9 <lvl>` | |
-| Mic volume/gain | `06 37 <vol>` | `0x01`=mute .. `0xa0`=100% |
+| Noise mode | `06 bd <0\|1\|2>` | 0 off, 1 transparency, 2 ANC (loteran; status byte 10, event `07 bd`) |
+| Transparency level | `06 b9 <1-10>` | status byte 8, event `07 b9` |
+| Mic volume/gain | `06 37 <1-10>` | 1 = muted, 10 = 100% (loteran's shipped slider; the `0xa0` figure elsewhere is contradicted by it — confirm by ear). Not in the status readback |
 | Analog gain (hi-Z) | `06 27 <1=low\|2=high>` | hardware gain toggle, **not** a sample-rate change |
-| Mic-mute LED brightness | `06 bf <0-10>` | HeadsetControl "lights" maps on→10 |
-| Auto-shutoff timer | `06 c1 <lvl>` | `1=1m,2=5m,3=10m,4=15m,5=30m,6=60m` |
+| Mic-mute LED brightness | `06 bf <1-10>` | 1 is the minimum (HeadsetControl "off" = 1, "on" = 10); status byte 11 |
+| Auto-shutoff timer | `06 c1 <0-6>` | `0`=never, `1=1m,2=5m,3=10m,4=15m,5=30m,6=60m`; status byte 12 |
 | 2.4 GHz mode | `06 c3 <0=speed\|1=range>` | |
 | ChatMix enable | `06 49 01` | disable `06 49 00`; enables the dial interrupt (below) |
 | Sonar icon on OLED | `06 8d 01` | |
 | Volume set | `06 25 <atten 0-56>` | 0=max, 56=mute |
 | Line-out | `06 43 <v>` / per-stream `06 47 <mainL> <mainR> <aux>` | |
-| OLED screen | `06 93 <1024B frame>` | 128×64, column-major-LSB (SSD1306-style, cf. ggoled) |
-| OLED brightness | `06 85 <..>` (64B) | |
-| OLED return-to-UI | `06 95` (64B) | |
+| OLED frame | `06 93 <x> 00 <w> <h> <pixels>` | **1024-byte feature report** per strip, strips ≤ 64 px wide (x = 0, 64), column-major LSB-top, 128×64 panel. One all-black frame blanks the panel and holds 3+ min; re-sending every 2 s flashes the stock screen through. **Verified 2026-09-27** |
+| OLED brightness | `06 85 <1-10>` | 64-byte output report. **No off level**: `0` behaves like `1` (ggoled rejects it). Verified 2026-09-27 |
+| OLED return-to-UI | `06 95` | stock screen back immediately. A headset-wheel volume change also returns to it, permanently. Verified 2026-09-27 |
+| Audio settings | `06 20` | reply byte 2 = audio input, **byte 3 = volume** (attenuation 0–56). Verified 2026-09-27 |
 
 ### Status readback — `06 b0` reply byte map (RX `07 b0 ..`)
 `2`=bt_powerup, `3`=bt_auto_mute, `4`=bt_power, `5`=bt_connection, **`6`=headset_battery (0–8 → %)**,
@@ -127,7 +128,10 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 ### Interrupt-IN events (RX `0x07 ..`, read continuously from iface 4)
 - **ChatMix dial:** `07 45 <game 0x00-0x64> <chat 0x00-0x64>` — both `0x64` at center detent.
   **Host must do the fade** (no hardware mixing this generation → drives the PipeWire ChatMix engine).
-- Master volume: `07 25 <vol>` · EQ band readback: `07 31 <band> <val>` (dB=`(val-20)/2`) ·
+- **Battery: `07 b7 <headset> <spare>`**, both in eighths (observed 2026-09-27): `07 b7 08 00` when a full pack
+  went into the headset with the slot empty; `07 b7 00 05`→`06`→`07`→`08` about every 20 min while a pack
+  charged in the slot with the headset off. `07 b5 01` accompanied headset power changes (meaning unconfirmed).
+- Master volume: `07 25 <atten>` (only while the wheel moves) · EQ band readback: `07 31 <band> <val>` (dB=`(val-20)/2`) ·
   ANC `07 bd <nc>` · transparency `07 b9 <lvl>` · line-out `07 43`/`07 47`.
 
 ### Init handshake (loteran `device_init`, before applying settings)
@@ -169,7 +173,8 @@ Transport: **feature reports on iface 1** (leading report-id `0x00`). Uses the `
 | Profile select | `0x89` | 5 onboard profiles |
 | Firmware version | `0x90` | read-only |
 
-Packet sizes: `PACKET_IN=64`, `OUT=65`. Reuse: `OpenRGB Controllers/SteelSeriesController/`
+**Verified on this unit 2026-09-27**: `0x4B` init, a `0x40` frame (all red, then only G green) and
+`0x41` hand-back behaved as sent; `0xF5` replied `f5 00 01` (US). Packet sizes: `PACKET_IN=64`, `OUT=65`. Reuse: `OpenRGB Controllers/SteelSeriesController/`
 (`SteelSeriesApexController.cpp`, `SteelSeriesApexBaseController.h`, `SteelSeriesDevices.h`,
 `SteelSeriesControllerDetect.cpp`) — GPL-2.0-or-later, upgrades cleanly into GPL-3.0.
 
@@ -184,6 +189,19 @@ apex-tux covers the Gen3 *family* but **not `0x1642` specifically** (it lists `0
 
 Reuse: `not-jan/apex-tux` `apex-hardware/src/usb.rs` + `device.rs` (Unlicense) — add `0x1642` to
 `SupportedDevice`, pick the variant after descriptor inspection.
+
+> **Tested on `0x1642` 2026-09-27 — none of the known framings drives its OLED.**
+> The HID descriptor of iface 1 (the only writable vendor interface) declares **no report IDs** and a
+> **644-byte feature report** (plus 64-byte input/output); iface 4 (`0xFFC1`) is input-only, iface 3 is
+> consumer/mouse. With the owner watching the OLED, each of these left it **unchanged**:
+> 1. apex-tux single-report: 642 bytes `[0x61, 640 page-major px, 0]` (0x61 lands in the report-id slot);
+> 2. the same frame unnumbered, shaped like this keyboard's working RGB frames: `[0x00, 0x61, px…, 0]`;
+> 3. (2) after a `0x4B` init;
+> 4. apex-tux chunked Gen 3: 8 × `[0x00, 0x0C, 0x01, offset LE, 80, 0, 80 px]` (tried once, owner's choice).
+>
+> None had any visible effect; lighting was handed back (`0x41`) afterwards. **The OLED command for
+> `0x1642` is unknown** — capture it from SteelSeries GG on Windows alongside the M5 actuation
+> captures rather than guessing further on this interface.
 
 ### 3c. Actuation / switch behavior — **UNSOLVED, fresh RE required**
 No public project implements OmniPoint / Rapid Trigger / Rapid Tap / Protection Mode for *any* Apex

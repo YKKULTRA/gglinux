@@ -45,9 +45,9 @@ fn main() -> Result<()> {
             println!("  auto-off         {:?}", s.auto_off.map(|t| t.minutes()));
             println!("  wireless mode    {:?}", s.wireless_mode);
             println!("  mic LED          {}", s.mic_led_brightness);
-            println!("  mic status       0x{:02x} (raw)", s.mic_status_raw);
-            println!("  ANC              0x{:02x} (raw)", s.anc_raw);
-            println!("  transparency     0x{:02x} (raw)", s.transparency_raw);
+            println!("  mic muted        {:?}", s.mic_muted());
+            println!("  noise mode       {:?}", s.noise_mode());
+            println!("  transparency     {}", s.transparency_raw);
         }
         None => println!("\nno status reply — base station did not answer"),
     }

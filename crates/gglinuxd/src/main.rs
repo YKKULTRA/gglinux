@@ -1,8 +1,12 @@
 //! gglinuxd — the gglinux background daemon.
 //!
 //! Current scope: enumerate SteelSeries devices, monitor hotplug, control the
-//! Rival 3 Wireless Gen 2, and serve all of it over a newline-delimited JSON unix
-//! socket. PipeWire audio and the GameSense server land in later milestones.
+//! Rival 3 Wireless Gen 2, drive the Arctis Nova Pro Wireless headset (settings,
+//! and keeping its base-station screen from burning in), run the Apex Pro TKL
+//! Gen 3's lighting, run Sonar-style audio channels on PipeWire, and serve all
+//! of it over a newline-delimited JSON unix socket. PipeWire audio and the GameSense server land in later milestones.
+
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use gg_ipc::{DeviceInfo, Event, Request, RequestFrame, ResponseData, ServerMessage};
@@ -10,14 +14,33 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, watch};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
+mod clock;
+mod headset;
+mod keyboard;
 mod mouse;
+mod sonar;
 
+use headset::{Command as HeadsetCommand, Handle as HeadsetHandle};
+use keyboard::{Command as KeyboardCommand, Handle as KeyboardHandle};
 use mouse::{Command as MouseCommand, Handle as MouseHandle};
+use sonar::{Command as SonarCommand, Handle as SonarHandle};
 
 /// Capacity of the per-client event broadcast buffer.
 const EVENT_CHANNEL_CAP: usize = 256;
+
+/// Longest the daemon waits, on exit, for the base-station screen to be blanked.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+
+/// Handles to the device workers, passed to every client task.
+#[derive(Clone)]
+struct Workers {
+    mouse: MouseHandle,
+    headset: HeadsetHandle,
+    keyboard: KeyboardHandle,
+    sonar: SonarHandle,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,9 +69,19 @@ async fn main() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAP);
 
     spawn_hid_monitor(snapshot_tx, event_tx.clone());
-    let mouse = mouse::spawn(event_tx.clone());
+    let workers = Workers {
+        mouse: mouse::spawn(event_tx.clone()),
+        headset: headset::spawn(event_tx.clone()),
+        keyboard: keyboard::spawn(event_tx.clone()),
+        sonar: sonar::spawn(event_tx.clone()),
+    };
 
-    let result = accept_loop(&listener, snapshot_rx, event_tx, mouse).await;
+    let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
+
+    // Leave the base-station screen dark — at logout or shutdown its USB power
+    // often stays on, and nobody is there to see it — and give the keyboard its
+    // own lighting back.
+    shutdown_devices(&workers).await;
 
     // Best-effort cleanup so the next start binds cleanly.
     let _ = std::fs::remove_file(&path);
@@ -79,7 +112,7 @@ async fn accept_loop(
     listener: &UnixListener,
     snapshot_rx: watch::Receiver<Vec<DeviceInfo>>,
     event_tx: broadcast::Sender<Event>,
-    mouse: MouseHandle,
+    workers: Workers,
 ) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
 
@@ -89,9 +122,9 @@ async fn accept_loop(
                 let (stream, _addr) = accepted.context("accept")?;
                 let snapshot_rx = snapshot_rx.clone();
                 let event_tx = event_tx.clone();
-                let mouse = mouse.clone();
+                let workers = workers.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, snapshot_rx, event_tx, mouse).await {
+                    if let Err(e) = handle_client(stream, snapshot_rx, event_tx, workers).await {
                         debug!(error = %e, "client connection ended");
                     }
                 });
@@ -108,7 +141,7 @@ async fn handle_client(
     stream: UnixStream,
     snapshot_rx: watch::Receiver<Vec<DeviceInfo>>,
     event_tx: broadcast::Sender<Event>,
-    mouse: MouseHandle,
+    workers: Workers,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
@@ -127,7 +160,7 @@ async fn handle_client(
             line = lines.next_line() => {
                 match line? {
                     Some(line) if !line.trim().is_empty() => {
-                        let reply = dispatch(&line, &snapshot_rx, &mouse).await;
+                        let reply = dispatch(&line, &snapshot_rx, &workers).await;
                         write_message(&mut write_half, &reply).await?;
                     }
                     Some(_) => {} // blank keepalive line
@@ -156,12 +189,12 @@ async fn handle_client(
 
 /// Parse and answer a single request line.
 ///
-/// Device commands are answered by the mouse worker thread, so this awaits; a
+/// Device commands are answered by the worker threads, so this awaits; a
 /// client issuing a slow command does not block other clients.
 async fn dispatch(
     line: &str,
     snapshot_rx: &watch::Receiver<Vec<DeviceInfo>>,
-    mouse: &MouseHandle,
+    workers: &Workers,
 ) -> ServerMessage {
     let frame = match serde_json::from_str::<RequestFrame>(line) {
         Ok(frame) => frame,
@@ -185,7 +218,7 @@ async fn dispatch(
         }
         Request::Ping => ResponseData::Pong,
 
-        Request::GetMouseState => match mouse.send(MouseCommand::GetState).await {
+        Request::GetMouseState => match workers.mouse.send(MouseCommand::GetState).await {
             Ok(state) => ResponseData::Mouse { state },
             Err(message) => ResponseData::Error { message },
         },
@@ -194,7 +227,8 @@ async fn dispatch(
             active,
             save,
         } => outcome(
-            mouse
+            workers
+                .mouse
                 .send::<()>(|reply| MouseCommand::SetDpi {
                     stages,
                     active,
@@ -204,12 +238,14 @@ async fn dispatch(
                 .await,
         ),
         Request::SetMousePolling { hz, save } => outcome(
-            mouse
+            workers
+                .mouse
                 .send::<()>(|reply| MouseCommand::SetPolling { hz, save, reply })
                 .await,
         ),
         Request::SetMouseButtons { actions, save } => outcome(
-            mouse
+            workers
+                .mouse
                 .send::<()>(|reply| MouseCommand::SetButtons {
                     actions,
                     save,
@@ -217,7 +253,85 @@ async fn dispatch(
                 })
                 .await,
         ),
-        Request::SaveMouse => outcome(mouse.send(MouseCommand::Save).await),
+        Request::SaveMouse => outcome(workers.mouse.send(MouseCommand::Save).await),
+        Request::GetHeadsetState => match workers.headset.send(HeadsetCommand::GetState).await {
+            Ok(state) => ResponseData::Headset { state },
+            Err(message) => ResponseData::Error { message },
+        },
+        Request::SetHeadsetScreen { settings } => outcome(
+            workers
+                .headset
+                .send::<()>(|reply| HeadsetCommand::SetScreen { settings, reply })
+                .await,
+        ),
+        Request::SetHeadset { change } => outcome(
+            workers
+                .headset
+                .send::<()>(|reply| HeadsetCommand::SetControl { change, reply })
+                .await,
+        ),
+        Request::GetSonarState => match workers.sonar.send(SonarCommand::GetState).await {
+            Ok(state) => ResponseData::Sonar { state },
+            Err(message) => ResponseData::Error { message },
+        },
+        Request::SetSonarEnabled { enabled } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetEnabled { enabled, reply }).await,
+        ),
+        Request::SetSonarOutput { name } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetOutput { name, reply }).await,
+        ),
+        Request::SetChannelVolume { channel, volume } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetVolume { channel, volume, reply })
+                .await,
+        ),
+        Request::SetChatMix { balance } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetChatMix { balance, reply }).await,
+        ),
+        Request::SetAppChannel { binary, channel } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetAppChannel { binary, channel, reply })
+                .await,
+        ),
+        Request::SetChannelEq { channel, bands } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetChannelEq { channel, bands, reply })
+                .await,
+        ),
+        Request::SetHeadphoneEq { eq } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetHeadphoneEq { eq, reply }).await,
+        ),
+        Request::ImportAutoEq { text, name } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::ImportAutoEq { text, name, reply })
+                .await,
+        ),
+        Request::SetMicInput { name } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetMicInput { name, reply }).await,
+        ),
+        Request::SetMicSettings { settings } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetMicSettings { settings, reply })
+                .await,
+        ),
+        Request::SetMicVolume { volume } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetMicVolume { volume, reply }).await,
+        ),
+        Request::GetKeyboardState => match workers.keyboard.send(KeyboardCommand::GetState).await {
+            Ok(state) => ResponseData::Keyboard { state },
+            Err(message) => ResponseData::Error { message },
+        },
+        Request::SetLighting { lighting } => outcome(
+            workers
+                .keyboard
+                .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
+                .await,
+        ),
     };
     ServerMessage::response(frame.id, result)
 }
@@ -227,6 +341,29 @@ fn outcome(result: Result<(), String>) -> ResponseData {
     match result {
         Ok(()) => ResponseData::Success,
         Err(message) => ResponseData::Error { message },
+    }
+}
+
+/// Leave the devices as their owner expects them — base-station screen dark,
+/// keyboard lighting back on its own profile — waiting at most [`SHUTDOWN_GRACE`].
+async fn shutdown_devices(workers: &Workers) {
+    let both = async {
+        tokio::join!(
+            workers.headset.send::<()>(HeadsetCommand::Shutdown),
+            workers.keyboard.send::<()>(KeyboardCommand::Shutdown),
+        )
+    };
+    match tokio::time::timeout(SHUTDOWN_GRACE, both).await {
+        Ok((headset, keyboard)) => {
+            if let Err(e) = headset {
+                warn!(error = %e, "headset shutdown failed");
+            }
+            if let Err(e) = keyboard {
+                warn!(error = %e, "keyboard shutdown failed");
+            }
+            debug!("devices left as found");
+        }
+        Err(_) => warn!("device workers did not confirm shutdown in time"),
     }
 }
 
