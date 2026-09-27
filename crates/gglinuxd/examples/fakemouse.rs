@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    BatteryState, DeviceInfo, DeviceKind, DpiStage, Event, InterfaceInfo, MouseSettings, MouseState,
-    Request, RequestFrame, ResponseData, ServerMessage,
+    BatteryState, DeviceInfo, DeviceKind, DpiStage, Event, HeadsetPower, HeadsetState, InterfaceInfo,
+    MouseSettings, MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage,
 };
 
 /// How often to push a `mouse_battery` notification.
@@ -38,6 +38,8 @@ const BATTERY_TICK: Duration = Duration::from_secs(5);
 struct Fake {
     battery: Option<BatteryState>,
     applied: Option<MouseSettings>,
+    /// Screen settings as last sent, echoed back unvalidated.
+    screen: ScreenSettings,
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
@@ -76,6 +78,7 @@ fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(Fake {
         battery: Some(BatteryState { level, charging }),
         applied: None,
+        screen: ScreenSettings::default(),
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -188,6 +191,11 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             eprintln!(">>   (would commit to onboard memory)");
             ResponseData::Success
         }
+        Request::GetHeadsetState => ResponseData::Headset { state: headset_state(&s) },
+        Request::SetHeadsetScreen { settings } => {
+            s.screen = settings;
+            ResponseData::Success
+        }
     }
 }
 
@@ -202,6 +210,17 @@ fn mouse_state(s: &Fake) -> MouseState {
         connected: s.devices.iter().any(|d| d.kind == DeviceKind::Mouse),
         battery: s.battery,
         applied: s.applied.clone(),
+    }
+}
+
+fn headset_state(s: &Fake) -> HeadsetState {
+    HeadsetState {
+        connected: s.devices.iter().any(|d| d.kind == DeviceKind::Headset),
+        power: HeadsetPower::Online,
+        headset_battery: Some(75),
+        spare_battery: Some(100),
+        screen: s.screen,
+        screen_dark: false,
     }
 }
 
@@ -231,6 +250,8 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetMousePolling { .. } => "set_mouse_polling",
         Request::SetMouseButtons { .. } => "set_mouse_buttons",
         Request::SaveMouse => "save_mouse",
+        Request::GetHeadsetState => "get_headset_state",
+        Request::SetHeadsetScreen { .. } => "set_headset_screen",
     }
 }
 
@@ -248,6 +269,10 @@ fn describe(req: &Request) -> String {
         Request::SetMouseButtons { actions, save } => {
             format!("set_mouse_buttons {} save={save}", actions.join(","))
         }
+        Request::SetHeadsetScreen { settings } => format!(
+            "set_headset_screen protect={} lit={}s brightness={:?}",
+            settings.protect, settings.lit_seconds, settings.brightness
+        ),
         other => method_name(other).to_string(),
     }
 }

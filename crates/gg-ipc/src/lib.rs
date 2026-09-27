@@ -81,6 +81,81 @@ pub struct MouseState {
     pub applied: Option<MouseSettings>,
 }
 
+/// Burn-in protection for the headset base station's screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenSettings {
+    /// Keep the screen dark, lighting it briefly after events.
+    pub protect: bool,
+    /// How long the screen stays lit after an event.
+    pub lit_seconds: u16,
+    /// OLED brightness, or `None` to leave the device's own level alone — it
+    /// cannot be read back, so gglinux never assumes one.
+    pub brightness: Option<u8>,
+}
+
+impl ScreenSettings {
+    pub const LIT_SECONDS: std::ops::RangeInclusive<u16> = 3..=600;
+    /// There is no "off" level; see `gg_device_headset::proto::OLED_BRIGHTNESS_MIN`.
+    pub const BRIGHTNESS: std::ops::RangeInclusive<u8> = 1..=10;
+
+    /// Check ranges, with a message meant for the user.
+    pub fn validate(&self) -> Result<(), String> {
+        if !Self::LIT_SECONDS.contains(&self.lit_seconds) {
+            return Err(format!(
+                "screen lit period {} s out of range ({}..={})",
+                self.lit_seconds,
+                Self::LIT_SECONDS.start(),
+                Self::LIT_SECONDS.end()
+            ));
+        }
+        if let Some(level) = self.brightness {
+            if !Self::BRIGHTNESS.contains(&level) {
+                return Err(format!(
+                    "screen brightness {level} out of range ({}..={}) — the lowest level is \
+                     still lit, so no brightness turns the screen off",
+                    Self::BRIGHTNESS.start(),
+                    Self::BRIGHTNESS.end()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for ScreenSettings {
+    fn default() -> Self {
+        ScreenSettings { protect: true, lit_seconds: 10, brightness: None }
+    }
+}
+
+/// Where the headset is, as the base station reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadsetPower {
+    Offline,
+    Charging,
+    Online,
+    /// Not reported yet, or a value we have not seen.
+    Unknown,
+}
+
+/// What the daemon knows about the headset and its base station.
+///
+/// Unlike [`MouseState`], these are readings: the base station reports them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadsetState {
+    /// Whether the base station is plugged in and open.
+    pub connected: bool,
+    pub power: HeadsetPower,
+    /// Percent; `None` while the headset is off.
+    pub headset_battery: Option<u8>,
+    /// Percent; `None` when no spare pack is seated.
+    pub spare_battery: Option<u8>,
+    pub screen: ScreenSettings,
+    /// Whether gglinux has the screen blanked right now.
+    pub screen_dark: bool,
+}
+
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
 ///
 /// The `set_mouse_*` methods address "the connected Rival 3 Wireless Gen 2" without
@@ -116,6 +191,10 @@ pub enum Request {
     },
     /// Commit current settings to the mouse's onboard memory.
     SaveMouse,
+    /// Headset battery, power, and screen settings.
+    GetHeadsetState,
+    /// Replace the base-station screen settings.
+    SetHeadsetScreen { settings: ScreenSettings },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -132,6 +211,7 @@ pub enum ResponseData {
     Devices { devices: Vec<DeviceInfo> },
     Pong,
     Mouse { state: MouseState },
+    Headset { state: HeadsetState },
     /// A command was accepted and applied.
     Success,
     Error { message: String },
@@ -147,6 +227,8 @@ pub enum Event {
     DevicesChanged { devices: Vec<DeviceInfo> },
     /// Mouse battery changed (or became unknown when it went to sleep).
     MouseBattery { battery: Option<BatteryState> },
+    /// Headset state changed: battery, power, connection, or screen.
+    HeadsetChanged { state: HeadsetState },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -253,5 +335,46 @@ mod tests {
             .unwrap();
         assert!(note.contains("\"kind\":\"notification\""));
         assert!(note.contains("\"event\":\"device_removed\""));
+    }
+
+    #[test]
+    fn headset_requests_parse_from_their_documented_json() {
+        let set = r#"{"id":5,"req":{"method":"set_headset_screen","params":
+            {"settings":{"protect":true,"lit_seconds":10,"brightness":null}}}}"#;
+        match serde_json::from_str::<RequestFrame>(set).unwrap().req {
+            Request::SetHeadsetScreen { settings } => assert_eq!(settings, ScreenSettings::default()),
+            other => panic!("parsed as {other:?}"),
+        }
+        serde_json::from_str::<RequestFrame>(r#"{"id":6,"req":{"method":"get_headset_state"}}"#)
+            .expect("get_headset_state should parse");
+    }
+
+    #[test]
+    fn headset_state_serializes_for_the_ui() {
+        let state = HeadsetState {
+            connected: true,
+            power: HeadsetPower::Online,
+            headset_battery: Some(12),
+            spare_battery: None,
+            screen: ScreenSettings::default(),
+            screen_dark: true,
+        };
+        let json = serde_json::to_string(&ServerMessage::notify(Event::HeadsetChanged { state })).unwrap();
+        assert!(json.contains(r#""event":"headset_changed""#), "{json}");
+        assert!(json.contains(r#""power":"online""#), "{json}");
+        assert!(json.contains(r#""spare_battery":null"#), "{json}");
+        assert!(json.contains(r#""screen_dark":true"#), "{json}");
+        assert!(json.contains(r#""lit_seconds":10"#), "{json}");
+    }
+
+    #[test]
+    fn screen_settings_reject_out_of_range_values() {
+        let ok = ScreenSettings::default();
+        assert!(ok.validate().is_ok());
+        assert!(ScreenSettings { lit_seconds: 2, ..ok }.validate().is_err());
+        assert!(ScreenSettings { lit_seconds: 601, ..ok }.validate().is_err());
+        assert!(ScreenSettings { brightness: Some(0), ..ok }.validate().is_err(), "0 is not off");
+        assert!(ScreenSettings { brightness: Some(11), ..ok }.validate().is_err());
+        assert!(ScreenSettings { brightness: Some(1), lit_seconds: 600, ..ok }.validate().is_ok());
     }
 }

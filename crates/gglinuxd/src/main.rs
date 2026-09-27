@@ -218,6 +218,9 @@ async fn dispatch(
                 .await,
         ),
         Request::SaveMouse => outcome(mouse.send(MouseCommand::Save).await),
+        Request::GetHeadsetState | Request::SetHeadsetScreen { .. } => ResponseData::Error {
+            message: "headset support is not wired up yet".into(),
+        },
     };
     ServerMessage::response(frame.id, result)
 }
