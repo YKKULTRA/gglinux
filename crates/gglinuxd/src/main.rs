@@ -1,8 +1,11 @@
 //! gglinuxd — the gglinux background daemon.
 //!
 //! Current scope: enumerate SteelSeries devices, monitor hotplug, control the
-//! Rival 3 Wireless Gen 2, and serve all of it over a newline-delimited JSON unix
+//! Rival 3 Wireless Gen 2, keep the Arctis Nova Pro Wireless base-station screen
+//! from burning in, and serve all of it over a newline-delimited JSON unix
 //! socket. PipeWire audio and the GameSense server land in later milestones.
+
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use gg_ipc::{DeviceInfo, Event, Request, RequestFrame, ResponseData, ServerMessage};
@@ -10,15 +13,27 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, watch};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
+mod clock;
 mod headset;
 mod mouse;
 
+use headset::{Command as HeadsetCommand, Handle as HeadsetHandle};
 use mouse::{Command as MouseCommand, Handle as MouseHandle};
 
 /// Capacity of the per-client event broadcast buffer.
 const EVENT_CHANNEL_CAP: usize = 256;
+
+/// Longest the daemon waits, on exit, for the base-station screen to be blanked.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+
+/// Handles to the device workers, passed to every client task.
+#[derive(Clone)]
+struct Workers {
+    mouse: MouseHandle,
+    headset: HeadsetHandle,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,9 +62,16 @@ async fn main() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAP);
 
     spawn_hid_monitor(snapshot_tx, event_tx.clone());
-    let mouse = mouse::spawn(event_tx.clone());
+    let workers = Workers {
+        mouse: mouse::spawn(event_tx.clone()),
+        headset: headset::spawn(event_tx.clone()),
+    };
 
-    let result = accept_loop(&listener, snapshot_rx, event_tx, mouse).await;
+    let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
+
+    // Leave the base-station screen dark: at logout or shutdown its USB power
+    // often stays on, and nobody is there to see it.
+    shutdown_headset(&workers.headset).await;
 
     // Best-effort cleanup so the next start binds cleanly.
     let _ = std::fs::remove_file(&path);
@@ -80,7 +102,7 @@ async fn accept_loop(
     listener: &UnixListener,
     snapshot_rx: watch::Receiver<Vec<DeviceInfo>>,
     event_tx: broadcast::Sender<Event>,
-    mouse: MouseHandle,
+    workers: Workers,
 ) -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
 
@@ -90,9 +112,9 @@ async fn accept_loop(
                 let (stream, _addr) = accepted.context("accept")?;
                 let snapshot_rx = snapshot_rx.clone();
                 let event_tx = event_tx.clone();
-                let mouse = mouse.clone();
+                let workers = workers.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, snapshot_rx, event_tx, mouse).await {
+                    if let Err(e) = handle_client(stream, snapshot_rx, event_tx, workers).await {
                         debug!(error = %e, "client connection ended");
                     }
                 });
@@ -109,7 +131,7 @@ async fn handle_client(
     stream: UnixStream,
     snapshot_rx: watch::Receiver<Vec<DeviceInfo>>,
     event_tx: broadcast::Sender<Event>,
-    mouse: MouseHandle,
+    workers: Workers,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
@@ -128,7 +150,7 @@ async fn handle_client(
             line = lines.next_line() => {
                 match line? {
                     Some(line) if !line.trim().is_empty() => {
-                        let reply = dispatch(&line, &snapshot_rx, &mouse).await;
+                        let reply = dispatch(&line, &snapshot_rx, &workers).await;
                         write_message(&mut write_half, &reply).await?;
                     }
                     Some(_) => {} // blank keepalive line
@@ -157,12 +179,12 @@ async fn handle_client(
 
 /// Parse and answer a single request line.
 ///
-/// Device commands are answered by the mouse worker thread, so this awaits; a
+/// Device commands are answered by the worker threads, so this awaits; a
 /// client issuing a slow command does not block other clients.
 async fn dispatch(
     line: &str,
     snapshot_rx: &watch::Receiver<Vec<DeviceInfo>>,
-    mouse: &MouseHandle,
+    workers: &Workers,
 ) -> ServerMessage {
     let frame = match serde_json::from_str::<RequestFrame>(line) {
         Ok(frame) => frame,
@@ -186,7 +208,7 @@ async fn dispatch(
         }
         Request::Ping => ResponseData::Pong,
 
-        Request::GetMouseState => match mouse.send(MouseCommand::GetState).await {
+        Request::GetMouseState => match workers.mouse.send(MouseCommand::GetState).await {
             Ok(state) => ResponseData::Mouse { state },
             Err(message) => ResponseData::Error { message },
         },
@@ -195,7 +217,8 @@ async fn dispatch(
             active,
             save,
         } => outcome(
-            mouse
+            workers
+                .mouse
                 .send::<()>(|reply| MouseCommand::SetDpi {
                     stages,
                     active,
@@ -205,12 +228,14 @@ async fn dispatch(
                 .await,
         ),
         Request::SetMousePolling { hz, save } => outcome(
-            mouse
+            workers
+                .mouse
                 .send::<()>(|reply| MouseCommand::SetPolling { hz, save, reply })
                 .await,
         ),
         Request::SetMouseButtons { actions, save } => outcome(
-            mouse
+            workers
+                .mouse
                 .send::<()>(|reply| MouseCommand::SetButtons {
                     actions,
                     save,
@@ -218,10 +243,17 @@ async fn dispatch(
                 })
                 .await,
         ),
-        Request::SaveMouse => outcome(mouse.send(MouseCommand::Save).await),
-        Request::GetHeadsetState | Request::SetHeadsetScreen { .. } => ResponseData::Error {
-            message: "headset support is not wired up yet".into(),
+        Request::SaveMouse => outcome(workers.mouse.send(MouseCommand::Save).await),
+        Request::GetHeadsetState => match workers.headset.send(HeadsetCommand::GetState).await {
+            Ok(state) => ResponseData::Headset { state },
+            Err(message) => ResponseData::Error { message },
         },
+        Request::SetHeadsetScreen { settings } => outcome(
+            workers
+                .headset
+                .send::<()>(|reply| HeadsetCommand::SetScreen { settings, reply })
+                .await,
+        ),
     };
     ServerMessage::response(frame.id, result)
 }
@@ -231,6 +263,16 @@ fn outcome(result: Result<(), String>) -> ResponseData {
     match result {
         Ok(()) => ResponseData::Success,
         Err(message) => ResponseData::Error { message },
+    }
+}
+
+/// Ask the headset worker to leave the screen dark, waiting at most [`SHUTDOWN_GRACE`].
+async fn shutdown_headset(headset: &HeadsetHandle) {
+    let request = headset.send::<()>(HeadsetCommand::Shutdown);
+    match tokio::time::timeout(SHUTDOWN_GRACE, request).await {
+        Ok(Ok(())) => debug!("base-station screen left dark"),
+        Ok(Err(e)) => warn!(error = %e, "headset shutdown failed"),
+        Err(_) => warn!("headset worker did not confirm shutdown in time"),
     }
 }
 

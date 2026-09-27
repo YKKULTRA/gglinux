@@ -17,6 +17,8 @@ use hidapi::HidApi;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, warn};
 
+use crate::clock::is_older_than;
+
 /// How often to re-read the battery on our own. The mouse sleeps aggressively and
 /// the reading only moves by whole percent, so there is nothing to gain from
 /// polling faster.
@@ -231,11 +233,6 @@ fn with_mouse<T>(
     }
     let mouse = Mouse::open(&state.api).map_err(|e| format!("{e:#}"))?;
     f(&mouse).map_err(|e| format!("{e:#}"))
-}
-
-/// Whether `at` is unset or longer ago than `age`.
-fn is_older_than(at: Option<Instant>, age: Duration) -> bool {
-    at.is_none_or(|t| t.elapsed() >= age)
 }
 
 /// Read the battery, unless one was read very recently. See [`MIN_POLL_INTERVAL`].
