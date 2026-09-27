@@ -106,6 +106,39 @@ export interface HeadsetState {
   controls: HeadsetControls;
 }
 
+export type Channel = "game" | "chat" | "media" | "aux";
+
+export interface AudioOutput {
+  name: string;
+  description: string;
+}
+
+export interface ChannelState {
+  channel: Channel;
+  present: boolean;
+  /** 0..=1 on the desktop mixer's scale; null when absent. */
+  volume: number | null;
+}
+
+export interface AppStream {
+  id: number;
+  name: string;
+  /** What routing rules match on; null if the app can't be told apart. */
+  binary: string | null;
+  channel: Channel;
+}
+
+export interface SonarState {
+  available: boolean;
+  enabled: boolean;
+  output: string | null;
+  outputs: AudioOutput[];
+  channels: ChannelState[];
+  /** -1 all Game … 0 both full … 1 all Chat. */
+  chatmix: number;
+  apps: AppStream[];
+}
+
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
 export type Request =
   | { method: "list_devices" }
@@ -117,7 +150,13 @@ export type Request =
   | { method: "save_mouse" }
   | { method: "get_headset_state" }
   | { method: "set_headset_screen"; params: { settings: ScreenSettings } }
-  | { method: "set_headset"; params: { change: HeadsetChange } };
+  | { method: "set_headset"; params: { change: HeadsetChange } }
+  | { method: "get_sonar_state" }
+  | { method: "set_sonar_enabled"; params: { enabled: boolean } }
+  | { method: "set_sonar_output"; params: { name: string } }
+  | { method: "set_channel_volume"; params: { channel: Channel; volume: number } }
+  | { method: "set_chat_mix"; params: { balance: number } }
+  | { method: "set_app_channel"; params: { binary: string; channel: Channel } };
 
 export interface RequestFrame {
   id: number;
@@ -129,6 +168,7 @@ export type ResponseData =
   | { type: "pong" }
   | { type: "mouse"; state: MouseState }
   | { type: "headset"; state: HeadsetState }
+  | { type: "sonar"; state: SonarState }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -137,7 +177,8 @@ export type DaemonEvent =
   | { event: "device_removed"; data: { id: string } }
   | { event: "devices_changed"; data: { devices: DeviceInfo[] } }
   | { event: "mouse_battery"; data: { battery: BatteryState | null } }
-  | { event: "headset_changed"; data: { state: HeadsetState } };
+  | { event: "headset_changed"; data: { state: HeadsetState } }
+  | { event: "sonar_changed"; data: { state: SonarState } };
 
 export type ServerMessage =
   | { kind: "response"; id: number; result: ResponseData }

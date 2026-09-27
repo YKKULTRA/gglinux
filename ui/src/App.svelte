@@ -4,6 +4,7 @@
   import DeviceCard from "./lib/DeviceCard.svelte";
   import HeadsetPanel from "./lib/HeadsetPanel.svelte";
   import MousePanel from "./lib/MousePanel.svelte";
+  import SonarPanel from "./lib/SonarPanel.svelte";
   import Icon from "./lib/Icon.svelte";
   import type { IconName } from "./lib/icons";
 
@@ -17,8 +18,7 @@
   ];
 
   // Milestones that will fill the not-yet-built pages (see PLAN.md).
-  const COMING: Record<Exclude<Page, "engine">, string> = {
-    sonar: "M3 — PipeWire virtual sinks, per-app routing, parametric EQ",
+  const COMING: Record<Exclude<Page, "engine" | "sonar">, string> = {
     moments: "M7 — gpu-screen-recorder replay buffer and clip library",
     settings: "M6/M7 — GameSense server, Proton discovery, profile sync",
   };
@@ -106,6 +106,16 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
 
       {#if daemon.lastError}
         <p class="error">{daemon.lastError}</p>
+      {/if}
+    {:else if page === "sonar"}
+      <header class="page-head">
+        <h1>Sonar</h1>
+        <p>{NAV[1].blurb}</p>
+      </header>
+      {#if daemon.connected}
+        <SonarPanel />
+      {:else}
+        <section class="notice"><h2>gglinuxd isn&rsquo;t running</h2></section>
       {/if}
     {:else}
       {@const item = NAV.find((n) => n.id === page)!}

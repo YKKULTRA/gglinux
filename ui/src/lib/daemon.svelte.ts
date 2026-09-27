@@ -8,6 +8,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  Channel,
   DeviceInfo,
   DpiStage,
   HeadsetChange,
@@ -17,6 +18,7 @@ import type {
   ResponseData,
   ScreenSettings,
   ServerMessage,
+  SonarState,
 } from "./types";
 
 /** Reject a pending request if the daemon never answers. */
@@ -37,6 +39,8 @@ class Daemon {
   mouse = $state<MouseState | null>(null);
   /** Headset battery, power, and screen settings; null until first fetched. */
   headset = $state<HeadsetState | null>(null);
+  /** Sonar channels, routing and ChatMix; null until first fetched. */
+  sonar = $state<SonarState | null>(null);
   /** Last transport/protocol error, for surfacing in the UI. */
   lastError = $state<string | null>(null);
 
@@ -58,6 +62,7 @@ class Daemon {
         // has written nothing, so keeping the old value would be a lie.
         this.mouse = null;
         this.headset = null;
+        this.sonar = null;
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -70,13 +75,13 @@ class Daemon {
   }
 
   /** Send a request and resolve with the daemon's response. */
-  request(req: Request): Promise<ResponseData> {
+  request(req: Request, timeoutMs = REQUEST_TIMEOUT_MS): Promise<ResponseData> {
     const id = this.#nextId++;
     return new Promise<ResponseData>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(new Error(`request ${req.method} timed out`));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeoutMs);
       this.#pending.set(id, { resolve, reject, timer });
 
       invoke("daemon_send", { frame: { id, req } }).catch((e: unknown) => {
@@ -142,6 +147,41 @@ class Daemon {
     await this.getHeadsetState();
   }
 
+  async getSonarState(): Promise<SonarState> {
+    const res = await this.request({ method: "get_sonar_state" });
+    if (res.type !== "sonar") throw new Error(`unexpected response: ${res.type}`);
+    this.sonar = res.state;
+    return res.state;
+  }
+
+  /** Every Sonar change answers `success`, then the fresh state is fetched. */
+  async #sonarCommand(req: Request, timeoutMs?: number): Promise<void> {
+    const res = await this.request(req, timeoutMs);
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getSonarState();
+  }
+
+  /** Restarts PipeWire and waits for it, so it gets a longer timeout. */
+  setSonarEnabled(enabled: boolean): Promise<void> {
+    return this.#sonarCommand({ method: "set_sonar_enabled", params: { enabled } }, 15000);
+  }
+
+  setSonarOutput(name: string): Promise<void> {
+    return this.#sonarCommand({ method: "set_sonar_output", params: { name } });
+  }
+
+  setChannelVolume(channel: Channel, volume: number): Promise<void> {
+    return this.#sonarCommand({ method: "set_channel_volume", params: { channel, volume } });
+  }
+
+  setChatMix(balance: number): Promise<void> {
+    return this.#sonarCommand({ method: "set_chat_mix", params: { balance } });
+  }
+
+  setAppChannel(binary: string, channel: Channel): Promise<void> {
+    return this.#sonarCommand({ method: "set_app_channel", params: { binary, channel } });
+  }
+
   async #command(req: Request): Promise<void> {
     const res = await this.request(req);
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
@@ -183,6 +223,9 @@ class Daemon {
         break;
       case "headset_changed":
         this.headset = ev.data.state;
+        break;
+      case "sonar_changed":
+        this.sonar = ev.data.state;
         break;
     }
   }
