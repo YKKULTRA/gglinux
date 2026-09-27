@@ -26,9 +26,19 @@ pub const LOW_BATTERY: u8 = 25;
 /// Battery is reported in eighths (0, 12, 25, 37, 50, 62, 75, 87, 100 %), and is
 /// `None` while the headset is off.
 pub fn wake_reason(prev: &Status, next: &Status) -> Option<WakeReason> {
-    // TODO(owner): decide which changes wake the screen. See the tests below.
-    let _ = (prev, next);
-    None
+    if prev.power != next.power {
+        return Some(WakeReason::Power);
+    }
+    if prev.spare_battery.is_some() != next.spare_battery.is_some() {
+        return Some(WakeReason::Spare);
+    }
+    if let (Some(before), Some(after)) = (prev.headset_battery, next.headset_battery) {
+        if after < before && after <= LOW_BATTERY {
+            return Some(WakeReason::Battery);
+        }
+    }
+    let controls = |s: &Status| (s.anc_raw, s.transparency_raw, s.mic_status_raw);
+    (controls(prev) != controls(next)).then_some(WakeReason::Controls)
 }
 
 #[cfg(test)]
