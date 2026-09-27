@@ -128,6 +128,9 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 ### Interrupt-IN events (RX `0x07 ..`, read continuously from iface 4)
 - **ChatMix dial:** `07 45 <game 0x00-0x64> <chat 0x00-0x64>` — both `0x64` at center detent.
   **Host must do the fade** (no hardware mixing this generation → drives the PipeWire ChatMix engine).
+- **Battery: `07 b7 <headset> <spare>`**, both in eighths (observed 2026-09-27): `07 b7 08 00` when a full pack
+  went into the headset with the slot empty; `07 b7 00 05`→`06`→`07`→`08` about every 20 min while a pack
+  charged in the slot with the headset off. `07 b5 01` accompanied headset power changes (meaning unconfirmed).
 - Master volume: `07 25 <atten>` (only while the wheel moves) · EQ band readback: `07 31 <band> <val>` (dB=`(val-20)/2`) ·
   ANC `07 bd <nc>` · transparency `07 b9 <lvl>` · line-out `07 43`/`07 47`.
 
