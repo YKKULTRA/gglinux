@@ -52,6 +52,30 @@ export interface MouseState {
   applied: MouseSettings | null;
 }
 
+export interface ScreenSettings {
+  /** Keep the base-station screen dark, lighting it briefly after events. */
+  protect: boolean;
+  /** Seconds the screen stays lit after an event, 3..=600. */
+  lit_seconds: number;
+  /** 1..=10, or null to leave the device's own level alone (it can't be read back). */
+  brightness: number | null;
+}
+
+export type HeadsetPower = "offline" | "charging" | "online" | "unknown";
+
+/** Readings, unlike MouseState: the base station reports these. */
+export interface HeadsetState {
+  connected: boolean;
+  power: HeadsetPower;
+  /** Percent; null while the headset is off. */
+  headset_battery: number | null;
+  /** Percent; null when no spare pack is seated. */
+  spare_battery: number | null;
+  screen: ScreenSettings;
+  /** Whether gglinux has the screen blanked right now. */
+  screen_dark: boolean;
+}
+
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
 export type Request =
   | { method: "list_devices" }
@@ -60,7 +84,9 @@ export type Request =
   | { method: "set_mouse_dpi"; params: { stages: DpiStage[]; active: number; save: boolean } }
   | { method: "set_mouse_polling"; params: { hz: number; save: boolean } }
   | { method: "set_mouse_buttons"; params: { actions: string[]; save: boolean } }
-  | { method: "save_mouse" };
+  | { method: "save_mouse" }
+  | { method: "get_headset_state" }
+  | { method: "set_headset_screen"; params: { settings: ScreenSettings } };
 
 export interface RequestFrame {
   id: number;
@@ -71,6 +97,7 @@ export type ResponseData =
   | { type: "devices"; devices: DeviceInfo[] }
   | { type: "pong" }
   | { type: "mouse"; state: MouseState }
+  | { type: "headset"; state: HeadsetState }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -78,7 +105,8 @@ export type DaemonEvent =
   | { event: "device_added"; data: DeviceInfo }
   | { event: "device_removed"; data: { id: string } }
   | { event: "devices_changed"; data: { devices: DeviceInfo[] } }
-  | { event: "mouse_battery"; data: { battery: BatteryState | null } };
+  | { event: "mouse_battery"; data: { battery: BatteryState | null } }
+  | { event: "headset_changed"; data: { state: HeadsetState } };
 
 export type ServerMessage =
   | { kind: "response"; id: number; result: ResponseData }

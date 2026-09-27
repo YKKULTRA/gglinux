@@ -7,7 +7,16 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { DeviceInfo, DpiStage, MouseState, Request, ResponseData, ServerMessage } from "./types";
+import type {
+  DeviceInfo,
+  DpiStage,
+  HeadsetState,
+  MouseState,
+  Request,
+  ResponseData,
+  ScreenSettings,
+  ServerMessage,
+} from "./types";
 
 /** Reject a pending request if the daemon never answers. */
 const REQUEST_TIMEOUT_MS = 5000;
@@ -25,6 +34,8 @@ class Daemon {
   devices = $state<DeviceInfo[]>([]);
   /** Mouse battery + applied settings; null until first fetched. */
   mouse = $state<MouseState | null>(null);
+  /** Headset battery, power, and screen settings; null until first fetched. */
+  headset = $state<HeadsetState | null>(null);
   /** Last transport/protocol error, for surfacing in the UI. */
   lastError = $state<string | null>(null);
 
@@ -45,6 +56,7 @@ class Daemon {
         // `applied` describes what *that* daemon process wrote. If it restarted it
         // has written nothing, so keeping the old value would be a lie.
         this.mouse = null;
+        this.headset = null;
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -110,6 +122,19 @@ class Daemon {
     await this.#command({ method: "save_mouse" });
   }
 
+  async getHeadsetState(): Promise<HeadsetState> {
+    const res = await this.request({ method: "get_headset_state" });
+    if (res.type !== "headset") throw new Error(`unexpected response: ${res.type}`);
+    this.headset = res.state;
+    return res.state;
+  }
+
+  async setHeadsetScreen(settings: ScreenSettings): Promise<void> {
+    const res = await this.request({ method: "set_headset_screen", params: { settings } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getHeadsetState();
+  }
+
   async #command(req: Request): Promise<void> {
     const res = await this.request(req);
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
@@ -148,6 +173,9 @@ class Daemon {
       case "mouse_battery":
         // Dropped if we have no state yet; the panel fetches one when it mounts.
         if (this.mouse) this.mouse = { ...this.mouse, battery: ev.data.battery };
+        break;
+      case "headset_changed":
+        this.headset = ev.data.state;
         break;
     }
   }

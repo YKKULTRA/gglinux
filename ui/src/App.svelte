@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { daemon } from "./lib/daemon.svelte";
   import DeviceCard from "./lib/DeviceCard.svelte";
+  import HeadsetPanel from "./lib/HeadsetPanel.svelte";
   import MousePanel from "./lib/MousePanel.svelte";
   import Icon from "./lib/Icon.svelte";
   import type { IconName } from "./lib/icons";
@@ -24,9 +25,11 @@
 
   let page = $state<Page>("engine");
 
-  /** Rival 3 Wireless Gen 2 — so far the only device with a control panel. */
+  /** Devices with a control panel so far. */
   const RIVAL3_PID = 0x1872;
+  const NOVA_PRO_PID = 0x12e0;
   let hasRival3 = $derived(daemon.devices.some((d) => d.product_id === RIVAL3_PID));
+  let hasNovaPro = $derived(daemon.devices.some((d) => d.product_id === NOVA_PRO_PID));
 
   onMount(() => {
     void daemon.start();
@@ -85,6 +88,12 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
         {#if hasRival3}
           <section class="controls">
             <MousePanel />
+          </section>
+        {/if}
+
+        {#if hasNovaPro}
+          <section class="controls">
+            <HeadsetPanel />
           </section>
         {/if}
 
