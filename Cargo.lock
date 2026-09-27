@@ -77,6 +77,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg-device-keyboard"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "hidapi",
+ "tracing",
+]
+
+[[package]]
 name = "gg-device-mouse"
 version = "0.0.1"
 dependencies = [

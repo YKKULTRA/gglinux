@@ -1,0 +1,13 @@
+[package]
+name = "gg-device-keyboard"
+description = "SteelSeries Apex Pro TKL Gen 3 lighting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hidapi.workspace = true
+tracing.workspace = true
