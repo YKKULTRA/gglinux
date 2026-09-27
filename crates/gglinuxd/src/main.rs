@@ -317,6 +317,9 @@ async fn dispatch(
         Request::SetMicVolume { volume } => outcome(
             workers.sonar.send::<()>(|reply| SonarCommand::SetMicVolume { volume, reply }).await,
         ),
+        Request::GetKeyboardState | Request::SetLighting { .. } => ResponseData::Error {
+            message: "keyboard lighting is not wired up yet".into(),
+        },
     };
     ServerMessage::response(frame.id, result)
 }

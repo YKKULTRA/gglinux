@@ -367,6 +367,95 @@ pub struct SonarState {
     pub mic: MicState,
 }
 
+/// An sRGB colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+/// What the keyboard lighting does.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Effect {
+    /// Each key its own colour, from [`Lighting::keys`].
+    Static,
+    /// Every key pulses one colour, one breath per `period_s`.
+    Breathing { color: Rgb, period_s: f32 },
+    /// A rainbow moving across the keyboard, one pass per `period_s`.
+    Wave { period_s: f32 },
+    /// Every key cycles the rainbow together, once per `period_s`.
+    Spectrum { period_s: f32 },
+}
+
+/// One key's static colour, by HID usage code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyColor {
+    pub code: u8,
+    pub color: Rgb,
+}
+
+/// Keyboard lighting as gglinux runs it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Lighting {
+    /// `false` leaves the lighting to the keyboard's own onboard profile.
+    pub enabled: bool,
+    pub effect: Effect,
+    /// Static colours; keys not listed are dark.
+    pub keys: Vec<KeyColor>,
+    /// 0..=100 %, applied to every frame.
+    pub brightness: u8,
+}
+
+impl Lighting {
+    pub const PERIOD_S: std::ops::RangeInclusive<f32> = 0.5..=60.0;
+
+    /// Check ranges, with a message meant for the user.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.brightness > 100 {
+            return Err(format!("brightness {}% out of range (0..=100)", self.brightness));
+        }
+        let period = match self.effect {
+            Effect::Static => None,
+            Effect::Breathing { period_s, .. } | Effect::Wave { period_s } | Effect::Spectrum { period_s } => {
+                Some(period_s)
+            }
+        };
+        if let Some(p) = period {
+            if !(p.is_finite() && Self::PERIOD_S.contains(&p)) {
+                return Err(format!("effect period {p} s out of range (0.5..=60)"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for Lighting {
+    fn default() -> Self {
+        Lighting { enabled: false, effect: Effect::Wave { period_s: 4.0 }, keys: Vec::new(), brightness: 100 }
+    }
+}
+
+/// A key on the keyboard picture, in key units (a standard key is 1 × 1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyInfo {
+    pub code: u8,
+    pub label: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+}
+
+/// The keyboard as the daemon sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyboardState {
+    pub connected: bool,
+    /// Every key and where it is, for drawing.
+    pub layout: Vec<KeyInfo>,
+    pub lighting: Lighting,
+}
+
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
 ///
 /// The `set_mouse_*` methods address "the connected Rival 3 Wireless Gen 2" without
@@ -431,6 +520,10 @@ pub enum Request {
     SetMicSettings { settings: MicSettings },
     /// 0..=1.
     SetMicVolume { volume: f32 },
+    /// Keyboard connection, layout and lighting.
+    GetKeyboardState,
+    /// Replace the keyboard lighting.
+    SetLighting { lighting: Lighting },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -449,6 +542,7 @@ pub enum ResponseData {
     Mouse { state: MouseState },
     Headset { state: HeadsetState },
     Sonar { state: SonarState },
+    Keyboard { state: KeyboardState },
     /// A command was accepted and applied.
     Success,
     Error { message: String },
@@ -468,6 +562,8 @@ pub enum Event {
     HeadsetChanged { state: HeadsetState },
     /// Sonar changed: channels, apps, volumes, or on/off.
     SonarChanged { state: SonarState },
+    /// Keyboard connection or lighting changed.
+    KeyboardChanged { state: KeyboardState },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -499,6 +595,17 @@ pub fn socket_path() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", unsafe { geteuid() })));
     base.join("gglinux").join("gglinuxd.sock")
+}
+
+/// gglinux's config directory: `$XDG_CONFIG_HOME/gglinux`, else `~/.config/gglinux`.
+pub fn config_dir() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(".config")
+        });
+    base.join("gglinux")
 }
 
 // Avoid a libc dependency in this leaf crate just for one call.
@@ -726,5 +833,35 @@ mod tests {
         let d = MicSettings::default();
         assert!(d.denoise && !d.gate && !d.compressor);
         assert_eq!((d.denoise_strength, d.gate_threshold_db, d.makeup_db), (50.0, -45.0, 6.0));
+    }
+
+    #[test]
+    fn lighting_requests_parse_from_their_documented_json() {
+        let line = r#"{"id":1,"req":{"method":"set_lighting","params":{"lighting":{"enabled":true,
+            "effect":{"kind":"breathing","color":{"r":255,"g":0,"b":0},"period_s":3.0},
+            "keys":[{"code":10,"color":{"r":0,"g":255,"b":0}}],"brightness":80}}}}"#;
+        match serde_json::from_str::<RequestFrame>(line).unwrap().req {
+            Request::SetLighting { lighting } => {
+                assert!(lighting.enabled);
+                assert_eq!(lighting.effect, Effect::Breathing { color: Rgb { r: 255, g: 0, b: 0 }, period_s: 3.0 });
+                assert_eq!(lighting.keys, vec![KeyColor { code: 10, color: Rgb { r: 0, g: 255, b: 0 } }]);
+                assert_eq!(lighting.brightness, 80);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        serde_json::from_str::<RequestFrame>(r#"{"id":2,"req":{"method":"get_keyboard_state"}}"#)
+            .expect("get_keyboard_state should parse");
+        assert_eq!(serde_json::to_string(&Effect::Static).unwrap(), r#"{"kind":"static"}"#);
+    }
+
+    #[test]
+    fn lighting_is_off_by_default_and_validated() {
+        let d = Lighting::default();
+        assert!(!d.enabled, "gglinux never takes the lighting until asked");
+        assert!(d.validate().is_ok());
+        assert!(Lighting { brightness: 101, ..d.clone() }.validate().is_err());
+        assert!(Lighting { effect: Effect::Wave { period_s: 0.1 }, ..d.clone() }.validate().is_err());
+        assert!(Lighting { effect: Effect::Spectrum { period_s: f32::NAN }, ..d.clone() }.validate().is_err());
+        assert!(Lighting { effect: Effect::Static, ..d }.validate().is_ok());
     }
 }

@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, MouseSettings,
+    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
@@ -45,6 +45,8 @@ struct Fake {
     controls: HeadsetControls,
     /// Sonar as last changed by the client.
     sonar: SonarState,
+    /// Keyboard lighting as last set; no layout, since nothing draws it here.
+    keyboard: KeyboardState,
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
@@ -86,6 +88,7 @@ fn main() -> Result<()> {
         screen: ScreenSettings::default(),
         controls: HeadsetControls::default(),
         sonar: fake_sonar(),
+        keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default() },
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -258,6 +261,11 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.sonar.mic.volume = Some(volume);
             ResponseData::Success
         }
+        Request::GetKeyboardState => ResponseData::Keyboard { state: s.keyboard.clone() },
+        Request::SetLighting { lighting } => {
+            s.keyboard.lighting = lighting;
+            ResponseData::Success
+        }
     }
 }
 
@@ -396,6 +404,8 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetMicInput { .. } => "set_mic_input",
         Request::SetMicSettings { .. } => "set_mic_settings",
         Request::SetMicVolume { .. } => "set_mic_volume",
+        Request::GetKeyboardState => "get_keyboard_state",
+        Request::SetLighting { .. } => "set_lighting",
     }
 }
 
