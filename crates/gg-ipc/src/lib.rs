@@ -213,6 +213,73 @@ pub struct HeadsetState {
     pub controls: HeadsetControls,
 }
 
+/// A Sonar output channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    Game,
+    Chat,
+    Media,
+    Aux,
+}
+
+impl Channel {
+    pub const ALL: [Channel; 4] = [Channel::Game, Channel::Chat, Channel::Media, Channel::Aux];
+
+    /// Lower-case name, as used in node names and settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            Channel::Game => "game",
+            Channel::Chat => "chat",
+            Channel::Media => "media",
+            Channel::Aux => "aux",
+        }
+    }
+}
+
+/// A physical output device the channels can play into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioOutput {
+    /// PipeWire `node.name`.
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelState {
+    pub channel: Channel,
+    /// Whether PipeWire currently has this channel's sink.
+    pub present: bool,
+    /// 0..=1 on the desktop mixer's scale; `None` when absent.
+    pub volume: Option<f32>,
+}
+
+/// An app playing audio, and the channel its rule sends it to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppStream {
+    /// PipeWire node id; changes when the app reopens its stream.
+    pub id: u32,
+    pub name: String,
+    /// `application.process.binary`, the key routing rules match on.
+    pub binary: Option<String>,
+    pub channel: Channel,
+}
+
+/// Sonar as the daemon sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SonarState {
+    /// Whether PipeWire's tools answered.
+    pub available: bool,
+    pub enabled: bool,
+    /// `node.name` of the physical output the channels play into.
+    pub output: Option<String>,
+    pub outputs: Vec<AudioOutput>,
+    pub channels: Vec<ChannelState>,
+    /// -1.0 all Game … 0.0 both full … 1.0 all Chat.
+    pub chatmix: f32,
+    pub apps: Vec<AppStream>,
+}
+
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
 ///
 /// The `set_mouse_*` methods address "the connected Rival 3 Wireless Gen 2" without
@@ -254,6 +321,18 @@ pub enum Request {
     SetHeadsetScreen { settings: ScreenSettings },
     /// Change one headset setting and save it on the base station.
     SetHeadset { change: HeadsetChange },
+    /// Sonar channels, routing, and ChatMix.
+    GetSonarState,
+    /// Turn Sonar on or off. Restarts PipeWire.
+    SetSonarEnabled { enabled: bool },
+    /// The physical output the channels play into (a `node.name`).
+    SetSonarOutput { name: String },
+    /// 0..=1.
+    SetChannelVolume { channel: Channel, volume: f32 },
+    /// -1.0 all Game … 1.0 all Chat.
+    SetChatMix { balance: f32 },
+    /// Route an app (by `application.process.binary`) to a channel, and remember it.
+    SetAppChannel { binary: String, channel: Channel },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -271,6 +350,7 @@ pub enum ResponseData {
     Pong,
     Mouse { state: MouseState },
     Headset { state: HeadsetState },
+    Sonar { state: SonarState },
     /// A command was accepted and applied.
     Success,
     Error { message: String },
@@ -288,6 +368,8 @@ pub enum Event {
     MouseBattery { battery: Option<BatteryState> },
     /// Headset state changed: battery, power, connection, or screen.
     HeadsetChanged { state: HeadsetState },
+    /// Sonar changed: channels, apps, volumes, or on/off.
+    SonarChanged { state: SonarState },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -465,5 +547,33 @@ mod tests {
         assert!(json.contains(r#""sidetone":null"#), "{json}");
         assert!(json.contains(r#""noise_mode":null"#), "{json}");
         assert!(json.contains(r#""eq_bands":null"#), "{json}");
+    }
+
+    #[test]
+    fn sonar_requests_parse_from_their_documented_json() {
+        for (line, label) in [
+            (r#"{"id":1,"req":{"method":"get_sonar_state"}}"#, "get"),
+            (r#"{"id":2,"req":{"method":"set_sonar_enabled","params":{"enabled":true}}}"#, "enable"),
+            (r#"{"id":4,"req":{"method":"set_chat_mix","params":{"balance":-0.25}}}"#, "chatmix"),
+            (r#"{"id":5,"req":{"method":"set_app_channel","params":{"binary":"discord","channel":"chat"}}}"#, "app"),
+            (r#"{"id":6,"req":{"method":"set_sonar_output","params":{"name":"alsa_output.x"}}}"#, "output"),
+        ] {
+            serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{label}: {e}"));
+        }
+        let volume = r#"{"id":3,"req":{"method":"set_channel_volume","params":{"channel":"chat","volume":0.5}}}"#;
+        match serde_json::from_str::<RequestFrame>(volume).unwrap().req {
+            Request::SetChannelVolume { channel, volume } => {
+                assert_eq!(channel, Channel::Chat);
+                assert_eq!(volume, 0.5);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channels_have_stable_keys() {
+        let keys: Vec<_> = Channel::ALL.iter().map(|c| c.key()).collect();
+        assert_eq!(keys, ["game", "chat", "media", "aux"]);
+        assert_eq!(serde_json::to_string(&Channel::Media).unwrap(), r#""media""#);
     }
 }

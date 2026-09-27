@@ -28,9 +28,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    BatteryState, DeviceInfo, DeviceKind, DpiStage, Event, HeadsetChange, HeadsetControls,
-    HeadsetPower, HeadsetState, InterfaceInfo, MouseSettings, MouseState, Request, RequestFrame,
-    ResponseData, ScreenSettings, ServerMessage,
+    AppStream, AudioOutput, BatteryState, Channel, ChannelState, DeviceInfo, DeviceKind, DpiStage,
+    Event, HeadsetChange, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, MouseSettings,
+    MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
 /// How often to push a `mouse_battery` notification.
@@ -43,6 +43,8 @@ struct Fake {
     screen: ScreenSettings,
     /// Headset settings as last sent, echoed back as the device would report them.
     controls: HeadsetControls,
+    /// Sonar as last changed by the client.
+    sonar: SonarState,
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
@@ -83,6 +85,7 @@ fn main() -> Result<()> {
         applied: None,
         screen: ScreenSettings::default(),
         controls: HeadsetControls::default(),
+        sonar: fake_sonar(),
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -204,6 +207,31 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             fake_apply(&mut s.controls, change);
             ResponseData::Success
         }
+        Request::GetSonarState => ResponseData::Sonar { state: s.sonar.clone() },
+        Request::SetSonarEnabled { enabled } => {
+            s.sonar.enabled = enabled;
+            ResponseData::Success
+        }
+        Request::SetSonarOutput { name } => {
+            s.sonar.output = Some(name);
+            ResponseData::Success
+        }
+        Request::SetChannelVolume { channel, volume } => {
+            if let Some(c) = s.sonar.channels.iter_mut().find(|c| c.channel == channel) {
+                c.volume = Some(volume);
+            }
+            ResponseData::Success
+        }
+        Request::SetChatMix { balance } => {
+            s.sonar.chatmix = balance;
+            ResponseData::Success
+        }
+        Request::SetAppChannel { binary, channel } => {
+            for app in s.sonar.apps.iter_mut().filter(|a| a.binary.as_deref() == Some(binary.as_str())) {
+                app.channel = channel;
+            }
+            ResponseData::Success
+        }
     }
 }
 
@@ -230,6 +258,28 @@ fn headset_state(s: &Fake) -> HeadsetState {
         screen: s.screen,
         screen_dark: false,
         controls: s.controls.clone(),
+    }
+}
+
+/// A plausible Sonar: on, two outputs, two apps.
+fn fake_sonar() -> SonarState {
+    SonarState {
+        available: true,
+        enabled: true,
+        output: Some("alsa_output.fake-headset".into()),
+        outputs: vec![
+            AudioOutput { name: "alsa_output.fake-headset".into(), description: "Fake Headset".into() },
+            AudioOutput { name: "alsa_output.fake-speakers".into(), description: "Fake Speakers".into() },
+        ],
+        channels: Channel::ALL
+            .iter()
+            .map(|&channel| ChannelState { channel, present: true, volume: Some(1.0) })
+            .collect(),
+        chatmix: 0.0,
+        apps: vec![
+            AppStream { id: 90, name: "Discord".into(), binary: Some("discord".into()), channel: Channel::Chat },
+            AppStream { id: 91, name: "Firefox".into(), binary: Some("firefox".into()), channel: Channel::Media },
+        ],
     }
 }
 
@@ -280,6 +330,12 @@ fn method_name(req: &Request) -> &'static str {
         Request::GetHeadsetState => "get_headset_state",
         Request::SetHeadsetScreen { .. } => "set_headset_screen",
         Request::SetHeadset { .. } => "set_headset",
+        Request::GetSonarState => "get_sonar_state",
+        Request::SetSonarEnabled { .. } => "set_sonar_enabled",
+        Request::SetSonarOutput { .. } => "set_sonar_output",
+        Request::SetChannelVolume { .. } => "set_channel_volume",
+        Request::SetChatMix { .. } => "set_chat_mix",
+        Request::SetAppChannel { .. } => "set_app_channel",
     }
 }
 

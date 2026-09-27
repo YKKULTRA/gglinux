@@ -260,6 +260,14 @@ async fn dispatch(
                 .send::<()>(|reply| HeadsetCommand::SetControl { change, reply })
                 .await,
         ),
+        Request::GetSonarState
+        | Request::SetSonarEnabled { .. }
+        | Request::SetSonarOutput { .. }
+        | Request::SetChannelVolume { .. }
+        | Request::SetChatMix { .. }
+        | Request::SetAppChannel { .. } => ResponseData::Error {
+            message: "Sonar is not wired up yet".into(),
+        },
     };
     ServerMessage::response(frame.id, result)
 }
