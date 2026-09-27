@@ -3,6 +3,7 @@
   // gain; scroll over it for Q. Changes go out at most every SEND_EVERY_MS while
   // dragging, and once more on release.
 
+  import { untrack } from "svelte";
   import { responseDb } from "./eq";
   import type { EqBand } from "./types";
 
@@ -34,12 +35,15 @@
   const FREQS = Array.from({ length: 160 }, (_, i) => 10 ** (LOG_MIN + (i / 159) * LOG_SPAN));
   const signed = (v: number) => (v > 0 ? `+${v}` : `${v}`);
 
-  // Working copy: follows the daemon, except while a point is being dragged.
+  // Working copy: follows the daemon's bands whenever new ones arrive, except
+  // mid-drag. `dragging` is read untracked so that letting go does not re-copy
+  // the still-old bands (the reply to the final send is in flight) and snap the
+  // point back for a moment.
   let local = $state<EqBand[]>([]);
   let dragging = $state<number | null>(null);
   $effect(() => {
     const incoming = bands;
-    if (dragging === null) local = incoming.map((b) => ({ ...b }));
+    if (untrack(() => dragging) === null) local = incoming.map((b) => ({ ...b }));
   });
 
   let path = $derived(
