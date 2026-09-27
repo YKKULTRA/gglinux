@@ -175,6 +175,14 @@ kernel `power_supply`/ALSA if a future `hid-steelseries` is present, else pure h
 **Accept:** change sidetone/ANC/EQ from UI and see it reflected on the base-station OLED menu; battery
 (headset + spare) reads; turning the physical dial emits `07 45` events the daemon logs.
 
+Progress 2026-09-27: `gg-device-headset` reads status and volume (verified on hardware
+2026-08-12) and a setter is confirmed by readback. The daemon now has a headset worker, IPC and a
+UI panel, whose first feature is **base-station screen burn-in protection** — this unit's OLED
+never sleeps on its own, so gglinux keeps it black and lights it briefly on events (spec:
+`docs/superpowers/specs/2026-09-27-headset-screen-protection-design.md`). Still to do for M2: the
+setters in the UI (sidetone, ANC, EQ, mic, auto-off), the ChatMix dial, and the base station's
+damaged knob is out of scope by the owner's choice.
+
 ### M3 — Sonar audio core
 `gg-audio` on pipewire-rs. Virtual sinks **Game / Chat / Media / Aux / Mic** (hybrid: static
 `context.objects` for stable sinks + daemon-controlled gains/links/routing). Per-channel 10-band biquad

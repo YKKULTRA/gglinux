@@ -76,10 +76,10 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 > readback as `07 b0 ..`; the real device answers `06 b0 ..`, echoing the opcode. Report `0x07` is a
 > *separate, unsolicited* stream. **Decode by opcode, not by report id or arrival order.**
 >
-> **2. The base station streams interrupts unprompted.** `07 25 <n>` arrives roughly every 16 ms
-> with `n` fluctuating (observed 2–8) whether or not anything was requested. `0x25` is master volume
-> in the setter table, but a value changing that fast is not a volume setting — most likely a level
-> meter. **Unidentified; do not treat `07 25` as a volume readback.**
+> **2. `07 25 <n>` is the volume wheel, sent only while it moves.** On 2026-08-12 it arrived every
+> ~16 ms with `n` wandering 2–8 and was logged as a possible level meter; on 2026-09-27 it was
+> silent for minutes and burst only while the headset wheel turned. `n` is attenuation on the
+> 0–56 scale (0 = loudest), the same value `06 20` reports at byte 3.
 >
 > Together these break any request/response loop that reads the *next* report after a request: the
 > next report is almost never the reply. Worse, it fails intermittently rather than outright — a
@@ -114,9 +114,10 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 | Sonar icon on OLED | `06 8d 01` | |
 | Volume set | `06 25 <atten 0-56>` | 0=max, 56=mute |
 | Line-out | `06 43 <v>` / per-stream `06 47 <mainL> <mainR> <aux>` | |
-| OLED screen | `06 93 <1024B frame>` | 128×64, column-major-LSB (SSD1306-style, cf. ggoled) |
-| OLED brightness | `06 85 <..>` (64B) | |
-| OLED return-to-UI | `06 95` (64B) | |
+| OLED frame | `06 93 <x> 00 <w> <h> <pixels>` | **1024-byte feature report** per strip, strips ≤ 64 px wide (x = 0, 64), column-major LSB-top, 128×64 panel. One all-black frame blanks the panel and holds 3+ min; re-sending every 2 s flashes the stock screen through. **Verified 2026-09-27** |
+| OLED brightness | `06 85 <1-10>` | 64-byte output report. **No off level**: `0` behaves like `1` (ggoled rejects it). Verified 2026-09-27 |
+| OLED return-to-UI | `06 95` | stock screen back immediately. A headset-wheel volume change also returns to it, permanently. Verified 2026-09-27 |
+| Audio settings | `06 20` | reply byte 2 = audio input, **byte 3 = volume** (attenuation 0–56). Verified 2026-09-27 |
 
 ### Status readback — `06 b0` reply byte map (RX `07 b0 ..`)
 `2`=bt_powerup, `3`=bt_auto_mute, `4`=bt_power, `5`=bt_connection, **`6`=headset_battery (0–8 → %)**,
@@ -127,7 +128,7 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 ### Interrupt-IN events (RX `0x07 ..`, read continuously from iface 4)
 - **ChatMix dial:** `07 45 <game 0x00-0x64> <chat 0x00-0x64>` — both `0x64` at center detent.
   **Host must do the fade** (no hardware mixing this generation → drives the PipeWire ChatMix engine).
-- Master volume: `07 25 <vol>` · EQ band readback: `07 31 <band> <val>` (dB=`(val-20)/2`) ·
+- Master volume: `07 25 <atten>` (only while the wheel moves) · EQ band readback: `07 31 <band> <val>` (dB=`(val-20)/2`) ·
   ANC `07 bd <nc>` · transparency `07 b9 <lvl>` · line-out `07 43`/`07 47`.
 
 ### Init handshake (loteran `device_init`, before applying settings)
