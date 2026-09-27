@@ -48,8 +48,14 @@ pub const EQ_CUSTOM_PRESET: u8 = 4;
 /// Highest selectable EQ preset (`0..=3` are factory, `4` is custom).
 pub const EQ_PRESET_MAX: u8 = EQ_CUSTOM_PRESET;
 
-/// Mic volume at 100%. `0x01` is mute.
-pub const MIC_VOLUME_MAX: u8 = 0xa0;
+/// Mic volume steps: 1 (muted) to 10 (100%). loteran's shipped slider uses this
+/// scale; an older comment claiming `0xa0` for 100% is contradicted by it.
+pub const MIC_VOLUME_MAX: u8 = 10;
+
+/// Mic-mute LED and transparency levels share a 1–10 scale; 1 is the minimum
+/// (HeadsetControl's "off" is 1), there is no 0.
+const LEVEL_MIN: u8 = 1;
+const LEVEL_MAX: u8 = 10;
 
 /// Volume is an *attenuation*: 0 is loudest, 56 is silent.
 pub const VOLUME_ATTEN_MAX: u8 = 56;
@@ -132,11 +138,11 @@ fn encode_gain(db: f32, band: usize) -> Result<u8> {
     Ok((20.0 + steps).clamp(0.0, 40.0) as u8)
 }
 
-/// Microphone volume, `0x01` (mute) to [`MIC_VOLUME_MAX`].
+/// Microphone volume, 1 (muted) to [`MIC_VOLUME_MAX`].
 pub fn mic_volume_packet(volume: u8) -> Result<Vec<u8>> {
     ensure!(
-        (0x01..=MIC_VOLUME_MAX).contains(&volume),
-        "mic volume 0x{volume:02x} out of range (0x01..=0x{MIC_VOLUME_MAX:02x})"
+        (1..=MIC_VOLUME_MAX).contains(&volume),
+        "mic volume {volume} out of range (1..={MIC_VOLUME_MAX})"
     );
     Ok(vec![CMD_MIC_VOLUME, volume])
 }
@@ -146,9 +152,12 @@ pub fn analog_gain_packet(high: bool) -> Vec<u8> {
     vec![CMD_ANALOG_GAIN, if high { 2 } else { 1 }]
 }
 
-/// Mic-mute LED brightness, 0..=10. HeadsetControl maps a plain "on" to 10.
+/// Mic-mute LED brightness, 1..=10.
 pub fn mic_led_packet(brightness: u8) -> Result<Vec<u8>> {
-    ensure!(brightness <= 10, "LED brightness {brightness} out of range (0..=10)");
+    ensure!(
+        (LEVEL_MIN..=LEVEL_MAX).contains(&brightness),
+        "mic LED brightness {brightness} out of range ({LEVEL_MIN}..={LEVEL_MAX})"
+    );
     Ok(vec![CMD_MIC_LED, brightness])
 }
 
@@ -167,18 +176,18 @@ pub fn chatmix_packet(enabled: bool) -> Vec<u8> {
     vec![CMD_CHATMIX, u8::from(enabled)]
 }
 
-/// Transparency (passthrough) level.
-pub fn transparency_packet(level: u8) -> Vec<u8> {
-    vec![CMD_TRANSPARENCY, level]
+/// Transparency (passthrough) level, 1..=10.
+pub fn transparency_packet(level: u8) -> Result<Vec<u8>> {
+    ensure!(
+        (LEVEL_MIN..=LEVEL_MAX).contains(&level),
+        "transparency level {level} out of range ({LEVEL_MIN}..={LEVEL_MAX})"
+    );
+    Ok(vec![CMD_TRANSPARENCY, level])
 }
 
-/// Active noise cancelling.
-///
-/// The value range is not pinned down in any of the sources we ported from, so
-/// this passes the byte through rather than inventing an enum that might mislabel
-/// what the hardware does.
-pub fn anc_packet(value: u8) -> Vec<u8> {
-    vec![CMD_ANC, value]
+/// Noise control mode — what the headset's ANC button cycles through.
+pub fn noise_mode_packet(mode: NoiseMode) -> Vec<u8> {
+    vec![CMD_ANC, mode.code()]
 }
 
 /// Master volume, expressed as attenuation: 0 is loudest, 56 is silent.
@@ -290,6 +299,8 @@ pub fn init_sequence() -> Vec<Vec<u8>> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoOff {
+    /// Never switch off.
+    Never,
     Min1,
     Min5,
     Min10,
@@ -301,6 +312,7 @@ pub enum AutoOff {
 impl AutoOff {
     pub fn code(self) -> u8 {
         match self {
+            AutoOff::Never => 0,
             AutoOff::Min1 => 1,
             AutoOff::Min5 => 2,
             AutoOff::Min10 => 3,
@@ -312,6 +324,7 @@ impl AutoOff {
 
     pub fn minutes(self) -> u16 {
         match self {
+            AutoOff::Never => 0,
             AutoOff::Min1 => 1,
             AutoOff::Min5 => 5,
             AutoOff::Min10 => 10,
@@ -323,6 +336,7 @@ impl AutoOff {
 
     pub fn from_code(code: u8) -> Option<Self> {
         Some(match code {
+            0 => AutoOff::Never,
             1 => AutoOff::Min1,
             2 => AutoOff::Min5,
             3 => AutoOff::Min10,
@@ -335,13 +349,14 @@ impl AutoOff {
 
     pub fn from_minutes(minutes: u16) -> Result<Self> {
         Ok(match minutes {
+            0 => AutoOff::Never,
             1 => AutoOff::Min1,
             5 => AutoOff::Min5,
             10 => AutoOff::Min10,
             15 => AutoOff::Min15,
             30 => AutoOff::Min30,
             60 => AutoOff::Min60,
-            other => bail!("unsupported auto-off timer {other} min (want 1, 5, 10, 15, 30 or 60)"),
+            other => bail!("unsupported auto-off timer {other} min (want 0 for never, 1, 5, 10, 15, 30 or 60)"),
         })
     }
 }
@@ -368,6 +383,67 @@ impl WirelessMode {
             1 => Some(WirelessMode::Range),
             _ => None,
         }
+    }
+}
+
+/// Noise control. Status byte 10 and the `07 bd` event carry the same codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoiseMode {
+    Off,
+    Transparency,
+    Anc,
+}
+
+impl NoiseMode {
+    pub fn code(self) -> u8 {
+        match self {
+            NoiseMode::Off => 0,
+            NoiseMode::Transparency => 1,
+            NoiseMode::Anc => 2,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => NoiseMode::Off,
+            1 => NoiseMode::Transparency,
+            2 => NoiseMode::Anc,
+            _ => return None,
+        })
+    }
+}
+
+/// One user-facing setting, as a client changes it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Setting {
+    NoiseMode(NoiseMode),
+    Transparency(u8),
+    Sidetone(u8),
+    MicVolume(u8),
+    MicLed(u8),
+    AutoOff(AutoOff),
+    WirelessMode(WirelessMode),
+    EqPreset(u8),
+    EqBands(Vec<f32>),
+}
+
+impl Setting {
+    /// Every command this setting needs, validated, in send order. Custom bands
+    /// stay inaudible until the custom slot is selected, so that goes first.
+    pub fn packets(&self) -> Result<Vec<Vec<u8>>> {
+        Ok(match self {
+            Setting::NoiseMode(mode) => vec![noise_mode_packet(*mode)],
+            Setting::Transparency(level) => vec![transparency_packet(*level)?],
+            Setting::Sidetone(level) => vec![sidetone_packet(*level)?],
+            Setting::MicVolume(volume) => vec![mic_volume_packet(*volume)?],
+            Setting::MicLed(brightness) => vec![mic_led_packet(*brightness)?],
+            Setting::AutoOff(timer) => vec![auto_off_packet(*timer)],
+            Setting::WirelessMode(mode) => vec![wireless_mode_packet(*mode)],
+            Setting::EqPreset(preset) => vec![eq_preset_packet(*preset)?],
+            Setting::EqBands(gains) => {
+                vec![eq_preset_packet(EQ_CUSTOM_PRESET)?, eq_bands_packet(gains)?]
+            }
+        })
     }
 }
 
@@ -432,11 +508,11 @@ pub struct Status {
     pub auto_off: Option<AutoOff>,
     pub wireless_mode: Option<WirelessMode>,
     pub mic_led_brightness: u8,
-    /// Raw — the mute encoding is not confirmed.
+    /// Raw status byte; see [`Status::mic_muted`].
     pub mic_status_raw: u8,
-    /// Raw — the level range is not confirmed.
+    /// Raw status byte; see [`Status::noise_mode`].
     pub anc_raw: u8,
-    /// Raw — the level range is not confirmed.
+    /// Raw status byte, 1..=10 when meaningful.
     pub transparency_raw: u8,
 }
 
@@ -464,6 +540,20 @@ impl Status {
             transparency_raw: report[offset::TRANSPARENCY],
         })
     }
+
+    /// Decoded noise mode; `None` for a byte outside the known codes.
+    pub fn noise_mode(&self) -> Option<NoiseMode> {
+        NoiseMode::from_code(self.anc_raw)
+    }
+
+    /// Whether the mic is muted (status byte 9: 0 live, 1 muted).
+    pub fn mic_muted(&self) -> Option<bool> {
+        match self.mic_status_raw {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
 }
 
 /// The gauge counts eighths; scale to percent, saturating above full.
@@ -488,7 +578,7 @@ mod tests {
         assert_eq!(status_packet(), vec![0xb0]);
         assert_eq!(sidetone_packet(2).unwrap(), vec![0x39, 0x02]);
         assert_eq!(eq_preset_packet(4).unwrap(), vec![0x2e, 0x04]);
-        assert_eq!(mic_volume_packet(0xa0).unwrap(), vec![0x37, 0xa0]);
+        assert_eq!(mic_volume_packet(10).unwrap(), vec![0x37, 0x0a]);
         assert_eq!(analog_gain_packet(true), vec![0x27, 0x02]);
         assert_eq!(analog_gain_packet(false), vec![0x27, 0x01]);
         assert_eq!(mic_led_packet(10).unwrap(), vec![0xbf, 0x0a]);
@@ -638,5 +728,67 @@ mod tests {
         assert_eq!(sort_report(vec![0x07, 0xbd, 0x01], None, &mut events), None);
         assert_eq!(sort_report(vec![0x07], None, &mut events), None, "too short to be an event");
         assert_eq!(events, vec![vec![0x07, 0xbd, 0x01]]);
+    }
+
+    #[test]
+    fn every_setting_encodes_to_its_documented_commands() {
+        let cases: Vec<(Setting, Vec<Vec<u8>>)> = vec![
+            (Setting::NoiseMode(NoiseMode::Off), vec![vec![0xbd, 0]]),
+            (Setting::NoiseMode(NoiseMode::Transparency), vec![vec![0xbd, 1]]),
+            (Setting::NoiseMode(NoiseMode::Anc), vec![vec![0xbd, 2]]),
+            (Setting::Transparency(10), vec![vec![0xb9, 10]]),
+            (Setting::Sidetone(3), vec![vec![0x39, 3]]),
+            (Setting::MicVolume(1), vec![vec![0x37, 1]]),
+            (Setting::MicLed(1), vec![vec![0xbf, 1]]),
+            (Setting::AutoOff(AutoOff::Never), vec![vec![0xc1, 0]]),
+            (Setting::WirelessMode(WirelessMode::Speed), vec![vec![0xc3, 0]]),
+            (Setting::EqPreset(1), vec![vec![0x2e, 1]]),
+        ];
+        for (setting, expected) in cases {
+            assert_eq!(setting.packets().unwrap(), expected, "{setting:?}");
+        }
+        let bands = Setting::EqBands(vec![0.0; EQ_BANDS]).packets().unwrap();
+        assert_eq!(bands[0], vec![0x2e, 0x04], "custom slot first, or the bands stay inaudible");
+        assert_eq!(bands[1][0], 0x33);
+        assert_eq!(bands.len(), 2);
+    }
+
+    #[test]
+    fn settings_reject_values_the_references_do_not_use() {
+        assert!(Setting::Transparency(0).packets().is_err());
+        assert!(Setting::Transparency(11).packets().is_err());
+        assert!(Setting::MicVolume(0).packets().is_err());
+        assert!(Setting::MicVolume(11).packets().is_err(), "the old 0xa0 scale is gone");
+        assert!(Setting::MicLed(0).packets().is_err(), "1 is the dimmest; 0 is not a level");
+        assert!(Setting::MicLed(11).packets().is_err());
+        assert!(Setting::Sidetone(4).packets().is_err());
+        assert!(Setting::EqPreset(5).packets().is_err());
+        assert!(Setting::EqBands(vec![0.0; 9]).packets().is_err());
+    }
+
+    #[test]
+    fn auto_off_never_is_code_zero() {
+        assert_eq!(AutoOff::Never.code(), 0);
+        assert_eq!(AutoOff::Never.minutes(), 0);
+        assert_eq!(AutoOff::from_code(0), Some(AutoOff::Never));
+        assert_eq!(AutoOff::from_minutes(0).unwrap(), AutoOff::Never);
+        let mut r = status_reply(0x08, 8, 8);
+        r[offset::AUTO_OFF] = 0;
+        assert_eq!(Status::decode(&r).unwrap().auto_off, Some(AutoOff::Never));
+    }
+
+    #[test]
+    fn status_reports_noise_mode_and_mute() {
+        let mut r = status_reply(0x08, 8, 8);
+        r[offset::ANC] = 1;
+        r[offset::MIC_STATUS] = 1;
+        let s = Status::decode(&r).unwrap();
+        assert_eq!(s.noise_mode(), Some(NoiseMode::Transparency));
+        assert_eq!(s.mic_muted(), Some(true));
+        r[offset::ANC] = 9;
+        r[offset::MIC_STATUS] = 7;
+        let odd = Status::decode(&r).unwrap();
+        assert_eq!(odd.noise_mode(), None, "unknown byte is unknown, not a mode");
+        assert_eq!(odd.mic_muted(), None);
     }
 }

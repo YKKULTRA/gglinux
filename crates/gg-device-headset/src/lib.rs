@@ -20,7 +20,9 @@ use tracing::debug;
 
 pub mod proto;
 
-pub use proto::{AutoOff, PowerStatus, Status, WirelessMode, EQ_BANDS, EQ_CUSTOM_PRESET};
+pub use proto::{
+    AutoOff, NoiseMode, PowerStatus, Setting, Status, WirelessMode, EQ_BANDS, EQ_CUSTOM_PRESET,
+};
 
 pub const VENDOR_ID: u16 = 0x1038;
 pub const PRODUCT_ID: u16 = 0x12e0;
@@ -279,11 +281,20 @@ impl Headset {
     }
 
     pub fn set_transparency(&self, level: u8) -> Result<()> {
-        self.send(&proto::transparency_packet(level))
+        self.send(&proto::transparency_packet(level)?)
     }
 
-    pub fn set_anc(&self, value: u8) -> Result<()> {
-        self.send(&proto::anc_packet(value))
+    pub fn set_noise_mode(&self, mode: NoiseMode) -> Result<()> {
+        self.send(&proto::noise_mode_packet(mode))
+    }
+
+    /// Apply one setting and commit it to flash, as HeadsetControl does after
+    /// every change, so it survives a power cycle.
+    pub fn apply(&self, setting: &Setting) -> Result<()> {
+        for packet in setting.packets()? {
+            self.send(&packet)?;
+        }
+        self.save()
     }
 
     /// Master volume as attenuation: 0 is loudest, 56 silent.
