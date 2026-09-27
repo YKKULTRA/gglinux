@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gg-ipc", "crates/gg-hid", "crates/gg-device-mouse", "crates/gg-device-headset", "crates/gglinuxd"]
+members = ["crates/gg-ipc", "crates/gg-hid", "crates/gg-device-mouse", "crates/gg-device-headset", "crates/gg-audio", "crates/gglinuxd"]
 exclude = ["ui"]
 
 [workspace.package]
