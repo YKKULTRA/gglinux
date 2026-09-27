@@ -305,6 +305,9 @@ async fn dispatch(
                 .send::<()>(|reply| SonarCommand::ImportAutoEq { text, name, reply })
                 .await,
         ),
+        Request::SetMicInput { .. } | Request::SetMicSettings { .. } | Request::SetMicVolume { .. } => {
+            ResponseData::Error { message: "the mic is not wired up yet".into() }
+        }
     };
     ServerMessage::response(frame.id, result)
 }

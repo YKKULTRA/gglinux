@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use gg_ipc::{AppStream, AudioOutput, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, SonarState};
+use gg_ipc::{AppStream, AudioDevice, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, SonarState};
 use tracing::{debug, info, warn};
 
 use crate::graph::Graph;
@@ -95,7 +95,7 @@ impl<T: PwTools> Sonar<T> {
             outputs: self
                 .graph
                 .physical_sinks()
-                .map(|n| AudioOutput {
+                .map(|n| AudioDevice {
                     name: n.name.clone(),
                     description: n.description.clone().unwrap_or_else(|| n.name.clone()),
                 })
@@ -126,6 +126,15 @@ impl<T: PwTools> Sonar<T> {
                 .map(|&channel| ChannelEq { channel, bands: self.settings.channel_eq(channel) })
                 .collect(),
             headphone: self.settings.headphone.clone(),
+            // Filled in by the mic work.
+            mic: gg_ipc::MicState {
+                available: false,
+                present: false,
+                input: None,
+                inputs: Vec::new(),
+                volume: None,
+                settings: gg_ipc::MicSettings::default(),
+            },
         }
     }
 

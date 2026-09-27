@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    AppStream, AudioOutput, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, MouseSettings,
+    AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
+    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, MouseSettings,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
@@ -246,6 +246,18 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.sonar.headphone.name = name;
             ResponseData::Success
         }
+        Request::SetMicInput { name } => {
+            s.sonar.mic.input = Some(name);
+            ResponseData::Success
+        }
+        Request::SetMicSettings { settings } => {
+            s.sonar.mic.settings = settings;
+            ResponseData::Success
+        }
+        Request::SetMicVolume { volume } => {
+            s.sonar.mic.volume = Some(volume);
+            ResponseData::Success
+        }
     }
 }
 
@@ -282,8 +294,8 @@ fn fake_sonar() -> SonarState {
         enabled: true,
         output: Some("alsa_output.fake-headset".into()),
         outputs: vec![
-            AudioOutput { name: "alsa_output.fake-headset".into(), description: "Fake Headset".into() },
-            AudioOutput { name: "alsa_output.fake-speakers".into(), description: "Fake Speakers".into() },
+            AudioDevice { name: "alsa_output.fake-headset".into(), description: "Fake Headset".into() },
+            AudioDevice { name: "alsa_output.fake-speakers".into(), description: "Fake Speakers".into() },
         ],
         channels: Channel::ALL
             .iter()
@@ -296,6 +308,14 @@ fn fake_sonar() -> SonarState {
         ],
         eq: Channel::ALL.iter().map(|&channel| ChannelEq { channel, bands: fake_bands(10) }).collect(),
         headphone: HeadphoneEq { preamp: 0.0, bands: fake_bands(12), name: None },
+        mic: MicState {
+            available: true,
+            present: true,
+            input: Some("alsa_input.fake-headset".into()),
+            inputs: vec![AudioDevice { name: "alsa_input.fake-headset".into(), description: "Fake Headset Mic".into() }],
+            volume: Some(1.0),
+            settings: MicSettings::default(),
+        },
     }
 }
 
@@ -373,6 +393,9 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetChannelEq { .. } => "set_channel_eq",
         Request::SetHeadphoneEq { .. } => "set_headphone_eq",
         Request::ImportAutoEq { .. } => "import_auto_eq",
+        Request::SetMicInput { .. } => "set_mic_input",
+        Request::SetMicSettings { .. } => "set_mic_settings",
+        Request::SetMicVolume { .. } => "set_mic_volume",
     }
 }
 

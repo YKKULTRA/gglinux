@@ -237,9 +237,9 @@ impl Channel {
     }
 }
 
-/// A physical output device the channels can play into.
+/// A physical audio device: an output the channels play into, or an input the mic reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AudioOutput {
+pub struct AudioDevice {
     /// PipeWire `node.name`.
     pub name: String,
     pub description: String,
@@ -303,6 +303,51 @@ pub struct HeadphoneEq {
     pub name: Option<String>,
 }
 
+/// Processing on the virtual mic.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MicSettings {
+    /// RNNoise noise suppression.
+    pub denoise: bool,
+    /// RNNoise's voice-detection threshold, 0..=95 %: higher cuts more non-voice sound.
+    pub denoise_strength: f32,
+    /// Noise gate: silence below `gate_threshold_db`.
+    pub gate: bool,
+    /// -80..=-10 dB.
+    pub gate_threshold_db: f32,
+    /// Compressor (4:1 above -18 dB) plus makeup gain.
+    pub compressor: bool,
+    /// 0..=18 dB.
+    pub makeup_db: f32,
+}
+
+impl Default for MicSettings {
+    fn default() -> Self {
+        MicSettings {
+            denoise: true,
+            denoise_strength: 50.0,
+            gate: false,
+            gate_threshold_db: -45.0,
+            compressor: false,
+            makeup_db: 6.0,
+        }
+    }
+}
+
+/// The virtual mic as the daemon sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MicState {
+    /// Whether the mic chain's plugins are installed.
+    pub available: bool,
+    /// Whether PipeWire has the virtual mic right now.
+    pub present: bool,
+    /// `node.name` of the physical mic it reads.
+    pub input: Option<String>,
+    pub inputs: Vec<AudioDevice>,
+    /// 0..=1 on the mixer's scale; `None` when absent.
+    pub volume: Option<f32>,
+    pub settings: MicSettings,
+}
+
 /// Sonar as the daemon sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SonarState {
@@ -311,7 +356,7 @@ pub struct SonarState {
     pub enabled: bool,
     /// `node.name` of the physical output the channels play into.
     pub output: Option<String>,
-    pub outputs: Vec<AudioOutput>,
+    pub outputs: Vec<AudioDevice>,
     pub channels: Vec<ChannelState>,
     /// -1.0 all Game … 0.0 both full … 1.0 all Chat.
     pub chatmix: f32,
@@ -319,6 +364,7 @@ pub struct SonarState {
     /// Per-channel EQ, in `Channel::ALL` order.
     pub eq: Vec<ChannelEq>,
     pub headphone: HeadphoneEq,
+    pub mic: MicState,
 }
 
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
@@ -380,6 +426,11 @@ pub enum Request {
     SetHeadphoneEq { eq: HeadphoneEq },
     /// Parse an AutoEQ ParametricEQ.txt and make it the headphone correction.
     ImportAutoEq { text: String, name: Option<String> },
+    /// The physical mic the virtual mic reads (a source `node.name`).
+    SetMicInput { name: String },
+    SetMicSettings { settings: MicSettings },
+    /// 0..=1.
+    SetMicVolume { volume: f32 },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -649,5 +700,31 @@ mod tests {
     fn band_kinds_are_snake_case() {
         assert_eq!(serde_json::to_string(&BandKind::LowShelf).unwrap(), r#""low_shelf""#);
         assert_eq!(serde_json::to_string(&BandKind::HighShelf).unwrap(), r#""high_shelf""#);
+    }
+
+    #[test]
+    fn mic_requests_parse_from_their_documented_json() {
+        let line = r#"{"id":1,"req":{"method":"set_mic_settings","params":{"settings":
+            {"denoise":true,"denoise_strength":60.0,"gate":true,"gate_threshold_db":-40.0,"compressor":false,"makeup_db":6.0}}}}"#;
+        match serde_json::from_str::<RequestFrame>(line).unwrap().req {
+            Request::SetMicSettings { settings } => {
+                assert!(settings.gate);
+                assert_eq!(settings.denoise_strength, 60.0);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        for line in [
+            r#"{"id":2,"req":{"method":"set_mic_input","params":{"name":"alsa_input.x"}}}"#,
+            r#"{"id":3,"req":{"method":"set_mic_volume","params":{"volume":0.8}}}"#,
+        ] {
+            serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+        }
+    }
+
+    #[test]
+    fn mic_defaults_suppress_noise_and_leave_the_rest_off() {
+        let d = MicSettings::default();
+        assert!(d.denoise && !d.gate && !d.compressor);
+        assert_eq!((d.denoise_strength, d.gate_threshold_db, d.makeup_db), (50.0, -45.0, 6.0));
     }
 }
