@@ -205,8 +205,10 @@ PipeWire's own CLI tools (`pw-dump` / `pw-metadata` / `wpctl`) behind a trait �
 and every action is a command a person could run. **M3b done in software**: each channel is a
 filter chain (preamp → 12-band headphone correction → 10-band channel EQ), set live with
 `pw-cli set-param`; AutoEQ `ParametricEQ.txt` import; a draggable curve editor that uses PipeWire's
-own biquad formulas (spec: `docs/superpowers/specs/2026-09-27-sonar-eq-design.md`). Next: M3c mic
-chain, then streamer mode.
+own biquad formulas (spec: `docs/superpowers/specs/2026-09-27-sonar-eq-design.md`). **M3c done in
+software**: a virtual gglinux Mic (RNNoise → noise gate → compressor, each live-switchable) that
+becomes the default input while Sonar is on; its module is `nofail` and only written when its
+plugins exist (spec: `docs/superpowers/specs/2026-09-27-sonar-mic-design.md`). Next: streamer mode.
 
 ### M4 — Keyboard RGB + OLED: Apex Pro Gen 3
 Port OpenRGB `0x1642` RGB (iface 1 feature reports; INIT `0x4B`, DIRECT `0x40`, ONBOARD `0x41`, 643-byte

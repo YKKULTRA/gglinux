@@ -52,6 +52,21 @@ systemctl --user enable --now gglinuxd
 Without that udev rule the hidraw nodes stay `root:root 0600`: devices will still be *listed* (that
 only reads sysfs) but cannot be opened or controlled.
 
+**Sonar** (the audio channels, EQ and virtual mic) needs PipeWire ≥ 1.0 with WirePlumber 0.5; it
+drives them with PipeWire's own `pw-dump`, `pw-metadata`, `pw-cli` and `wpctl`, so there is nothing
+extra to build. Two packages are **optional**, for the mic chain only:
+
+| Package | Provides | Without it |
+|---|---|---|
+| `noise-suppression-for-voice` | RNNoise noise suppression (`librnnoise_ladspa.so`) | no virtual mic |
+| `swh-plugins` | the `sc4m` compressor | no virtual mic |
+
+```sh
+sudo pacman -S noise-suppression-for-voice swh-plugins   # Arch; both are in [extra]
+```
+
+Everything else works without them, and the mic appears on the next start once they are installed.
+
 Poke at it without the UI, via the `ggctl` client:
 
 ```sh
