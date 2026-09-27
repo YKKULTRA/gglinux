@@ -37,10 +37,13 @@ pub struct Graph {
     pub nodes: Vec<Node>,
     /// `node.name` of the configured default sink.
     pub default_sink: Option<String>,
+    /// `node.name` of the configured default source.
+    pub default_source: Option<String>,
 }
 
 const SINK: &str = "Audio/Sink";
 const APP_STREAM: &str = "Stream/Output/Audio";
+const SOURCE: &str = "Audio/Source";
 
 impl Graph {
     pub fn parse(json: &str) -> Result<Graph> {
@@ -52,7 +55,8 @@ impl Graph {
                 Some("PipeWire:Interface:Metadata")
                     if object["props"]["metadata.name"] == "default" =>
                 {
-                    graph.default_sink = default_sink(object);
+                    graph.default_sink = default_node(object, "sink");
+                    graph.default_source = default_node(object, "source");
                 }
                 _ => {}
             }
@@ -67,6 +71,11 @@ impl Graph {
     /// Real output devices: sinks that are not ours.
     pub fn physical_sinks(&self) -> impl Iterator<Item = &Node> {
         self.nodes.iter().filter(|n| n.media_class == SINK && !config::is_ours(&n.name))
+    }
+
+    /// Real inputs: sources that are not ours.
+    pub fn physical_sources(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.iter().filter(|n| n.media_class == SOURCE && !config::is_ours(&n.name))
     }
 
     /// Apps playing audio. Our outlets are streams too, and are left out.
@@ -97,19 +106,20 @@ fn volume(props: &Value) -> Option<f32> {
     Some(loudest.cbrt() as f32)
 }
 
-fn default_sink(object: &Value) -> Option<String> {
+/// The configured default `kind` ("sink" or "source"), else the current one.
+fn default_node(object: &Value, kind: &str) -> Option<String> {
     let entries = object["metadata"].as_array()?;
-    let lookup = |key: &str| {
+    let lookup = |key: String| {
         entries
             .iter()
-            .find(|e| e["subject"] == 0 && e["key"] == key)
-            .and_then(|e| sink_name_of(&e["value"]))
+            .find(|e| e["subject"] == 0 && e["key"] == key.as_str())
+            .and_then(|e| node_name_of(&e["value"]))
     };
-    lookup("default.configured.audio.sink").or_else(|| lookup("default.audio.sink"))
+    lookup(format!("default.configured.audio.{kind}")).or_else(|| lookup(format!("default.audio.{kind}")))
 }
 
 /// The value is `{"name": …}`, sometimes serialised as a JSON string.
-fn sink_name_of(value: &Value) -> Option<String> {
+fn node_name_of(value: &Value) -> Option<String> {
     match value {
         Value::Object(_) => value["name"].as_str().map(str::to_owned),
         Value::String(s) => serde_json::from_str::<Value>(s).ok()?["name"].as_str().map(str::to_owned),
@@ -177,5 +187,21 @@ mod tests {
         let json = r#"[{"id":39,"type":"PipeWire:Interface:Metadata","props":{"metadata.name":"default"},
             "metadata":[{"subject":0,"key":"default.audio.sink","type":"Spa:String:JSON","value":"{\"name\":\"alsa_output.y\"}"}]}]"#;
         assert_eq!(Graph::parse(json).unwrap().default_sink.as_deref(), Some("alsa_output.y"));
+    }
+
+    #[test]
+    fn inputs_and_the_default_input_are_read() {
+        let g = Graph::parse(CAPTURE).unwrap();
+        let arctis = "alsa_input.usb-SteelSeries_Arctis_Nova_Pro_Wireless-00.mono-fallback";
+        assert!(g.physical_sources().any(|n| n.name == arctis));
+        assert_eq!(g.default_source.as_deref(), Some(arctis));
+        let ours = Graph::parse(&crate::testing::dump_with_source(
+            &[(1, "alsa_input.x", "Audio/Source", None), (2, "gglinux_mic", "Audio/Source", None)],
+            "alsa_output.x",
+            Some("alsa_input.x"),
+        ))
+        .unwrap();
+        assert_eq!(ours.physical_sources().map(|n| n.id).collect::<Vec<_>>(), [1], "the virtual mic is not an input");
+        assert_eq!(ours.default_source.as_deref(), Some("alsa_input.x"));
     }
 }

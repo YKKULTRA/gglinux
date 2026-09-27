@@ -23,6 +23,15 @@ pub(crate) mod testing {
     /// A minimal `pw-dump`: nodes as (id, node.name, media.class, binary), all at
     /// full volume, plus the configured default sink.
     pub fn dump(nodes: &[(u32, &str, &str, Option<&str>)], default_sink: &str) -> String {
+        dump_with_source(nodes, default_sink, None)
+    }
+
+    /// As [`dump`], plus the configured default source.
+    pub fn dump_with_source(
+        nodes: &[(u32, &str, &str, Option<&str>)],
+        default_sink: &str,
+        default_source: Option<&str>,
+    ) -> String {
         let mut objects: Vec<Value> = nodes
             .iter()
             .map(|(id, name, class, binary)| {
@@ -38,16 +47,25 @@ pub(crate) mod testing {
                 })
             })
             .collect();
+        let mut metadata = vec![json!({
+            "subject": 0,
+            "key": "default.configured.audio.sink",
+            "type": "Spa:String:JSON",
+            "value": { "name": default_sink }
+        })];
+        if let Some(source) = default_source {
+            metadata.push(json!({
+                "subject": 0,
+                "key": "default.configured.audio.source",
+                "type": "Spa:String:JSON",
+                "value": { "name": source }
+            }));
+        }
         objects.push(json!({
             "id": 39,
             "type": "PipeWire:Interface:Metadata",
             "props": { "metadata.name": "default" },
-            "metadata": [{
-                "subject": 0,
-                "key": "default.configured.audio.sink",
-                "type": "Spa:String:JSON",
-                "value": { "name": default_sink }
-            }]
+            "metadata": metadata
         }));
         Value::Array(objects).to_string()
     }
