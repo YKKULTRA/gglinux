@@ -12,6 +12,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info};
 
+mod headset;
 mod mouse;
 
 use mouse::{Command as MouseCommand, Handle as MouseHandle};
