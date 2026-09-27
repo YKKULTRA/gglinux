@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use gg_audio::sonar::Sonar;
 use gg_audio::tools::SystemTools;
-use gg_ipc::{Channel, Event, SonarState};
+use gg_ipc::{Channel, EqBand, Event, HeadphoneEq, SonarState};
 use tokio::sync::{broadcast, oneshot};
 
 /// How often to look for new app streams while Sonar is on.
@@ -25,6 +25,9 @@ pub enum Command {
     SetVolume { channel: Channel, volume: f32, reply: Reply<()> },
     SetChatMix { balance: f32, reply: Reply<()> },
     SetAppChannel { binary: String, channel: Channel, reply: Reply<()> },
+    SetChannelEq { channel: Channel, bands: Vec<EqBand>, reply: Reply<()> },
+    SetHeadphoneEq { eq: HeadphoneEq, reply: Reply<()> },
+    ImportAutoEq { text: String, name: Option<String>, reply: Reply<()> },
 }
 
 #[derive(Clone)]
@@ -97,6 +100,15 @@ fn handle(command: Command, sonar: &mut Sonar<SystemTools>) {
         }
         Command::SetAppChannel { binary, channel, reply } => {
             let _ = reply.send(sonar.set_app_channel(&binary, channel).map_err(text));
+        }
+        Command::SetChannelEq { channel, bands, reply } => {
+            let _ = reply.send(sonar.set_channel_eq(channel, bands).map_err(text));
+        }
+        Command::SetHeadphoneEq { eq, reply } => {
+            let _ = reply.send(sonar.set_headphone_eq(eq).map_err(text));
+        }
+        Command::ImportAutoEq { text: eq_text, name, reply } => {
+            let _ = reply.send(sonar.import_autoeq(&eq_text, name).map_err(text));
         }
     }
 }
