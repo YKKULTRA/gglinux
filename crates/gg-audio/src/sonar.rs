@@ -9,13 +9,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use gg_ipc::{AppStream, AudioOutput, Channel, ChannelState, SonarState};
+use gg_ipc::{AppStream, AudioOutput, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, SonarState};
 use tracing::{debug, info, warn};
 
 use crate::graph::Graph;
 use crate::settings::{self, Settings};
 use crate::tools::{self, PwTools};
-use crate::{config, mix};
+use crate::{config, eq, mix};
 
 /// How long PipeWire gets to bring nodes up after a restart.
 const APPEAR_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,6 +58,7 @@ impl<T: PwTools> Sonar<T> {
             sonar.settings.enabled = false;
             sonar.persist();
         } else if sonar.settings.enabled {
+            sonar.upgrade_dropin();
             sonar.keep_levels();
         }
         sonar
@@ -120,9 +121,11 @@ impl<T: PwTools> Sonar<T> {
                     }
                 })
                 .collect(),
-            // Filled in by the EQ work; empty until then.
-            eq: Vec::new(),
-            headphone: gg_ipc::HeadphoneEq { preamp: 0.0, bands: Vec::new(), name: None },
+            eq: Channel::ALL
+                .iter()
+                .map(|&channel| ChannelEq { channel, bands: self.settings.channel_eq(channel) })
+                .collect(),
+            headphone: self.settings.headphone.clone(),
         }
     }
 
@@ -258,7 +261,51 @@ impl<T: PwTools> Sonar<T> {
         Ok(())
     }
 
+    /// Replace a channel's EQ, and hear it now.
+    pub fn set_channel_eq(&mut self, channel: Channel, bands: Vec<EqBand>) -> Result<()> {
+        eq::validate(&bands, &eq::channel_layout(), eq::CHANNEL_GAIN_LIMIT)?;
+        self.settings.eq.insert(channel, bands);
+        self.persist();
+        self.apply_chain(channel)
+    }
+
+    /// Replace the headphone correction on every channel.
+    pub fn set_headphone_eq(&mut self, headphone: HeadphoneEq) -> Result<()> {
+        eq::validate_headphone(&headphone)?;
+        self.settings.headphone = headphone;
+        self.persist();
+        for channel in Channel::ALL {
+            self.apply_chain(channel)?;
+        }
+        Ok(())
+    }
+
+    /// Make an AutoEQ `ParametricEQ.txt` the headphone correction.
+    pub fn import_autoeq(&mut self, text: &str, name: Option<String>) -> Result<()> {
+        let mut headphone = eq::parse_autoeq(text)?;
+        headphone.name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+        self.set_headphone_eq(headphone)
+    }
+
     // --- internals ------------------------------------------------------------
+
+    /// If the drop-in on disk was written by an older gglinux, rewrite it and
+    /// restart PipeWire once so the channels get the current graph.
+    fn upgrade_dropin(&mut self) {
+        let Some(output) = self.settings.output.clone() else { return };
+        let Ok(expected) = config::dropin(&output) else { return };
+        if std::fs::read_to_string(&self.dropin_path).ok().as_deref() == Some(expected.as_str()) {
+            return;
+        }
+        info!(path = %self.dropin_path.display(), "updating Sonar's PipeWire drop-in; restarting PipeWire");
+        let result = std::fs::write(&self.dropin_path, expected)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| self.tools.run(&tools::restart_pipewire()));
+        match result {
+            Ok(()) => self.refresh(),
+            Err(e) => warn!(error = %format!("{e:#}"), "could not update Sonar's drop-in"),
+        }
+    }
 
     /// Re-read PipeWire. A failure means PipeWire or its tools are unavailable.
     fn refresh(&mut self) {
@@ -334,14 +381,26 @@ impl<T: PwTools> Sonar<T> {
         }
     }
 
-    /// Push saved channel volumes and ChatMix to PipeWire.
+    /// Push saved channel volumes, EQ and ChatMix to PipeWire.
     fn apply_levels(&self) -> Result<()> {
         for (&channel, &volume) in &self.settings.volumes {
             if let Some(node) = self.graph.node(&config::sink_name(channel)) {
                 self.tools.run(&tools::set_volume(node.id, volume))?;
             }
         }
+        for channel in Channel::ALL {
+            self.apply_chain(channel)?;
+        }
         self.apply_chatmix()
+    }
+
+    /// Set a channel's whole filter chain, if PipeWire has the channel now.
+    fn apply_chain(&self, channel: Channel) -> Result<()> {
+        if let Some(node) = self.graph.node(&config::sink_name(channel)) {
+            let props = eq::props(&self.settings.channel_eq(channel), &self.settings.headphone);
+            self.tools.run(&tools::set_params(node.id, &props))?;
+        }
+        Ok(())
     }
 
     /// ChatMix lives on the Game and Chat outlets, so it multiplies with the
@@ -367,6 +426,7 @@ impl<T: PwTools> Sonar<T> {
 mod tests {
     use super::*;
     use crate::testing::{dump, scratch};
+    use gg_ipc::HeadphoneEq;
     use std::cell::RefCell;
 
     const HEADSET: &str = "alsa_output.usb-SteelSeries_Arctis";
@@ -610,5 +670,95 @@ mod tests {
         let discord = state.apps.iter().find(|a| a.id == 40).unwrap();
         assert_eq!(discord.channel, Channel::Chat);
         assert_eq!(state.apps.len(), 3, "outlets are not apps");
+    }
+
+    fn chain_of(sonar: &Sonar<&Fake>, channel: Channel) -> String {
+        let s = sonar.snapshot();
+        let bands = &s.eq.iter().find(|c| c.channel == channel).unwrap().bands;
+        crate::eq::props(bands, &s.headphone)
+    }
+
+    #[test]
+    fn enable_sets_every_channels_chain() {
+        let (settings_path, dropin) = paths("eq-enable");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        for (id, channel) in [("20", Channel::Game), ("21", Channel::Chat), ("22", Channel::Media), ("23", Channel::Aux)] {
+            let props = chain_of(&sonar, channel);
+            assert!(fake.ran(&["pw-cli", "set-param", id, "Props", &props]), "{channel:?}");
+        }
+    }
+
+    #[test]
+    fn channel_eq_is_validated_saved_and_set_live() {
+        let (settings_path, dropin) = paths("eq-channel");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        sonar.enable().unwrap();
+        let mut bands = crate::eq::flat_channel();
+        bands[3].gain = 4.0;
+        sonar.set_channel_eq(Channel::Chat, bands.clone()).unwrap();
+        assert!(fake.ran(&["pw-cli", "set-param", "21", "Props", &chain_of(&sonar, Channel::Chat)]));
+        assert_eq!(settings::load(&settings_path).eq.get(&Channel::Chat), Some(&bands));
+
+        let before = fake.runs.borrow().len();
+        bands[3].gain = 40.0;
+        assert!(sonar.set_channel_eq(Channel::Chat, bands).is_err());
+        assert_eq!(fake.runs.borrow().len(), before, "nothing sent");
+        assert_eq!(settings::load(&settings_path).eq.get(&Channel::Chat).unwrap()[3].gain, 4.0, "nothing stored");
+    }
+
+    #[test]
+    fn headphone_eq_reaches_every_channel() {
+        let (settings_path, dropin) = paths("eq-headphone");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        fake.runs.borrow_mut().clear();
+        let hp = HeadphoneEq { preamp: -3.0, ..crate::eq::flat_headphone() };
+        sonar.set_headphone_eq(hp).unwrap();
+        assert_eq!(fake.count("pw-cli"), 4);
+    }
+
+    #[test]
+    fn autoeq_import_names_the_correction() {
+        let (settings_path, dropin) = paths("eq-import");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar
+            .import_autoeq("Preamp: -6.2 dB\nFilter 1: ON PK Fc 180 Hz Gain -3.4 dB Q 0.53", Some("HD 650".into()))
+            .unwrap();
+        let hp = sonar.snapshot().headphone;
+        assert_eq!(hp.name.as_deref(), Some("HD 650"));
+        assert_eq!(hp.preamp, -6.2);
+        assert!(sonar.import_autoeq("not an eq", None).is_err());
+    }
+
+    #[test]
+    fn an_outdated_dropin_is_rewritten_with_one_restart() {
+        let (settings_path, dropin) = paths("upgrade");
+        let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, "# an M3a loopback drop-in\n").unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        let sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        assert!(sonar.is_enabled());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT).unwrap());
+        assert_eq!(fake.count("systemctl"), 1);
+    }
+
+    #[test]
+    fn a_current_dropin_is_left_alone() {
+        let (settings_path, dropin) = paths("current");
+        let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        let _sonar = Sonar::new(&fake, settings_path, dropin);
+        assert_eq!(fake.count("systemctl"), 0);
     }
 }

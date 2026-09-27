@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use gg_ipc::Channel;
+use gg_ipc::{Channel, EqBand, HeadphoneEq};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{config, rules::Rules};
+use crate::{config, eq, rules::Rules};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,6 +23,10 @@ pub struct Settings {
     /// Per-channel volume on the mixer's 0..=1 scale.
     pub volumes: BTreeMap<Channel, f32>,
     pub rules: Rules,
+    /// Channel EQ bands; a channel without an entry is flat.
+    pub eq: BTreeMap<Channel, Vec<EqBand>>,
+    /// Headphone correction shared by every channel.
+    pub headphone: HeadphoneEq,
 }
 
 impl Default for Settings {
@@ -34,7 +38,16 @@ impl Default for Settings {
             chatmix: 0.0,
             volumes: BTreeMap::new(),
             rules: Rules::default(),
+            eq: BTreeMap::new(),
+            headphone: eq::flat_headphone(),
         }
+    }
+}
+
+impl Settings {
+    /// A channel's bands, flat if never set.
+    pub fn channel_eq(&self, channel: Channel) -> Vec<EqBand> {
+        self.eq.get(&channel).cloned().unwrap_or_else(eq::flat_channel)
     }
 }
 
