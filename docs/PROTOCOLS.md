@@ -103,12 +103,12 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 | Sidetone | `06 39 <lvl>` | `0=off,1=low,2=med,3=high` |
 | EQ preset select | `06 2e <preset>` | presets `0–3` stored on base; `4` = custom slot |
 | EQ 10-band custom | `06 33 <b0..b9>` | select custom first (`06 2e 04`); each byte = `0x14 + 2*dB`, range −10..+10 dB, 0.5 dB step |
-| ANC / noise-cancelling | `06 bd <val>` | on/off/level (exact range = on-device RE) |
-| Transparency level | `06 b9 <lvl>` | |
-| Mic volume/gain | `06 37 <vol>` | `0x01`=mute .. `0xa0`=100% |
+| Noise mode | `06 bd <0\|1\|2>` | 0 off, 1 transparency, 2 ANC (loteran; status byte 10, event `07 bd`) |
+| Transparency level | `06 b9 <1-10>` | status byte 8, event `07 b9` |
+| Mic volume/gain | `06 37 <1-10>` | 1 = muted, 10 = 100% (loteran's shipped slider; the `0xa0` figure elsewhere is contradicted by it — confirm by ear). Not in the status readback |
 | Analog gain (hi-Z) | `06 27 <1=low\|2=high>` | hardware gain toggle, **not** a sample-rate change |
-| Mic-mute LED brightness | `06 bf <0-10>` | HeadsetControl "lights" maps on→10 |
-| Auto-shutoff timer | `06 c1 <lvl>` | `1=1m,2=5m,3=10m,4=15m,5=30m,6=60m` |
+| Mic-mute LED brightness | `06 bf <1-10>` | 1 is the minimum (HeadsetControl "off" = 1, "on" = 10); status byte 11 |
+| Auto-shutoff timer | `06 c1 <0-6>` | `0`=never, `1=1m,2=5m,3=10m,4=15m,5=30m,6=60m`; status byte 12 |
 | 2.4 GHz mode | `06 c3 <0=speed\|1=range>` | |
 | ChatMix enable | `06 49 01` | disable `06 49 00`; enables the dial interrupt (below) |
 | Sonar icon on OLED | `06 8d 01` | |

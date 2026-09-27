@@ -179,8 +179,10 @@ Progress 2026-09-27: `gg-device-headset` reads status and volume (verified on ha
 2026-08-12) and a setter is confirmed by readback. The daemon now has a headset worker, IPC and a
 UI panel, whose first feature is **base-station screen burn-in protection** — this unit's OLED
 never sleeps on its own, so gglinux keeps it black and lights it briefly on events (spec:
-`docs/superpowers/specs/2026-09-27-headset-screen-protection-design.md`). Still to do for M2: the
-setters in the UI (sidetone, ANC, EQ, mic, auto-off), the ChatMix dial, and the base station's
+`docs/superpowers/specs/2026-09-27-headset-screen-protection-design.md`). The UI now also sets noise mode, transparency, sidetone, mic volume and
+mute light, auto-off, 2.4 GHz mode and the on-device EQ (spec:
+`docs/superpowers/specs/2026-09-27-headset-controls-design.md`). Still to do for M2: owner
+acceptance on hardware; the ChatMix dial moves to M3, which drives it; the base station's
 damaged knob is out of scope by the owner's choice.
 
 ### M3 — Sonar audio core
