@@ -2,9 +2,9 @@
 //!
 //! Current scope: enumerate SteelSeries devices, monitor hotplug, control the
 //! Rival 3 Wireless Gen 2, drive the Arctis Nova Pro Wireless headset (settings,
-//! and keeping its base-station screen from burning in), run Sonar-style audio
-//! channels on PipeWire, and serve all of it over a newline-delimited JSON unix
-//! socket. PipeWire audio and the GameSense server land in later milestones.
+//! and keeping its base-station screen from burning in), run the Apex Pro TKL
+//! Gen 3's lighting, run Sonar-style audio channels on PipeWire, and serve all
+//! of it over a newline-delimited JSON unix socket. PipeWire audio and the GameSense server land in later milestones.
 
 use std::time::Duration;
 
@@ -23,6 +23,7 @@ mod mouse;
 mod sonar;
 
 use headset::{Command as HeadsetCommand, Handle as HeadsetHandle};
+use keyboard::{Command as KeyboardCommand, Handle as KeyboardHandle};
 use mouse::{Command as MouseCommand, Handle as MouseHandle};
 use sonar::{Command as SonarCommand, Handle as SonarHandle};
 
@@ -37,6 +38,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 struct Workers {
     mouse: MouseHandle,
     headset: HeadsetHandle,
+    keyboard: KeyboardHandle,
     sonar: SonarHandle,
 }
 
@@ -70,14 +72,16 @@ async fn main() -> Result<()> {
     let workers = Workers {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
+        keyboard: keyboard::spawn(event_tx.clone()),
         sonar: sonar::spawn(event_tx.clone()),
     };
 
     let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
 
-    // Leave the base-station screen dark: at logout or shutdown its USB power
-    // often stays on, and nobody is there to see it.
-    shutdown_headset(&workers.headset).await;
+    // Leave the base-station screen dark — at logout or shutdown its USB power
+    // often stays on, and nobody is there to see it — and give the keyboard its
+    // own lighting back.
+    shutdown_devices(&workers).await;
 
     // Best-effort cleanup so the next start binds cleanly.
     let _ = std::fs::remove_file(&path);
@@ -318,9 +322,16 @@ async fn dispatch(
         Request::SetMicVolume { volume } => outcome(
             workers.sonar.send::<()>(|reply| SonarCommand::SetMicVolume { volume, reply }).await,
         ),
-        Request::GetKeyboardState | Request::SetLighting { .. } => ResponseData::Error {
-            message: "keyboard lighting is not wired up yet".into(),
+        Request::GetKeyboardState => match workers.keyboard.send(KeyboardCommand::GetState).await {
+            Ok(state) => ResponseData::Keyboard { state },
+            Err(message) => ResponseData::Error { message },
         },
+        Request::SetLighting { lighting } => outcome(
+            workers
+                .keyboard
+                .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
+                .await,
+        ),
     };
     ServerMessage::response(frame.id, result)
 }
@@ -333,13 +344,26 @@ fn outcome(result: Result<(), String>) -> ResponseData {
     }
 }
 
-/// Ask the headset worker to leave the screen dark, waiting at most [`SHUTDOWN_GRACE`].
-async fn shutdown_headset(headset: &HeadsetHandle) {
-    let request = headset.send::<()>(HeadsetCommand::Shutdown);
-    match tokio::time::timeout(SHUTDOWN_GRACE, request).await {
-        Ok(Ok(())) => debug!("base-station screen left dark"),
-        Ok(Err(e)) => warn!(error = %e, "headset shutdown failed"),
-        Err(_) => warn!("headset worker did not confirm shutdown in time"),
+/// Leave the devices as their owner expects them — base-station screen dark,
+/// keyboard lighting back on its own profile — waiting at most [`SHUTDOWN_GRACE`].
+async fn shutdown_devices(workers: &Workers) {
+    let both = async {
+        tokio::join!(
+            workers.headset.send::<()>(HeadsetCommand::Shutdown),
+            workers.keyboard.send::<()>(KeyboardCommand::Shutdown),
+        )
+    };
+    match tokio::time::timeout(SHUTDOWN_GRACE, both).await {
+        Ok((headset, keyboard)) => {
+            if let Err(e) = headset {
+                warn!(error = %e, "headset shutdown failed");
+            }
+            if let Err(e) = keyboard {
+                warn!(error = %e, "keyboard shutdown failed");
+            }
+            debug!("devices left as found");
+        }
+        Err(_) => warn!("device workers did not confirm shutdown in time"),
     }
 }
 
