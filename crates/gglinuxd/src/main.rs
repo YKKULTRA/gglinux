@@ -1,8 +1,9 @@
 //! gglinuxd — the gglinux background daemon.
 //!
 //! Current scope: enumerate SteelSeries devices, monitor hotplug, control the
-//! Rival 3 Wireless Gen 2, keep the Arctis Nova Pro Wireless base-station screen
-//! from burning in, and serve all of it over a newline-delimited JSON unix
+//! Rival 3 Wireless Gen 2, drive the Arctis Nova Pro Wireless headset (settings,
+//! and keeping its base-station screen from burning in), run Sonar-style audio
+//! channels on PipeWire, and serve all of it over a newline-delimited JSON unix
 //! socket. PipeWire audio and the GameSense server land in later milestones.
 
 use std::time::Duration;
@@ -18,9 +19,11 @@ use tracing::{debug, error, info, warn};
 mod clock;
 mod headset;
 mod mouse;
+mod sonar;
 
 use headset::{Command as HeadsetCommand, Handle as HeadsetHandle};
 use mouse::{Command as MouseCommand, Handle as MouseHandle};
+use sonar::{Command as SonarCommand, Handle as SonarHandle};
 
 /// Capacity of the per-client event broadcast buffer.
 const EVENT_CHANNEL_CAP: usize = 256;
@@ -33,6 +36,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 struct Workers {
     mouse: MouseHandle,
     headset: HeadsetHandle,
+    sonar: SonarHandle,
 }
 
 #[tokio::main]
@@ -65,6 +69,7 @@ async fn main() -> Result<()> {
     let workers = Workers {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
+        sonar: sonar::spawn(event_tx.clone()),
     };
 
     let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
@@ -260,14 +265,31 @@ async fn dispatch(
                 .send::<()>(|reply| HeadsetCommand::SetControl { change, reply })
                 .await,
         ),
-        Request::GetSonarState
-        | Request::SetSonarEnabled { .. }
-        | Request::SetSonarOutput { .. }
-        | Request::SetChannelVolume { .. }
-        | Request::SetChatMix { .. }
-        | Request::SetAppChannel { .. } => ResponseData::Error {
-            message: "Sonar is not wired up yet".into(),
+        Request::GetSonarState => match workers.sonar.send(SonarCommand::GetState).await {
+            Ok(state) => ResponseData::Sonar { state },
+            Err(message) => ResponseData::Error { message },
         },
+        Request::SetSonarEnabled { enabled } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetEnabled { enabled, reply }).await,
+        ),
+        Request::SetSonarOutput { name } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetOutput { name, reply }).await,
+        ),
+        Request::SetChannelVolume { channel, volume } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetVolume { channel, volume, reply })
+                .await,
+        ),
+        Request::SetChatMix { balance } => outcome(
+            workers.sonar.send::<()>(|reply| SonarCommand::SetChatMix { balance, reply }).await,
+        ),
+        Request::SetAppChannel { binary, channel } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetAppChannel { binary, channel, reply })
+                .await,
+        ),
     };
     ServerMessage::response(frame.id, result)
 }

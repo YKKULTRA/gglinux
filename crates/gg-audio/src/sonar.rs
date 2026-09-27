@@ -106,11 +106,14 @@ impl<T: PwTools> Sonar<T> {
             apps: self
                 .graph
                 .app_streams()
-                .map(|s| AppStream {
-                    id: s.id,
-                    name: s.app_name.clone().unwrap_or_else(|| s.name.clone()),
-                    binary: s.app_binary.clone(),
-                    channel: self.settings.rules.channel_for(s.app_binary.as_deref()),
+                .map(|s| {
+                    let key = s.route_key();
+                    AppStream {
+                        id: s.id,
+                        name: s.app_name.clone().unwrap_or_else(|| s.name.clone()),
+                        channel: self.settings.rules.channel_for(key.as_deref()),
+                        binary: key,
+                    }
                 })
                 .collect(),
         }
@@ -295,7 +298,7 @@ impl<T: PwTools> Sonar<T> {
         let moves: Vec<(u32, Channel)> = self
             .graph
             .app_streams()
-            .map(|s| (s.id, self.settings.rules.channel_for(s.app_binary.as_deref())))
+            .map(|s| (s.id, self.settings.rules.channel_for(s.route_key().as_deref())))
             .filter(|(id, channel)| self.routed.get(id) != Some(channel))
             .collect();
         for (id, channel) in moves {

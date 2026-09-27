@@ -18,6 +18,20 @@ pub struct Node {
     pub volume: Option<f32>,
 }
 
+/// Prefix PipeWire's ALSA plugin gives the streams of plain ALSA apps.
+const ALSA_PLAYBACK: &str = "alsa_playback.";
+
+impl Node {
+    /// What routing rules match an app by: its binary, or — for apps playing
+    /// through PipeWire's ALSA plugin, which report no binary — the app name in
+    /// `alsa_playback.<app>`.
+    pub fn route_key(&self) -> Option<String> {
+        self.app_binary
+            .clone()
+            .or_else(|| self.name.strip_prefix(ALSA_PLAYBACK).map(str::to_owned))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Graph {
     pub nodes: Vec<Node>,
@@ -146,6 +160,16 @@ mod tests {
         assert_eq!(g.physical_sinks().map(|n| n.id).collect::<Vec<_>>(), [1]);
         assert_eq!(g.app_streams().map(|n| n.id).collect::<Vec<_>>(), [4]);
         assert_eq!(g.default_sink.as_deref(), Some("alsa_output.x"));
+    }
+
+    #[test]
+    fn apps_without_a_binary_are_keyed_by_their_alsa_name() {
+        let g = Graph::parse(CAPTURE).unwrap();
+        let elisa = g.node("alsa_playback.elisa").expect("the capture has Elisa via PipeWire ALSA");
+        assert_eq!(elisa.app_binary, None);
+        assert_eq!(elisa.route_key().as_deref(), Some("elisa"));
+        let firefox = g.app_streams().find(|s| s.app_binary.as_deref() == Some("firefox")).unwrap();
+        assert_eq!(firefox.route_key().as_deref(), Some("firefox"));
     }
 
     #[test]

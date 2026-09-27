@@ -111,6 +111,7 @@ name = "gglinuxd"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "gg-audio",
  "gg-device-headset",
  "gg-device-mouse",
  "gg-hid",
