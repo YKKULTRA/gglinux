@@ -15,6 +15,10 @@ pub trait PwTools {
     fn pause(&self, duration: Duration) {
         std::thread::sleep(duration)
     }
+    /// Whether the mic chain's LADSPA plugins are installed.
+    fn mic_plugins_present(&self) -> bool {
+        crate::mic::plugins_present()
+    }
 }
 
 /// The real tools, run as child processes.

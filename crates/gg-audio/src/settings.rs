@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use gg_ipc::{Channel, EqBand, HeadphoneEq};
+use gg_ipc::{Channel, EqBand, HeadphoneEq, MicSettings};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -27,6 +27,13 @@ pub struct Settings {
     pub eq: BTreeMap<Channel, Vec<EqBand>>,
     /// Headphone correction shared by every channel.
     pub headphone: HeadphoneEq,
+    /// `node.name` of the physical mic the virtual mic reads.
+    pub mic_input: Option<String>,
+    /// The default input before Sonar took over, restored when it is turned off.
+    pub previous_default_source: Option<String>,
+    pub mic: MicSettings,
+    /// Virtual mic volume on the mixer's 0..=1 scale.
+    pub mic_volume: Option<f32>,
 }
 
 impl Default for Settings {
@@ -40,6 +47,10 @@ impl Default for Settings {
             rules: Rules::default(),
             eq: BTreeMap::new(),
             headphone: eq::flat_headphone(),
+            mic_input: None,
+            previous_default_source: None,
+            mic: MicSettings::default(),
+            mic_volume: None,
         }
     }
 }

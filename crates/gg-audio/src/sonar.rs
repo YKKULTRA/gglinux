@@ -9,13 +9,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use gg_ipc::{AppStream, AudioDevice, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, SonarState};
+use gg_ipc::{
+    AppStream, AudioDevice, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, MicSettings, MicState,
+    SonarState,
+};
 use tracing::{debug, info, warn};
 
 use crate::graph::Graph;
 use crate::settings::{self, Settings};
 use crate::tools::{self, PwTools};
-use crate::{config, eq, mix};
+use crate::{config, eq, mic, mix};
 
 /// How long PipeWire gets to bring nodes up after a restart.
 const APPEAR_TIMEOUT: Duration = Duration::from_secs(5);
@@ -126,14 +129,20 @@ impl<T: PwTools> Sonar<T> {
                 .map(|&channel| ChannelEq { channel, bands: self.settings.channel_eq(channel) })
                 .collect(),
             headphone: self.settings.headphone.clone(),
-            // Filled in by the mic work.
-            mic: gg_ipc::MicState {
-                available: false,
-                present: false,
-                input: None,
-                inputs: Vec::new(),
-                volume: None,
-                settings: gg_ipc::MicSettings::default(),
+            mic: MicState {
+                available: self.tools.mic_plugins_present(),
+                present: self.graph.node(mic::SOURCE).is_some(),
+                input: self.settings.mic_input.clone(),
+                inputs: self
+                    .graph
+                    .physical_sources()
+                    .map(|n| AudioDevice {
+                        name: n.name.clone(),
+                        description: n.description.clone().unwrap_or_else(|| n.name.clone()),
+                    })
+                    .collect(),
+                volume: self.graph.node(mic::SOURCE).and_then(|n| n.volume),
+                settings: self.settings.mic,
             },
         }
     }
@@ -148,9 +157,11 @@ impl<T: PwTools> Sonar<T> {
             bail!("PipeWire is not reachable (pw-dump failed)");
         }
         let previous_default = self.graph.default_sink.clone().filter(|n| !config::is_ours(n));
+        let previous_default_source = self.graph.default_source.clone().filter(|n| !config::is_ours(n));
         let output = self.choose_output().context("no output device for the channels to play into")?;
+        let mic_input = self.choose_mic();
 
-        let text = config::dropin(&output, None)?;
+        let text = config::dropin(&output, mic_input.as_deref())?;
         if let Some(dir) = self.dropin_path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
@@ -159,23 +170,35 @@ impl<T: PwTools> Sonar<T> {
         info!(%output, path = %self.dropin_path.display(), "enabling Sonar; restarting PipeWire");
         self.tools.run(&tools::restart_pipewire())?;
 
-        let all_up = |g: &Graph| Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some());
+        let channels_up = |g: &Graph| Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some());
+        let want_mic = mic_input.is_some();
+        let all_up = |g: &Graph| channels_up(g) && (!want_mic || g.node(mic::SOURCE).is_some());
         if !self.wait_until(all_up) {
-            warn!("Sonar channels did not appear; undoing");
-            let _ = std::fs::remove_file(&self.dropin_path);
-            let _ = self.tools.run(&tools::restart_pipewire());
-            bail!(
-                "PipeWire did not create the Sonar channels within {} s, so the change was undone",
-                APPEAR_TIMEOUT.as_secs()
-            );
+            if channels_up(&self.graph) {
+                // The mic module is nofail: the channels are fine without it.
+                warn!("the Sonar mic did not load; continuing without it");
+            } else {
+                warn!("Sonar channels did not appear; undoing");
+                let _ = std::fs::remove_file(&self.dropin_path);
+                let _ = self.tools.run(&tools::restart_pipewire());
+                bail!(
+                    "PipeWire did not create the Sonar channels within {} s, so the change was undone",
+                    APPEAR_TIMEOUT.as_secs()
+                );
+            }
         }
         if let Some(node) = self.graph.node(&config::sink_name(Channel::Game)) {
+            self.tools.run(&tools::set_default(node.id))?;
+        }
+        if let Some(node) = self.graph.node(mic::SOURCE) {
             self.tools.run(&tools::set_default(node.id))?;
         }
 
         self.settings.enabled = true;
         self.settings.output = Some(output);
         self.settings.previous_default = previous_default;
+        self.settings.previous_default_source = previous_default_source;
+        self.settings.mic_input = mic_input;
         self.persist();
         self.apply_levels()?;
         self.levels_applied = true;
@@ -210,6 +233,16 @@ impl<T: PwTools> Sonar<T> {
                 warn!(%name, "the previous default output did not come back");
             }
         }
+        if let Some(name) = self.settings.previous_default_source.take() {
+            self.persist();
+            if self.wait_until(|g| g.node(&name).is_some()) {
+                if let Some(node) = self.graph.node(&name) {
+                    self.tools.run(&tools::set_default(node.id))?;
+                }
+            } else {
+                warn!(%name, "the previous default input did not come back");
+            }
+        }
         Ok(())
     }
 
@@ -219,7 +252,7 @@ impl<T: PwTools> Sonar<T> {
         if !self.graph.physical_sinks().any(|n| n.name == name) {
             bail!("no output device named {name}");
         }
-        let text = config::dropin(name, None)?;
+        let text = self.expected_dropin(name)?;
         self.settings.output = Some(name.to_owned());
         self.persist();
         if self.settings.enabled {
@@ -296,13 +329,88 @@ impl<T: PwTools> Sonar<T> {
         self.set_headphone_eq(headphone)
     }
 
+    pub fn set_mic_settings(&mut self, settings: MicSettings) -> Result<()> {
+        mic::validate(&settings)?;
+        self.settings.mic = settings;
+        self.persist();
+        self.apply_mic()
+    }
+
+    pub fn set_mic_volume(&mut self, volume: f32) -> Result<()> {
+        if !volume.is_finite() {
+            bail!("volume must be a number");
+        }
+        self.settings.mic_volume = Some(volume.clamp(0.0, 1.0));
+        self.persist();
+        self.apply_mic()
+    }
+
+    /// Read a different physical mic, now and from the next PipeWire start.
+    pub fn set_mic_input(&mut self, name: &str) -> Result<()> {
+        self.refresh();
+        if !self.graph.physical_sources().any(|n| n.name == name) {
+            bail!("no input device named {name}");
+        }
+        self.settings.mic_input = Some(name.to_owned());
+        self.persist();
+        if self.settings.enabled {
+            if let Some(output) = self.settings.output.clone() {
+                let text = self.expected_dropin(&output)?;
+                std::fs::write(&self.dropin_path, text)
+                    .with_context(|| format!("writing {}", self.dropin_path.display()))?;
+            }
+            if let Some(node) = self.graph.node(mic::CAPTURE) {
+                self.tools.run(&tools::set_target(node.id, name))?;
+            }
+        }
+        Ok(())
+    }
+
     // --- internals ------------------------------------------------------------
+
+    /// The input the mic should read, if the plugins exist: the saved one if it
+    /// is still there, else the default input if it is a real one, else the first.
+    fn choose_mic(&self) -> Option<String> {
+        if !self.tools.mic_plugins_present() {
+            return None;
+        }
+        let physical = |name: &String| self.graph.physical_sources().any(|n| &n.name == name);
+        self.settings
+            .mic_input
+            .clone()
+            .filter(physical)
+            .or_else(|| self.graph.default_source.clone().filter(physical))
+            .or_else(|| self.graph.physical_sources().next().map(|n| n.name.clone()))
+    }
+
+    /// The drop-in this version writes for the saved output and mic.
+    fn expected_dropin(&self, output: &str) -> Result<String> {
+        let mic = self.settings.mic_input.as_deref().filter(|_| self.tools.mic_plugins_present());
+        config::dropin(output, mic)
+    }
+
+    fn apply_mic(&self) -> Result<()> {
+        if let Some(node) = self.graph.node(mic::CAPTURE) {
+            self.tools.run(&tools::set_params(node.id, &mic::props(&self.settings.mic)))?;
+        }
+        if let (Some(volume), Some(node)) = (self.settings.mic_volume, self.graph.node(mic::SOURCE)) {
+            self.tools.run(&tools::set_volume(node.id, volume))?;
+        }
+        Ok(())
+    }
 
     /// If the drop-in on disk was written by an older gglinux, rewrite it and
     /// restart PipeWire once so the channels get the current graph.
     fn upgrade_dropin(&mut self) {
         let Some(output) = self.settings.output.clone() else { return };
-        let Ok(expected) = config::dropin(&output, None) else { return };
+        // Plugins installed since Sonar was turned on: give it a mic now.
+        if self.settings.mic_input.is_none() {
+            self.settings.mic_input = self.choose_mic();
+            if self.settings.mic_input.is_some() {
+                self.persist();
+            }
+        }
+        let Ok(expected) = self.expected_dropin(&output) else { return };
         if std::fs::read_to_string(&self.dropin_path).ok().as_deref() == Some(expected.as_str()) {
             return;
         }
@@ -400,6 +508,7 @@ impl<T: PwTools> Sonar<T> {
         for channel in Channel::ALL {
             self.apply_chain(channel)?;
         }
+        self.apply_mic()?;
         self.apply_chatmix()
     }
 
@@ -434,12 +543,13 @@ impl<T: PwTools> Sonar<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{dump, scratch};
-    use gg_ipc::HeadphoneEq;
+    use crate::testing::{dump_with_source, scratch};
+    use gg_ipc::{HeadphoneEq, MicSettings};
     use std::cell::RefCell;
 
     const HEADSET: &str = "alsa_output.usb-SteelSeries_Arctis";
     const BT: &str = "bluez_output.1";
+    const MIC: &str = "alsa_input.usb-arctis";
 
     /// PipeWire stand-in. A restart brings the channels up if the drop-in exists
     /// (and `channels_come_up`), or takes them down if it does not.
@@ -448,6 +558,8 @@ mod tests {
         streams: RefCell<Vec<(u32, &'static str)>>,
         up: RefCell<bool>,
         channels_come_up: bool,
+        mic_plugins: bool,
+        mic_comes_up: bool,
         runs: RefCell<Vec<Vec<String>>>,
     }
 
@@ -458,6 +570,8 @@ mod tests {
                 streams: RefCell::new(streams.to_vec()),
                 up: RefCell::new(false),
                 channels_come_up: true,
+                mic_plugins: true,
+                mic_comes_up: true,
                 runs: RefCell::new(Vec::new()),
             }
         }
@@ -473,8 +587,11 @@ mod tests {
 
     impl PwTools for &Fake {
         fn dump(&self) -> Result<String> {
-            let mut nodes: Vec<(u32, &str, &str, Option<&str>)> =
-                vec![(10, HEADSET, "Audio/Sink", None), (11, BT, "Audio/Sink", None)];
+            let mut nodes: Vec<(u32, &str, &str, Option<&str>)> = vec![
+                (10, HEADSET, "Audio/Sink", None),
+                (11, BT, "Audio/Sink", None),
+                (12, MIC, "Audio/Source", None),
+            ];
             if *self.up.borrow() {
                 nodes.extend([
                     (20, "gglinux_game", "Audio/Sink", None),
@@ -486,10 +603,17 @@ mod tests {
                     (32, "gglinux_media.out", "Stream/Output/Audio", None),
                     (33, "gglinux_aux.out", "Stream/Output/Audio", None),
                 ]);
+                let wrote_mic = std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("gglinux_mic"));
+                if wrote_mic && self.mic_comes_up {
+                    nodes.extend([
+                        (24, "gglinux_mic", "Audio/Source", None),
+                        (34, "gglinux_mic.in", "Stream/Input/Audio", None),
+                    ]);
+                }
             }
             let streams = self.streams.borrow();
             nodes.extend(streams.iter().map(|&(id, bin)| (id, bin, "Stream/Output/Audio", Some(bin))));
-            Ok(dump(&nodes, BT))
+            Ok(dump_with_source(&nodes, BT, Some(MIC)))
         }
 
         fn run(&self, argv: &[String]) -> Result<()> {
@@ -501,6 +625,10 @@ mod tests {
         }
 
         fn pause(&self, _: Duration) {}
+
+        fn mic_plugins_present(&self) -> bool {
+            self.mic_plugins
+        }
     }
 
     fn paths(name: &str) -> (PathBuf, PathBuf) {
@@ -755,19 +883,116 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let sonar = Sonar::new(&fake, settings_path, dropin.clone());
         assert!(sonar.is_enabled());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, None).unwrap());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC)).unwrap());
         assert_eq!(fake.count("systemctl"), 1);
     }
 
     #[test]
     fn a_current_dropin_is_left_alone() {
         let (settings_path, dropin) = paths("current");
+        let saved = Settings {
+            enabled: true,
+            output: Some(BT.into()),
+            mic_input: Some(MIC.into()),
+            ..Settings::default()
+        };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC)).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        let _sonar = Sonar::new(&fake, settings_path, dropin);
+        assert_eq!(fake.count("systemctl"), 0);
+    }
+
+    #[test]
+    fn enable_installs_the_mic_and_makes_it_the_default_input() {
+        let (settings_path, dropin) = paths("mic-enable");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        sonar.enable().unwrap();
+        let text = std::fs::read_to_string(&dropin).unwrap();
+        assert!(text.contains(&format!("target.object      = \"{MIC}\"")));
+        assert!(fake.ran(&["wpctl", "set-default", "24"]), "gglinux Mic becomes the default input");
+        let props = crate::mic::props(&MicSettings::default());
+        assert!(fake.ran(&["pw-cli", "set-param", "34", "Props", &props]), "controls on the capture node");
+        let saved = settings::load(&settings_path);
+        assert_eq!(saved.mic_input.as_deref(), Some(MIC));
+        assert_eq!(saved.previous_default_source.as_deref(), Some(MIC));
+        assert!(sonar.snapshot().mic.present);
+    }
+
+    #[test]
+    fn without_mic_plugins_the_channels_still_work() {
+        let (settings_path, dropin) = paths("mic-none");
+        let mut fake = Fake::new(dropin.clone(), APPS);
+        fake.mic_plugins = false;
+        let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        sonar.enable().unwrap();
+        assert!(!std::fs::read_to_string(&dropin).unwrap().contains("gglinux_mic"));
+        let mic = sonar.snapshot().mic;
+        assert!(!mic.available && !mic.present);
+        assert!(!fake.ran(&["wpctl", "set-default", "24"]));
+    }
+
+    #[test]
+    fn channels_up_without_the_mic_keeps_sonar_on() {
+        let (settings_path, dropin) = paths("mic-failed");
+        let mut fake = Fake::new(dropin.clone(), APPS);
+        fake.mic_comes_up = false;
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        assert!(sonar.is_enabled());
+        assert_eq!(fake.count("systemctl"), 1, "no rollback");
+        assert!(!sonar.snapshot().mic.present);
+    }
+
+    #[test]
+    fn mic_settings_are_validated_saved_and_set_live() {
+        let (settings_path, dropin) = paths("mic-settings");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        sonar.enable().unwrap();
+        let on = MicSettings { gate: true, gate_threshold_db: -40.0, ..MicSettings::default() };
+        sonar.set_mic_settings(on).unwrap();
+        assert!(fake.ran(&["pw-cli", "set-param", "34", "Props", &crate::mic::props(&on)]));
+        assert_eq!(settings::load(&settings_path).mic, on);
+        let before = fake.runs.borrow().len();
+        assert!(sonar.set_mic_settings(MicSettings { makeup_db: 40.0, ..on }).is_err());
+        assert_eq!(fake.runs.borrow().len(), before);
+        assert_eq!(settings::load(&settings_path).mic, on);
+    }
+
+    #[test]
+    fn mic_volume_goes_to_the_virtual_source() {
+        let (settings_path, dropin) = paths("mic-volume");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_mic_volume(0.6).unwrap();
+        assert!(fake.ran(&["wpctl", "set-volume", "24", "0.600"]));
+    }
+
+    #[test]
+    fn disable_restores_the_default_input() {
+        let (settings_path, dropin) = paths("mic-disable");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.disable().unwrap();
+        assert!(fake.ran(&["wpctl", "set-default", "12"]), "back to the physical mic");
+    }
+
+    #[test]
+    fn plugins_installed_later_add_the_mic_on_startup() {
+        let (settings_path, dropin) = paths("mic-later");
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
         std::fs::write(&dropin, config::dropin(BT, None).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
-        let _sonar = Sonar::new(&fake, settings_path, dropin);
-        assert_eq!(fake.count("systemctl"), 0);
+        let _sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_mic"));
+        assert_eq!(fake.count("systemctl"), 1);
+        assert_eq!(settings::load(&settings_path).mic_input.as_deref(), Some(MIC));
     }
 }
