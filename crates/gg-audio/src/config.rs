@@ -57,16 +57,22 @@ pub fn dropin_path() -> PathBuf {
     config_home().join("pipewire").join("pipewire.conf.d").join(FILE_NAME)
 }
 
+/// A `node.name` we can safely quote into the drop-in.
+pub(crate) fn check_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty() && !name.contains(['"', '\\', '\n']),
+        "unusable device name {name:?}"
+    );
+    Ok(())
+}
+
 /// The drop-in text for channels that play into `output` (a `node.name`).
 ///
 /// Every outlet sets `node.dont-fallback`: if the output disappears, the
 /// outlet waits for it rather than falling back to the default sink — which,
 /// with Sonar on, is the Game channel, and would feed audio into itself.
 pub fn dropin(output: &str) -> Result<String> {
-    ensure!(
-        !output.is_empty() && !output.contains(['"', '\\', '\n']),
-        "unusable output device name {output:?}"
-    );
+    check_name(output)?;
     let mut text = String::from(
         "# Written by gglinux: Sonar-style output channels.\n\
          # Turn Sonar off in gglinux, or delete this file and restart PipeWire, to remove them.\n\

@@ -12,6 +12,7 @@ pub mod mix;
 pub mod rules;
 pub mod tools;
 pub mod graph;
+pub mod mic;
 pub mod settings;
 pub mod sonar;
 
