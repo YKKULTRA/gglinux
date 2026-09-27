@@ -181,9 +181,15 @@ UI panel, whose first feature is **base-station screen burn-in protection** — 
 never sleeps on its own, so gglinux keeps it black and lights it briefly on events (spec:
 `docs/superpowers/specs/2026-09-27-headset-screen-protection-design.md`). The UI now also sets noise mode, transparency, sidetone, mic volume and
 mute light, auto-off, 2.4 GHz mode and the on-device EQ (spec:
-`docs/superpowers/specs/2026-09-27-headset-controls-design.md`). Still to do for M2: owner
-acceptance on hardware; the ChatMix dial moves to M3, which drives it; the base station's
-damaged knob is out of scope by the owner's choice.
+`docs/superpowers/specs/2026-09-27-headset-controls-design.md`). The ChatMix dial moves to M3,
+which drives it; the base station's damaged knob is out of scope by the owner's choice.
+
+Hardware session 2026-09-27 (merged to master afterwards): **verified** — the screen blanks and
+stays black through polling; headset power-on and battery (`07 b7`) events light it, then it
+re-blanks; the 10-minute safety re-blank ran for about two hours. **Untested** — wake on the headset wheel, ANC and mic mute (not watched); every headset
+setting write from the UI, including whether mic volume 1–10 sounds right by ear. Known nit: a
+spare battery charging in the base station steps `07 b7` about every 20 minutes, and each step
+briefly lights the screen.
 
 ### M3 — Sonar audio core
 `gg-audio` on pipewire-rs. Virtual sinks **Game / Chat / Media / Aux / Mic** (hybrid: static
@@ -210,6 +216,11 @@ software**: a virtual gglinux Mic (RNNoise → noise gate → compressor, each l
 becomes the default input while Sonar is on; its module is `nofail` and only written when its
 plugins exist (spec: `docs/superpowers/specs/2026-09-27-sonar-mic-design.md`). Next: streamer mode.
 
+Hardware status 2026-09-27: **nothing in M3 has run live yet.** The daemon's read-only Sonar state
+matched the real graph, and the generated drop-ins parse with `spa-json-dump`, but Sonar has
+never been enabled (it writes the drop-in and restarts PipeWire — ask the owner first). Still to
+confirm live: routing, volumes, ChatMix, which node accepts the EQ `Props`, and the mic chain.
+
 ### M4 — Keyboard RGB + OLED: Apex Pro Gen 3
 Port OpenRGB `0x1642` RGB (iface 1 feature reports; INIT `0x4B`, DIRECT `0x40`, ONBOARD `0x41`, 643-byte
 packet + 112-key table) and apex-tux OLED (**add `0x1642`**, confirm single-642 vs 8×641 framing on-device
@@ -222,8 +233,13 @@ Progress 2026-09-27 — **M4a done in software**: `gg-device-keyboard` (allowlis
 `0x23 0x40 0x41 0x4B 0x90 0xA3 0xF5` can be framed or written; US ANSI TKL layout), a keyboard
 worker running static per-key colours and breathing / wave / spectrum at 30 fps, handing lighting
 back to the keyboard when off or on exit; a Keyboard panel with a per-key editor (spec:
-`docs/superpowers/specs/2026-09-27-keyboard-lighting-design.md`). Next: M4b OLED (framing to confirm
-on-device), then reactive lighting (needs an input-access decision).
+`docs/superpowers/specs/2026-09-27-keyboard-lighting-design.md`). **Accepted on hardware
+2026-09-27**: static per-key, wave, and hand-back to onboard lighting all seen by the owner.
+
+M4b OLED is **blocked**: none of apex-tux's framings (`0x61` numbered, unnumbered, after init;
+`0x0C` chunked) changed the OLED on `0x1642` (see `docs/PROTOCOLS.md`). The next step is a GG USB
+capture on Windows, in the same session as M5 — no more opcode guessing on that interface.
+Reactive lighting waits on an input-access decision.
 
 ### M5 — Keyboard actuation: OmniPoint 3.0  *(fresh reverse-engineering — highest risk)*
 No public RE exists. Sub-steps: (1) capture GG↔keyboard HID traffic (usbmon/Wireshark, Windows host or
