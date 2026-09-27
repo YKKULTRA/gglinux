@@ -3,6 +3,7 @@
   import { daemon } from "./lib/daemon.svelte";
   import DeviceCard from "./lib/DeviceCard.svelte";
   import HeadsetPanel from "./lib/HeadsetPanel.svelte";
+  import KeyboardPanel from "./lib/KeyboardPanel.svelte";
   import MousePanel from "./lib/MousePanel.svelte";
   import SonarPanel from "./lib/SonarPanel.svelte";
   import Icon from "./lib/Icon.svelte";
@@ -28,8 +29,10 @@
   /** Devices with a control panel so far. */
   const RIVAL3_PID = 0x1872;
   const NOVA_PRO_PID = 0x12e0;
+  const APEX_PID = 0x1642;
   let hasRival3 = $derived(daemon.devices.some((d) => d.product_id === RIVAL3_PID));
   let hasNovaPro = $derived(daemon.devices.some((d) => d.product_id === NOVA_PRO_PID));
+  let hasApex = $derived(daemon.devices.some((d) => d.product_id === APEX_PID));
 
   onMount(() => {
     void daemon.start();
@@ -94,6 +97,12 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
         {#if hasNovaPro}
           <section class="controls">
             <HeadsetPanel />
+          </section>
+        {/if}
+
+        {#if hasApex}
+          <section class="controls">
+            <KeyboardPanel />
           </section>
         {/if}
 

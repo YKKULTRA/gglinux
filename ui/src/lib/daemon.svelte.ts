@@ -15,6 +15,8 @@ import type {
   HeadphoneEq,
   HeadsetChange,
   HeadsetState,
+  KeyboardState,
+  Lighting,
   MicSettings,
   MouseState,
   Request,
@@ -44,6 +46,8 @@ class Daemon {
   headset = $state<HeadsetState | null>(null);
   /** Sonar channels, routing and ChatMix; null until first fetched. */
   sonar = $state<SonarState | null>(null);
+  /** Keyboard layout and lighting; null until first fetched. */
+  keyboard = $state<KeyboardState | null>(null);
   /** Last transport/protocol error, for surfacing in the UI. */
   lastError = $state<string | null>(null);
 
@@ -66,6 +70,7 @@ class Daemon {
         this.mouse = null;
         this.headset = null;
         this.sonar = null;
+        this.keyboard = null;
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -209,6 +214,19 @@ class Daemon {
     return this.#sonarCommand({ method: "set_mic_volume", params: { volume } });
   }
 
+  async getKeyboardState(): Promise<KeyboardState> {
+    const res = await this.request({ method: "get_keyboard_state" });
+    if (res.type !== "keyboard") throw new Error(`unexpected response: ${res.type}`);
+    this.keyboard = res.state;
+    return res.state;
+  }
+
+  async setLighting(lighting: Lighting): Promise<void> {
+    const res = await this.request({ method: "set_lighting", params: { lighting } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getKeyboardState();
+  }
+
   async #command(req: Request): Promise<void> {
     const res = await this.request(req);
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
@@ -253,6 +271,9 @@ class Daemon {
         break;
       case "sonar_changed":
         this.sonar = ev.data.state;
+        break;
+      case "keyboard_changed":
+        this.keyboard = ev.data.state;
         break;
     }
   }

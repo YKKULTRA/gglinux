@@ -184,6 +184,46 @@ export interface SonarState {
   mic: MicState;
 }
 
+export interface Rgb {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export type Effect =
+  | { kind: "static" }
+  | { kind: "breathing"; color: Rgb; period_s: number }
+  | { kind: "wave"; period_s: number }
+  | { kind: "spectrum"; period_s: number };
+
+export interface KeyColor {
+  code: number;
+  color: Rgb;
+}
+
+export interface Lighting {
+  /** false leaves the lighting to the keyboard's own profile. */
+  enabled: boolean;
+  effect: Effect;
+  keys: KeyColor[];
+  /** 0..=100 % */
+  brightness: number;
+}
+
+export interface KeyInfo {
+  code: number;
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+}
+
+export interface KeyboardState {
+  connected: boolean;
+  layout: KeyInfo[];
+  lighting: Lighting;
+}
+
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
 export type Request =
   | { method: "list_devices" }
@@ -207,7 +247,9 @@ export type Request =
   | { method: "import_auto_eq"; params: { text: string; name: string | null } }
   | { method: "set_mic_input"; params: { name: string } }
   | { method: "set_mic_settings"; params: { settings: MicSettings } }
-  | { method: "set_mic_volume"; params: { volume: number } };
+  | { method: "set_mic_volume"; params: { volume: number } }
+  | { method: "get_keyboard_state" }
+  | { method: "set_lighting"; params: { lighting: Lighting } };
 
 export interface RequestFrame {
   id: number;
@@ -220,6 +262,7 @@ export type ResponseData =
   | { type: "mouse"; state: MouseState }
   | { type: "headset"; state: HeadsetState }
   | { type: "sonar"; state: SonarState }
+  | { type: "keyboard"; state: KeyboardState }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -229,7 +272,8 @@ export type DaemonEvent =
   | { event: "devices_changed"; data: { devices: DeviceInfo[] } }
   | { event: "mouse_battery"; data: { battery: BatteryState | null } }
   | { event: "headset_changed"; data: { state: HeadsetState } }
-  | { event: "sonar_changed"; data: { state: SonarState } };
+  | { event: "sonar_changed"; data: { state: SonarState } }
+  | { event: "keyboard_changed"; data: { state: KeyboardState } };
 
 export type ServerMessage =
   | { kind: "response"; id: number; result: ResponseData }
