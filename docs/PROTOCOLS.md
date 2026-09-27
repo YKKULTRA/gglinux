@@ -187,6 +187,19 @@ apex-tux covers the Gen3 *family* but **not `0x1642` specifically** (it lists `0
 Reuse: `not-jan/apex-tux` `apex-hardware/src/usb.rs` + `device.rs` (Unlicense) — add `0x1642` to
 `SupportedDevice`, pick the variant after descriptor inspection.
 
+> **Tested on `0x1642` 2026-09-27 — none of the known framings drives its OLED.**
+> The HID descriptor of iface 1 (the only writable vendor interface) declares **no report IDs** and a
+> **644-byte feature report** (plus 64-byte input/output); iface 4 (`0xFFC1`) is input-only, iface 3 is
+> consumer/mouse. With the owner watching the OLED, each of these left it **unchanged**:
+> 1. apex-tux single-report: 642 bytes `[0x61, 640 page-major px, 0]` (0x61 lands in the report-id slot);
+> 2. the same frame unnumbered, shaped like this keyboard's working RGB frames: `[0x00, 0x61, px…, 0]`;
+> 3. (2) after a `0x4B` init;
+> 4. apex-tux chunked Gen 3: 8 × `[0x00, 0x0C, 0x01, offset LE, 80, 0, 80 px]` (tried once, owner's choice).
+>
+> None had any visible effect; lighting was handed back (`0x41`) afterwards. **The OLED command for
+> `0x1642` is unknown** — capture it from SteelSeries GG on Windows alongside the M5 actuation
+> captures rather than guessing further on this interface.
+
 ### 3c. Actuation / switch behavior — **UNSOLVED, fresh RE required**
 No public project implements OmniPoint / Rapid Trigger / Rapid Tap / Protection Mode for *any* Apex
 Pro generation on Linux. This is the project's one real reverse-engineering effort.
