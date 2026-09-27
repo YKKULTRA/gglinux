@@ -4,7 +4,7 @@
 
   import EqEditor from "./EqEditor.svelte";
   import { daemon } from "./daemon.svelte";
-  import type { Channel, EqBand } from "./types";
+  import type { Channel, EqBand, MicSettings } from "./types";
 
   const CHANNELS: { value: Channel; label: string }[] = [
     { value: "game", label: "Game" },
@@ -67,6 +67,12 @@
         ? daemon.setHeadphoneEq({ ...s.headphone, bands })
         : daemon.setChannelEq(eqTab, bands),
     );
+  }
+
+  function micSettings(patch: Partial<MicSettings>) {
+    const s = sonar;
+    if (!s) return;
+    void quietly(() => daemon.setMicSettings({ ...s.mic.settings, ...patch }));
   }
 
   function importAutoEq() {
@@ -182,6 +188,98 @@
             {/each}
           </ul>
           <p class="hint">A change applies now and is remembered for that app.</p>
+        {/if}
+      </section>
+
+      <section>
+        <div class="head">
+          <h4>Microphone</h4>
+          {#if sonar.mic.present}<span class="unit wide">gglinux Mic is your default input</span>{/if}
+        </div>
+        {#if !sonar.mic.available}
+          <p class="hint">
+            Install <code>noise-suppression-for-voice</code> and <code>swh-plugins</code> for noise
+            suppression, a gate and a compressor on your mic, then turn Sonar off and on.
+          </p>
+        {:else}
+          {@const m = sonar.mic.settings}
+          <div class="row">
+            <span class="label">Input</span>
+            <select
+              value={sonar.mic.input ?? ""}
+              onchange={(e) => run("mic-input", () => daemon.setMicInput(e.currentTarget.value))}
+            >
+              {#if !sonar.mic.input}<option value="">chosen when Sonar turns on</option>{/if}
+              {#each sonar.mic.inputs as i (i.name)}<option value={i.name}>{i.description}</option>{/each}
+            </select>
+          </div>
+          <div class="row">
+            <span class="label">Volume</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={Math.round((sonar.mic.volume ?? 1) * 100)}
+              disabled={!sonar.mic.present}
+              onchange={(e) => quietly(() => daemon.setMicVolume(e.currentTarget.valueAsNumber / 100))}
+            />
+            <span class="unit">{pct(sonar.mic.volume)}</span>
+          </div>
+          <label class="check">
+            <input type="checkbox" checked={m.denoise} onchange={(e) => micSettings({ denoise: e.currentTarget.checked })} />
+            Noise suppression
+          </label>
+          <div class="row">
+            <span class="label">Strength</span>
+            <input
+              type="range"
+              min="0"
+              max="95"
+              step="5"
+              value={m.denoise_strength}
+              disabled={!m.denoise}
+              onchange={(e) => micSettings({ denoise_strength: e.currentTarget.valueAsNumber })}
+            />
+            <span class="unit">{m.denoise_strength}%</span>
+          </div>
+          <label class="check">
+            <input type="checkbox" checked={m.gate} onchange={(e) => micSettings({ gate: e.currentTarget.checked })} />
+            Noise gate
+          </label>
+          <div class="row">
+            <span class="label">Opens at</span>
+            <input
+              type="range"
+              min="-80"
+              max="-10"
+              step="1"
+              value={m.gate_threshold_db}
+              disabled={!m.gate}
+              onchange={(e) => micSettings({ gate_threshold_db: e.currentTarget.valueAsNumber })}
+            />
+            <span class="unit">{m.gate_threshold_db} dB</span>
+          </div>
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={m.compressor}
+              onchange={(e) => micSettings({ compressor: e.currentTarget.checked })}
+            />
+            Compressor
+          </label>
+          <div class="row">
+            <span class="label">Makeup</span>
+            <input
+              type="range"
+              min="0"
+              max="18"
+              step="1"
+              value={m.makeup_db}
+              disabled={!m.compressor}
+              onchange={(e) => micSettings({ makeup_db: e.currentTarget.valueAsNumber })}
+            />
+            <span class="unit">+{m.makeup_db} dB</span>
+          </div>
         {/if}
       </section>
 
@@ -407,6 +505,21 @@
     background: var(--surface-2);
     border: 1px solid var(--line);
     border-radius: 7px;
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.8rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .unit.wide {
+    width: auto;
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 0.78rem;
   }
   .error {
     margin: 0.8rem 0 0;

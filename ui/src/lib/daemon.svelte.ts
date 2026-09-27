@@ -15,6 +15,7 @@ import type {
   HeadphoneEq,
   HeadsetChange,
   HeadsetState,
+  MicSettings,
   MouseState,
   Request,
   ResponseData,
@@ -194,6 +195,18 @@ class Daemon {
 
   importAutoEq(text: string, name: string | null): Promise<void> {
     return this.#sonarCommand({ method: "import_auto_eq", params: { text, name } });
+  }
+
+  setMicInput(name: string): Promise<void> {
+    return this.#sonarCommand({ method: "set_mic_input", params: { name } });
+  }
+
+  setMicSettings(settings: MicSettings): Promise<void> {
+    return this.#sonarCommand({ method: "set_mic_settings", params: { settings } });
+  }
+
+  setMicVolume(volume: number): Promise<void> {
+    return this.#sonarCommand({ method: "set_mic_volume", params: { volume } });
   }
 
   async #command(req: Request): Promise<void> {

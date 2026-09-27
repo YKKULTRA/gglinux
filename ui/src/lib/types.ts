@@ -108,7 +108,7 @@ export interface HeadsetState {
 
 export type Channel = "game" | "chat" | "media" | "aux";
 
-export interface AudioOutput {
+export interface AudioDevice {
   name: string;
   description: string;
 }
@@ -148,11 +148,32 @@ export interface HeadphoneEq {
   name: string | null;
 }
 
+export interface MicSettings {
+  denoise: boolean;
+  /** 0..=95 % */
+  denoise_strength: number;
+  gate: boolean;
+  /** -80..=-10 dB */
+  gate_threshold_db: number;
+  compressor: boolean;
+  /** 0..=18 dB */
+  makeup_db: number;
+}
+
+export interface MicState {
+  available: boolean;
+  present: boolean;
+  input: string | null;
+  inputs: AudioDevice[];
+  volume: number | null;
+  settings: MicSettings;
+}
+
 export interface SonarState {
   available: boolean;
   enabled: boolean;
   output: string | null;
-  outputs: AudioOutput[];
+  outputs: AudioDevice[];
   channels: ChannelState[];
   /** -1 all Game … 0 both full … 1 all Chat. */
   chatmix: number;
@@ -160,6 +181,7 @@ export interface SonarState {
   /** Per-channel EQ, in Game, Chat, Media, Aux order. */
   eq: ChannelEq[];
   headphone: HeadphoneEq;
+  mic: MicState;
 }
 
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
@@ -182,7 +204,10 @@ export type Request =
   | { method: "set_app_channel"; params: { binary: string; channel: Channel } }
   | { method: "set_channel_eq"; params: { channel: Channel; bands: EqBand[] } }
   | { method: "set_headphone_eq"; params: { eq: HeadphoneEq } }
-  | { method: "import_auto_eq"; params: { text: string; name: string | null } };
+  | { method: "import_auto_eq"; params: { text: string; name: string | null } }
+  | { method: "set_mic_input"; params: { name: string } }
+  | { method: "set_mic_settings"; params: { settings: MicSettings } }
+  | { method: "set_mic_volume"; params: { volume: number } };
 
 export interface RequestFrame {
   id: number;
