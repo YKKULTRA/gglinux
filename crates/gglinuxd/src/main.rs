@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 
 mod clock;
 mod headset;
+mod keyboard;
 mod mouse;
 mod sonar;
 

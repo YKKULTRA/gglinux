@@ -122,6 +122,7 @@ dependencies = [
  "anyhow",
  "gg-audio",
  "gg-device-headset",
+ "gg-device-keyboard",
  "gg-device-mouse",
  "gg-hid",
  "gg-ipc",
