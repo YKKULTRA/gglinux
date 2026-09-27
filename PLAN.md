@@ -202,8 +202,11 @@ PipeWire loopbacks in a drop-in (hosted by PipeWire, so they outlive the daemon)
 channel volumes, and does ChatMix on the Game/Chat outlets; the Sonar tab drives it (spec:
 `docs/superpowers/specs/2026-09-27-sonar-channels-design.md`). The approach moved from pipewire-rs to
 PipeWire's own CLI tools (`pw-dump` / `pw-metadata` / `wpctl`) behind a trait — no native bindings,
-and every action is a command a person could run. Next: M3b per-channel EQ, M3c mic chain, then
-streamer mode.
+and every action is a command a person could run. **M3b done in software**: each channel is a
+filter chain (preamp → 12-band headphone correction → 10-band channel EQ), set live with
+`pw-cli set-param`; AutoEQ `ParametricEQ.txt` import; a draggable curve editor that uses PipeWire's
+own biquad formulas (spec: `docs/superpowers/specs/2026-09-27-sonar-eq-design.md`). Next: M3c mic
+chain, then streamer mode.
 
 ### M4 — Keyboard RGB + OLED: Apex Pro Gen 3
 Port OpenRGB `0x1642` RGB (iface 1 feature reports; INIT `0x4B`, DIRECT `0x40`, ONBOARD `0x41`, 643-byte
