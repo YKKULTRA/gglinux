@@ -196,6 +196,15 @@ parity). Mixer + EQ UI (curve editor).
 **Accept:** apps route to channels from the UI and persist; dial fades Game vs Chat; EQ audibly changes
 sound; mic denoise works in a call; xruns clean at quantum 512→256.
 
+Progress 2026-09-27 — **M3a done in software**: `gg-audio` declares Game / Chat / Media / Aux as
+PipeWire loopbacks in a drop-in (hosted by PipeWire, so they outlive the daemon), routes apps by
+`application.process.binary` (or the `alsa_playback.<app>` name for plain ALSA clients), sets
+channel volumes, and does ChatMix on the Game/Chat outlets; the Sonar tab drives it (spec:
+`docs/superpowers/specs/2026-09-27-sonar-channels-design.md`). The approach moved from pipewire-rs to
+PipeWire's own CLI tools (`pw-dump` / `pw-metadata` / `wpctl`) behind a trait — no native bindings,
+and every action is a command a person could run. Next: M3b per-channel EQ, M3c mic chain, then
+streamer mode.
+
 ### M4 — Keyboard RGB + OLED: Apex Pro Gen 3
 Port OpenRGB `0x1642` RGB (iface 1 feature reports; INIT `0x4B`, DIRECT `0x40`, ONBOARD `0x41`, 643-byte
 packet + 112-key table) and apex-tux OLED (**add `0x1642`**, confirm single-642 vs 8×641 framing on-device
