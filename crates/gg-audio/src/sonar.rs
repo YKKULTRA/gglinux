@@ -30,6 +30,10 @@ pub struct Sonar<T: PwTools> {
     /// Where each app stream (by node id) was last sent, so each is routed once.
     routed: HashMap<u32, Channel>,
     available: bool,
+    /// Whether saved volumes and ChatMix have been pushed to the channels
+    /// PipeWire has now. Cleared when they vanish, so a PipeWire restart gglinux
+    /// did not do — a reboot, say — gets the levels back once they reappear.
+    levels_applied: bool,
 }
 
 impl<T: PwTools> Sonar<T> {
@@ -46,6 +50,7 @@ impl<T: PwTools> Sonar<T> {
             graph: Graph::default(),
             routed: HashMap::new(),
             available: false,
+            levels_applied: false,
         };
         sonar.refresh();
         if sonar.settings.enabled && !sonar.dropin_path.exists() {
@@ -53,9 +58,7 @@ impl<T: PwTools> Sonar<T> {
             sonar.settings.enabled = false;
             sonar.persist();
         } else if sonar.settings.enabled {
-            if let Err(e) = sonar.apply_levels() {
-                warn!(error = %format!("{e:#}"), "could not restore Sonar volumes");
-            }
+            sonar.keep_levels();
         }
         sonar
     }
@@ -68,6 +71,7 @@ impl<T: PwTools> Sonar<T> {
     pub fn tick(&mut self) {
         self.refresh();
         if self.settings.enabled {
+            self.keep_levels();
             self.route();
         }
     }
@@ -159,6 +163,7 @@ impl<T: PwTools> Sonar<T> {
         self.settings.previous_default = previous_default;
         self.persist();
         self.apply_levels()?;
+        self.levels_applied = true;
         self.routed.clear();
         self.route();
         Ok(())
@@ -178,6 +183,7 @@ impl<T: PwTools> Sonar<T> {
         self.tools.run(&tools::restart_pipewire())?;
         self.settings.enabled = false;
         self.routed.clear();
+        self.levels_applied = false;
         let previous = self.settings.previous_default.take();
         self.persist();
         if let Some(name) = previous {
@@ -308,6 +314,19 @@ impl<T: PwTools> Sonar<T> {
                     self.routed.insert(id, channel);
                 }
                 Err(e) => warn!(id, error = %format!("{e:#}"), "could not route app stream"),
+            }
+        }
+    }
+
+    /// Push the saved levels once per appearance of the channels.
+    fn keep_levels(&mut self) {
+        let present = Channel::ALL.iter().all(|&c| self.graph.node(&config::sink_name(c)).is_some());
+        if !present {
+            self.levels_applied = false;
+        } else if !self.levels_applied {
+            match self.apply_levels() {
+                Ok(()) => self.levels_applied = true,
+                Err(e) => warn!(error = %format!("{e:#}"), "could not restore Sonar volumes"),
             }
         }
     }
@@ -554,6 +573,25 @@ mod tests {
         assert!(!sonar.is_enabled());
         assert!(!settings::load(&settings_path).enabled);
         assert_eq!(fake.count("systemctl"), 0, "nothing re-installed behind the user's back");
+    }
+
+    #[test]
+    fn levels_are_restored_when_the_channels_come_back() {
+        let (settings_path, dropin) = paths("comeback");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_chatmix(0.5).unwrap();
+        // PipeWire goes away and comes back: a reboot, or a restart gglinux didn't do.
+        *fake.up.borrow_mut() = false;
+        sonar.tick();
+        fake.runs.borrow_mut().clear();
+        *fake.up.borrow_mut() = true;
+        sonar.tick();
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix re-applied");
+        fake.runs.borrow_mut().clear();
+        sonar.tick();
+        assert_eq!(fake.count("wpctl"), 0, "and only once");
     }
 
     #[test]
