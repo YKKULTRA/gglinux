@@ -66,12 +66,13 @@ pub(crate) fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// The drop-in text for channels that play into `output` (a `node.name`).
+/// The drop-in text for channels that play into `output` (a `node.name`), plus
+/// the mic chain reading `mic_input` when one is given.
 ///
 /// Every outlet sets `node.dont-fallback`: if the output disappears, the
 /// outlet waits for it rather than falling back to the default sink — which,
 /// with Sonar on, is the Game channel, and would feed audio into itself.
-pub fn dropin(output: &str) -> Result<String> {
+pub fn dropin(output: &str, mic_input: Option<&str>) -> Result<String> {
     check_name(output)?;
     let mut text = String::from(
         "# Written by gglinux: Sonar-style output channels.\n\
@@ -108,6 +109,9 @@ pub fn dropin(output: &str) -> Result<String> {
             outlet = outlet_name(channel),
             graph = filter_graph(),
         ));
+    }
+    if let Some(input) = mic_input {
+        text.push_str(&crate::mic::module(input)?);
     }
     text.push_str("]\n");
     Ok(text)
@@ -161,7 +165,7 @@ mod tests {
 
     #[test]
     fn dropin_declares_four_filter_chains_into_the_output() {
-        let text = dropin("alsa_output.usb-SteelSeries_Arctis").unwrap();
+        let text = dropin("alsa_output.usb-SteelSeries_Arctis", None).unwrap();
         assert_eq!(text.matches("libpipewire-module-filter-chain").count(), 4);
         assert!(!text.contains("libpipewire-module-loopback"));
         for c in Channel::ALL {
@@ -181,7 +185,7 @@ mod tests {
 
     #[test]
     fn every_channel_runs_the_same_chain() {
-        let text = dropin("alsa_output.x").unwrap();
+        let text = dropin("alsa_output.x", None).unwrap();
         assert_eq!(text.matches("name = pre label = linear").count(), 4);
         assert_eq!(text.matches("name = hp_1 label = bq_lowshelf").count(), 4);
         assert_eq!(text.matches("name = hp_12 label = bq_highshelf").count(), 4);
@@ -192,10 +196,19 @@ mod tests {
 
     #[test]
     fn dropin_refuses_names_that_would_break_the_config() {
-        assert!(dropin("").is_err());
-        assert!(dropin("evil\" }").is_err());
-        assert!(dropin("a\\b").is_err());
-        assert!(dropin("a\nb").is_err());
+        assert!(dropin("", None).is_err());
+        assert!(dropin("evil\" }", None).is_err());
+        assert!(dropin("a\\b", None).is_err());
+        assert!(dropin("a\nb", None).is_err());
+    }
+
+    #[test]
+    fn the_mic_module_is_added_only_when_asked() {
+        assert!(!dropin("alsa_output.x", None).unwrap().contains("gglinux_mic"));
+        let with = dropin("alsa_output.x", Some("alsa_input.y")).unwrap();
+        assert_eq!(with.matches("libpipewire-module-filter-chain").count(), 5);
+        assert!(with.contains(r#"target.object      = "alsa_input.y""#));
+        assert!(dropin("alsa_output.x", Some("bad\"")).is_err());
     }
 
     #[test]

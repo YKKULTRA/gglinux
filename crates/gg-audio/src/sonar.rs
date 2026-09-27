@@ -150,7 +150,7 @@ impl<T: PwTools> Sonar<T> {
         let previous_default = self.graph.default_sink.clone().filter(|n| !config::is_ours(n));
         let output = self.choose_output().context("no output device for the channels to play into")?;
 
-        let text = config::dropin(&output)?;
+        let text = config::dropin(&output, None)?;
         if let Some(dir) = self.dropin_path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
@@ -219,7 +219,7 @@ impl<T: PwTools> Sonar<T> {
         if !self.graph.physical_sinks().any(|n| n.name == name) {
             bail!("no output device named {name}");
         }
-        let text = config::dropin(name)?;
+        let text = config::dropin(name, None)?;
         self.settings.output = Some(name.to_owned());
         self.persist();
         if self.settings.enabled {
@@ -302,7 +302,7 @@ impl<T: PwTools> Sonar<T> {
     /// restart PipeWire once so the channels get the current graph.
     fn upgrade_dropin(&mut self) {
         let Some(output) = self.settings.output.clone() else { return };
-        let Ok(expected) = config::dropin(&output) else { return };
+        let Ok(expected) = config::dropin(&output, None) else { return };
         if std::fs::read_to_string(&self.dropin_path).ok().as_deref() == Some(expected.as_str()) {
             return;
         }
@@ -755,7 +755,7 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let sonar = Sonar::new(&fake, settings_path, dropin.clone());
         assert!(sonar.is_enabled());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT).unwrap());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, None).unwrap());
         assert_eq!(fake.count("systemctl"), 1);
     }
 
@@ -765,7 +765,7 @@ mod tests {
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
-        std::fs::write(&dropin, config::dropin(BT).unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, None).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let _sonar = Sonar::new(&fake, settings_path, dropin);
         assert_eq!(fake.count("systemctl"), 0);
