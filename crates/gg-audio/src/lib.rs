@@ -11,6 +11,7 @@ pub mod mix;
 pub mod rules;
 pub mod tools;
 pub mod graph;
+pub mod settings;
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -46,5 +47,15 @@ pub(crate) mod testing {
             }]
         }));
         Value::Array(objects).to_string()
+    }
+
+    /// An empty directory unique to one test.
+    pub fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join("gg-audio-tests")
+            .join(format!("{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
