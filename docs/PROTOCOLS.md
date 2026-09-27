@@ -170,7 +170,8 @@ Transport: **feature reports on iface 1** (leading report-id `0x00`). Uses the `
 | Profile select | `0x89` | 5 onboard profiles |
 | Firmware version | `0x90` | read-only |
 
-Packet sizes: `PACKET_IN=64`, `OUT=65`. Reuse: `OpenRGB Controllers/SteelSeriesController/`
+**Verified on this unit 2026-09-27**: `0x4B` init, a `0x40` frame (all red, then only G green) and
+`0x41` hand-back behaved as sent; `0xF5` replied `f5 00 01` (US). Packet sizes: `PACKET_IN=64`, `OUT=65`. Reuse: `OpenRGB Controllers/SteelSeriesController/`
 (`SteelSeriesApexController.cpp`, `SteelSeriesApexBaseController.h`, `SteelSeriesDevices.h`,
 `SteelSeriesControllerDetect.cpp`) — GPL-2.0-or-later, upgrades cleanly into GPL-3.0.
 

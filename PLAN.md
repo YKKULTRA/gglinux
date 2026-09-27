@@ -218,6 +218,13 @@ first). Per-key RGB editor + software effects (reactive/streamed) with onboard h
 **Accept:** set individual key colors + run an effect from the UI; push a custom image and live stats to
 the OLED; hand back to onboard lighting cleanly.
 
+Progress 2026-09-27 — **M4a done in software**: `gg-device-keyboard` (allowlisted protocol: only
+`0x23 0x40 0x41 0x4B 0x90 0xA3 0xF5` can be framed or written; US ANSI TKL layout), a keyboard
+worker running static per-key colours and breathing / wave / spectrum at 30 fps, handing lighting
+back to the keyboard when off or on exit; a Keyboard panel with a per-key editor (spec:
+`docs/superpowers/specs/2026-09-27-keyboard-lighting-design.md`). Next: M4b OLED (framing to confirm
+on-device), then reactive lighting (needs an input-access decision).
+
 ### M5 — Keyboard actuation: OmniPoint 3.0  *(fresh reverse-engineering — highest risk)*
 No public RE exists. Sub-steps: (1) capture GG↔keyboard HID traffic (usbmon/Wireshark, Windows host or
 VM) while toggling one setting at a time; (2) decode per-key actuation (0.1–4.0 mm / 40 levels), Rapid
