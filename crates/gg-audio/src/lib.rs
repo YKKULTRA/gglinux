@@ -12,6 +12,7 @@ pub mod rules;
 pub mod tools;
 pub mod graph;
 pub mod settings;
+pub mod sonar;
 
 #[cfg(test)]
 pub(crate) mod testing {

@@ -78,12 +78,16 @@ mod tests {
     #[test]
     fn settings_round_trip() {
         let path = scratch("settings-rt").join("gglinux").join("sonar.json");
-        let mut s = Settings::default();
-        s.enabled = true;
-        s.output = Some("alsa_output.x".into());
-        s.chatmix = -0.5;
-        s.volumes.insert(Channel::Chat, 0.4);
-        s.rules.set("firefox", Channel::Aux);
+        let mut rules = Rules::default();
+        rules.set("firefox", Channel::Aux);
+        let s = Settings {
+            enabled: true,
+            output: Some("alsa_output.x".into()),
+            chatmix: -0.5,
+            volumes: BTreeMap::from([(Channel::Chat, 0.4)]),
+            rules,
+            ..Settings::default()
+        };
         save(&path, &s).unwrap();
         assert_eq!(load(&path), s);
     }
