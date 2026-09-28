@@ -396,6 +396,36 @@ pub struct KeyColor {
     pub color: Rgb,
 }
 
+/// How a key press shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactiveMode {
+    /// The pressed key lights and fades back.
+    Fade,
+    /// A ring spreads out from the pressed key.
+    Ripple,
+}
+
+/// Key presses drawn over the base effect.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Reactive {
+    pub enabled: bool,
+    pub mode: ReactiveMode,
+    pub color: Rgb,
+    /// How long one press shows, in seconds.
+    pub duration_s: f32,
+}
+
+impl Reactive {
+    pub const DURATION_S: std::ops::RangeInclusive<f32> = 0.1..=3.0;
+}
+
+impl Default for Reactive {
+    fn default() -> Self {
+        Reactive { enabled: false, mode: ReactiveMode::Fade, color: Rgb { r: 255, g: 255, b: 255 }, duration_s: 0.6 }
+    }
+}
+
 /// Keyboard lighting as gglinux runs it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lighting {
@@ -406,6 +436,9 @@ pub struct Lighting {
     pub keys: Vec<KeyColor>,
     /// 0..=100 %, applied to every frame.
     pub brightness: u8,
+    /// Presses drawn over the effect; absent in files saved before it existed.
+    #[serde(default)]
+    pub reactive: Reactive,
 }
 
 impl Lighting {
@@ -427,13 +460,23 @@ impl Lighting {
                 return Err(format!("effect period {p} s out of range (0.5..=60)"));
             }
         }
+        let d = self.reactive.duration_s;
+        if !(d.is_finite() && Reactive::DURATION_S.contains(&d)) {
+            return Err(format!("reactive duration {d} s out of range (0.1..=3)"));
+        }
         Ok(())
     }
 }
 
 impl Default for Lighting {
     fn default() -> Self {
-        Lighting { enabled: false, effect: Effect::Wave { period_s: 4.0 }, keys: Vec::new(), brightness: 100 }
+        Lighting {
+            enabled: false,
+            effect: Effect::Wave { period_s: 4.0 },
+            keys: Vec::new(),
+            brightness: 100,
+            reactive: Reactive::default(),
+        }
     }
 }
 
@@ -447,6 +490,18 @@ pub struct KeyInfo {
     pub w: f32,
 }
 
+/// Whether the daemon is reading key presses for reactive lighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactiveStatus {
+    /// Not reading: reactive or lighting is off, or the keyboard is away.
+    #[default]
+    Off,
+    Reading,
+    /// The typing interfaces can't be opened: the optional udev rule isn't installed.
+    NoAccess,
+}
+
 /// The keyboard as the daemon sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeyboardState {
@@ -454,6 +509,7 @@ pub struct KeyboardState {
     /// Every key and where it is, for drawing.
     pub layout: Vec<KeyInfo>,
     pub lighting: Lighting,
+    pub reactive: ReactiveStatus,
 }
 
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
@@ -863,5 +919,31 @@ mod tests {
         assert!(Lighting { effect: Effect::Wave { period_s: 0.1 }, ..d.clone() }.validate().is_err());
         assert!(Lighting { effect: Effect::Spectrum { period_s: f32::NAN }, ..d.clone() }.validate().is_err());
         assert!(Lighting { effect: Effect::Static, ..d }.validate().is_ok());
+    }
+
+    #[test]
+    fn lighting_saved_before_reactive_still_loads_with_reactive_off() {
+        let old = r#"{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}"#;
+        let l: Lighting = serde_json::from_str(old).unwrap();
+        assert!(l.enabled && l.brightness == 70);
+        assert_eq!(l.reactive, Reactive::default());
+        assert!(!l.reactive.enabled);
+    }
+
+    #[test]
+    fn reactive_defaults_json_and_bounds() {
+        let d = Reactive::default();
+        assert_eq!((d.mode, d.color, d.duration_s), (ReactiveMode::Fade, Rgb { r: 255, g: 255, b: 255 }, 0.6));
+        let json = serde_json::to_value(Reactive { mode: ReactiveMode::Ripple, ..d }).unwrap();
+        assert_eq!(json["mode"], "ripple");
+        assert_eq!(serde_json::to_value(ReactiveStatus::NoAccess).unwrap(), "no_access");
+        assert_eq!(ReactiveStatus::default(), ReactiveStatus::Off);
+
+        let with = |duration_s| Lighting { reactive: Reactive { duration_s, ..d }, ..Lighting::default() };
+        assert!(with(0.1).validate().is_ok());
+        assert!(with(3.0).validate().is_ok());
+        assert!(with(0.05).validate().is_err());
+        assert!(with(3.5).validate().is_err());
+        assert!(with(f32::NAN).validate().is_err());
     }
 }

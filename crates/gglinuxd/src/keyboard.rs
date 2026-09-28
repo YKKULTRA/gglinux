@@ -230,6 +230,7 @@ fn snapshot(state: &State) -> KeyboardState {
             .map(|&(code, label, x, y, w)| KeyInfo { code, label: label.to_owned(), x, y, w })
             .collect(),
         lighting: state.lighting.clone(),
+        reactive: gg_ipc::ReactiveStatus::Off,
     }
 }
 

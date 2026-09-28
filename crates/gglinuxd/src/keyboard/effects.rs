@@ -73,7 +73,7 @@ mod tests {
     const RED: gg_ipc::Rgb = gg_ipc::Rgb { r: 255, g: 0, b: 0 };
 
     fn lit(effect: Effect) -> Lighting {
-        Lighting { enabled: true, effect, keys: Vec::new(), brightness: 100 }
+        Lighting { enabled: true, effect, keys: Vec::new(), brightness: 100, reactive: gg_ipc::Reactive::default() }
     }
 
     #[test]
