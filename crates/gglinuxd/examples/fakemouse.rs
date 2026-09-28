@@ -263,6 +263,12 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
         }
         Request::GetKeyboardState => ResponseData::Keyboard { state: s.keyboard.clone() },
         Request::SetLighting { lighting } => {
+            // Like a machine without the optional udev rule, so the UI's hint shows.
+            s.keyboard.reactive = if lighting.enabled && lighting.reactive.enabled {
+                ReactiveStatus::NoAccess
+            } else {
+                ReactiveStatus::Off
+            };
             s.keyboard.lighting = lighting;
             ResponseData::Success
         }

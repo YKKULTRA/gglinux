@@ -5,7 +5,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import Icon from "./Icon.svelte";
   import { daemon } from "./daemon.svelte";
-  import type { Effect, KeyColor, Lighting, Rgb } from "./types";
+  import type { Effect, KeyColor, Lighting, Reactive, ReactiveMode, Rgb } from "./types";
 
   const EFFECTS: { kind: Effect["kind"]; label: string }[] = [
     { kind: "static", label: "Static" },
@@ -13,6 +13,16 @@
     { kind: "wave", label: "Wave" },
     { kind: "spectrum", label: "Spectrum" },
   ];
+  const MODES: { mode: ReactiveMode; label: string }[] = [
+    { mode: "fade", label: "Fade" },
+    { mode: "ripple", label: "Ripple" },
+  ];
+  const STATUS = { off: "waiting for the keyboard", reading: "on", no_access: "no access" } as const;
+  /** Same words as the README and 61-gglinux-reactive.rules. */
+  const ACCESS_WARNING =
+    "Reactive lighting needs to see which keys you press. The optional udev rule lets any program " +
+    "you run read what you type on the Apex while you're logged in. gglinux reads only while " +
+    "reactive lighting is on, and keeps presses in memory only until their light fades.";
   /** Pixels per key unit in the picture. */
   const U = 40;
 
@@ -77,6 +87,11 @@
   function setPeriod(p: number) {
     if (!lighting || lighting.effect.kind === "static") return;
     void apply({ effect: { ...lighting.effect, period_s: p } });
+  }
+
+  function setReactive(patch: Partial<Reactive>) {
+    if (!lighting) return;
+    void apply({ reactive: { ...lighting.reactive, ...patch } });
   }
 
   function toggle(code: number) {
@@ -166,6 +181,59 @@
         </div>
       </section>
 
+      <section>
+        <div class="head">
+          <h4>Reactive</h4>
+          {#if lighting.reactive.enabled}<span class="unit">{STATUS[kb.reactive]}</span>{/if}
+        </div>
+        <label class="toggle">
+          <input
+            type="checkbox"
+            checked={lighting.reactive.enabled}
+            disabled={busy}
+            onchange={(e) => setReactive({ enabled: e.currentTarget.checked })}
+          />
+          Light keys as you press them
+        </label>
+        {#if lighting.reactive.enabled}
+          <div class="row">
+            <div class="segmented">
+              {#each MODES as m (m.mode)}
+                <button class:on={lighting.reactive.mode === m.mode} disabled={busy} onclick={() => setReactive({ mode: m.mode })}>
+                  {m.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+          <div class="row">
+            <span class="label">Colour</span>
+            <input
+              type="color"
+              value={hex(lighting.reactive.color)}
+              onchange={(e) => setReactive({ color: rgbOf(e.currentTarget.value) })}
+            />
+          </div>
+          <div class="row">
+            <span class="label">Duration</span>
+            <input
+              type="range"
+              min="0.1"
+              max="3"
+              step="0.1"
+              value={lighting.reactive.duration_s}
+              onchange={(e) => setReactive({ duration_s: e.currentTarget.valueAsNumber })}
+            />
+            <span class="unit">{lighting.reactive.duration_s.toFixed(1)} s</span>
+          </div>
+          {#if kb.reactive === "no_access"}
+            <div class="notice">
+              <p>{ACCESS_WARNING}</p>
+              <p>To allow it: <code>./scripts/install-local.sh --no-build --reactive</code></p>
+            </div>
+          {/if}
+        {/if}
+      </section>
+
       {#if lighting.effect.kind === "static"}
         <section>
           <div class="head"><h4>Keys</h4></div>
@@ -233,5 +301,9 @@
   .apply { margin-top: 0.75rem; padding: 0.4rem 0.85rem; font-size: 0.83rem; font-weight: 500; color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
   .apply:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   .apply:disabled { opacity: 0.5; cursor: default; }
+  .notice { margin-top: 0.8rem; padding: 0.55rem 0.75rem; font-size: 0.8rem; color: var(--text-dim); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+  .notice p { margin: 0; }
+  .notice p + p { margin-top: 0.45rem; }
+  .notice code { font-size: 0.78rem; color: var(--text); }
   .error { margin: 0.8rem 0 0; padding: 0.5rem 0.7rem; font-size: 0.8rem; color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-radius: 8px; }
 </style>

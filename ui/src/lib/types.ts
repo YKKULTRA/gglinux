@@ -201,6 +201,16 @@ export interface KeyColor {
   color: Rgb;
 }
 
+export type ReactiveMode = "fade" | "ripple";
+
+export interface Reactive {
+  enabled: boolean;
+  mode: ReactiveMode;
+  color: Rgb;
+  /** seconds one press shows, 0.1..=3 */
+  duration_s: number;
+}
+
 export interface Lighting {
   /** false leaves the lighting to the keyboard's own profile. */
   enabled: boolean;
@@ -208,6 +218,7 @@ export interface Lighting {
   keys: KeyColor[];
   /** 0..=100 % */
   brightness: number;
+  reactive: Reactive;
 }
 
 export interface KeyInfo {
@@ -222,6 +233,8 @@ export interface KeyboardState {
   connected: boolean;
   layout: KeyInfo[];
   lighting: Lighting;
+  /** Whether the daemon is reading key presses for reactive lighting. */
+  reactive: "off" | "reading" | "no_access";
 }
 
 /** Request bodies — the `req` field of a {@link RequestFrame}. */

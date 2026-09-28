@@ -239,7 +239,13 @@ back to the keyboard when off or on exit; a Keyboard panel with a per-key editor
 M4b OLED is **blocked**: none of apex-tux's framings (`0x61` numbered, unnumbered, after init;
 `0x0C` chunked) changed the OLED on `0x1642` (see `docs/PROTOCOLS.md`). The next step is a GG USB
 capture on Windows, in the same session as M5 — no more opcode guessing on that interface.
-Reactive lighting waits on an input-access decision.
+**Reactive lighting done in software** (2026-09-28; spec:
+`docs/superpowers/specs/2026-09-28-reactive-lighting-design.md`): Fade or Ripple over any effect,
+from key presses read on the Apex's typing interfaces. The same change narrowed the udev rule,
+which had opened every SteelSeries interface (so any program could read Apex keystrokes). Access
+to the typing interfaces is now opt-in via `61-gglinux-reactive.rules`. Not yet verified on
+hardware: the owner reinstalls the rules, confirms with `getfacl` that the hole is closed, and
+tries both modes.
 
 ### M5 — Keyboard actuation: OmniPoint 3.0  *(fresh reverse-engineering — highest risk)*
 No public RE exists. Sub-steps: (1) capture GG↔keyboard HID traffic (usbmon/Wireshark, Windows host or
