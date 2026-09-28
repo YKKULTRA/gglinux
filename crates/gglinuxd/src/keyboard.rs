@@ -244,7 +244,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
         }
         Command::Pressed { code, at } => {
             if state.reader.is_some() {
-                let t = at.saturating_duration_since(state.started).as_secs_f32();
+                let t = at.saturating_duration_since(state.started).as_secs_f64();
                 push_hit(&mut state.hits, effects::Hit { code, t });
                 state.last_frame = None; // show it now
             }
@@ -287,8 +287,8 @@ fn render(state: &mut State) {
     if !state.lighting.enabled || !is_older_than(state.last_frame, interval(&state.lighting, !state.hits.is_empty())) {
         return;
     }
-    let t = state.started.elapsed().as_secs_f32();
-    let duration = state.lighting.reactive.duration_s;
+    let t = state.started.elapsed().as_secs_f64();
+    let duration = f64::from(state.lighting.reactive.duration_s);
     state.hits.retain(|h| t - h.t < duration);
     let hits = &state.hits;
     let Some(device) = state.device.as_ref() else { return };
@@ -389,7 +389,7 @@ mod tests {
     fn at_most_32_presses_are_kept_oldest_dropped_first() {
         let mut hits = Vec::new();
         for i in 0..40u8 {
-            push_hit(&mut hits, effects::Hit { code: i, t: f32::from(i) });
+            push_hit(&mut hits, effects::Hit { code: i, t: f64::from(i) });
         }
         assert_eq!(hits.len(), MAX_HITS);
         assert_eq!(hits[0].code, 8, "the eight oldest went");

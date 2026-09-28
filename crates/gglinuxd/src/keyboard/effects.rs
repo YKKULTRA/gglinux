@@ -27,7 +27,7 @@ pub struct Pos {
 #[derive(Clone, Copy)]
 pub struct Hit {
     pub code: u8,
-    pub t: f32,
+    pub t: f64,
 }
 
 /// The centre of every key on the board.
@@ -37,7 +37,10 @@ pub fn positions() -> HashMap<u8, Pos> {
 
 /// The colour of the LED with HID code `code`, `t` seconds into the effect,
 /// with recent key presses drawn over it.
-pub fn color(lighting: &Lighting, positions: &HashMap<u8, Pos>, code: u8, t: f32, hits: &[Hit]) -> Rgb {
+///
+/// `t` is `f64` because the daemon runs for weeks: as `f32`, seconds since
+/// start lose frame precision after about six days.
+pub fn color(lighting: &Lighting, positions: &HashMap<u8, Pos>, code: u8, t: f64, hits: &[Hit]) -> Rgb {
     let base = match lighting.effect {
         Effect::Static => lighting
             .keys
@@ -45,12 +48,14 @@ pub fn color(lighting: &Lighting, positions: &HashMap<u8, Pos>, code: u8, t: f32
             .find(|k| k.code == code)
             .map(|k| rgb(k.color))
             .unwrap_or_default(),
-        Effect::Breathing { color, period_s } => scale(rgb(color), (1.0 - (TAU * t / period_s).cos()) / 2.0),
+        Effect::Breathing { color, period_s } => {
+            scale(rgb(color), (1.0 - (TAU * cycle(t, period_s)).cos()) / 2.0)
+        }
         Effect::Wave { period_s } => {
             let x = positions.get(&code).map_or(0.0, |p| p.x / WIDTH);
-            hsv(x - t / period_s)
+            hsv(x - cycle(t, period_s))
         }
-        Effect::Spectrum { period_s } => hsv(t / period_s),
+        Effect::Spectrum { period_s } => hsv(cycle(t, period_s)),
     };
     let r = &lighting.reactive;
     let w = if r.enabled { reactive_weight(r, positions, code, t, hits) } else { 0.0 };
@@ -59,7 +64,7 @@ pub fn color(lighting: &Lighting, positions: &HashMap<u8, Pos>, code: u8, t: f32
 
 /// How strongly key `code` shows the reactive colour at `t`: the strongest
 /// live press, 0 (none) to 1 (full).
-pub fn reactive_weight(r: &Reactive, positions: &HashMap<u8, Pos>, code: u8, t: f32, hits: &[Hit]) -> f32 {
+pub fn reactive_weight(r: &Reactive, positions: &HashMap<u8, Pos>, code: u8, t: f64, hits: &[Hit]) -> f32 {
     let duration = r.duration_s;
     if !(duration.is_finite() && duration > 0.0) {
         return 0.0; // a hand-edited file; never divide by it
@@ -67,7 +72,7 @@ pub fn reactive_weight(r: &Reactive, positions: &HashMap<u8, Pos>, code: u8, t: 
     let here = positions.get(&code);
     hits.iter()
         .map(|h| {
-            let age = t - h.t;
+            let age = (t - h.t) as f32; // small, so exact enough once subtracted in f64
             if !(0.0..duration).contains(&age) {
                 return 0.0;
             }
@@ -107,6 +112,11 @@ pub fn hsv(hue: f32) -> Rgb {
 
 fn rgb(c: gg_ipc::Rgb) -> Rgb {
     Rgb { r: c.r, g: c.g, b: c.b }
+}
+
+/// How far through its current period an effect is at `t`, 0..1.
+fn cycle(t: f64, period_s: f32) -> f32 {
+    (t / f64::from(period_s)).fract() as f32
 }
 
 /// `a` moved toward `b` by `w` (0..=1).
@@ -217,7 +227,7 @@ mod tests {
         let far = dist(&p, 0x29, 0x48) / RIPPLE_SPEED; // Pause
         assert!(far > 0.5, "Pause is far from Esc");
         assert_eq!(w(0x48, 0.1), 0.0, "not reached yet");
-        assert!(w(0x48, far) > 0.1, "reached later");
+        assert!(w(0x48, f64::from(far)) > 0.1, "reached later");
         assert_eq!(w(0x48, 1.0), 0.0, "gone after the duration");
     }
 
@@ -263,5 +273,18 @@ mod tests {
                 assert_eq!(color(&l, &p, 0x04, 0.0, &hits), Rgb::default());
             }
         }
+    }
+
+    #[test]
+    fn effects_stay_smooth_after_weeks_of_uptime() {
+        let month = 30.0 * 24.0 * 3600.0; // seconds since the daemon started
+        let p = positions();
+        let l = reactive(ReactiveMode::Fade, 0.6);
+        let hits = [Hit { code: 0x04, t: month }];
+        let w = reactive_weight(&l.reactive, &p, 0x04, month + 0.3, &hits);
+        assert!((w - 0.5).abs() < 0.01, "a month in, a fade is still smooth: {w}");
+        let wave = lit(Effect::Wave { period_s: 4.0 });
+        assert_ne!(color(&wave, &p, 0x29, month, &[]), color(&wave, &p, 0x29, month + 1.0 / 30.0, &[]),
+            "and the wave still moves from one frame to the next");
     }
 }
