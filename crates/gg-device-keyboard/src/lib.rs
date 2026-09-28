@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use hidapi::{HidApi, HidDevice};
 use tracing::debug;
 
+pub mod keys;
 pub mod layout;
 pub mod proto;
 
