@@ -71,7 +71,7 @@ struct State {
     last_frame: Option<Instant>,
     lighting: Lighting,
     settings_path: PathBuf,
-    positions: HashMap<u8, f32>,
+    positions: HashMap<u8, effects::Pos>,
     started: Instant,
     published: Option<KeyboardState>,
 }
@@ -194,7 +194,7 @@ fn render(state: &mut State) {
     let Some(device) = state.device.as_ref() else { return };
     let t = state.started.elapsed().as_secs_f32();
     let result = if state.taken { Ok(()) } else { device.init() }
-        .and_then(|()| device.show(|code| effects::color(&state.lighting, &state.positions, code, t)));
+        .and_then(|()| device.show(|code| effects::color(&state.lighting, &state.positions, code, t, &[])));
     match result {
         Ok(()) => {
             state.taken = true;
