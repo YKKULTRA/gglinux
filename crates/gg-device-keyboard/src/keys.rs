@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn nkro_bits_are_usage_codes() {
         let mut report = [0u8; NKRO_LEN];
-        report[0x04 / 8] |= 1 << (0x04 % 8); // A
+        report[0] |= 1 << 4; // A, usage 0x04
         report[0xE1 / 8] |= 1 << (0xE1 % 8); // Left Shift
         assert_eq!(codes(nkro_keys(&report).unwrap()), vec![0x04, 0xE1]);
         assert!(nkro_keys(&[0; 31]).is_none());
