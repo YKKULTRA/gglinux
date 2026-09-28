@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings,
+    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
@@ -88,7 +88,7 @@ fn main() -> Result<()> {
         screen: ScreenSettings::default(),
         controls: HeadsetControls::default(),
         sonar: fake_sonar(),
-        keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default() },
+        keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default(), reactive: ReactiveStatus::Off },
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -263,6 +263,12 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
         }
         Request::GetKeyboardState => ResponseData::Keyboard { state: s.keyboard.clone() },
         Request::SetLighting { lighting } => {
+            // Like a machine without the optional udev rule, so the UI's hint shows.
+            s.keyboard.reactive = if lighting.enabled && lighting.reactive.enabled {
+                ReactiveStatus::NoAccess
+            } else {
+                ReactiveStatus::Off
+            };
             s.keyboard.lighting = lighting;
             ResponseData::Success
         }

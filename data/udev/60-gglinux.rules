@@ -1,6 +1,9 @@
-# gglinux — grant the logged-in desktop user access to SteelSeries HID devices.
+# gglinux — grant the logged-in desktop user access to the SteelSeries HID interfaces
+# gglinux controls, and nothing else.
 #
 # Install:
+#   ./scripts/install-local.sh
+# or by hand:
 #   sudo install -Dm644 60-gglinux.rules /etc/udev/rules.d/60-gglinux.rules
 #   sudo udevadm control --reload
 #   sudo udevadm trigger --subsystem-match=hidraw --action=add
@@ -10,13 +13,28 @@
 # is revoked automatically when the session ends. This must be evaluated *before*
 # /usr/lib/udev/rules.d/70-uaccess.rules, hence the 60- prefix.
 #
+# Only control interfaces are opened. A keyboard's typing interfaces carry every
+# keystroke, so they stay root-only here; reactive lighting opts in to the Apex's
+# separately, with 61-gglinux-reactive.rules.
+#
+# Vendor, product and interface are matched as properties from the usb_id builtin:
+# several ATTRS{} keys must all match on one parent device, but idVendor lives on
+# the USB device and bInterfaceNumber on the USB interface.
+#
 # Fallback for systems without systemd-logind: replace TAG+="uaccess" with
 #   MODE="0660", GROUP="plugdev"
 # and add yourself to the plugdev group.
 
 ACTION=="remove", GOTO="gglinux_end"
+SUBSYSTEM!="hidraw", GOTO="gglinux_end"
+IMPORT{builtin}="usb_id"
+ENV{ID_VENDOR_ID}!="1038", GOTO="gglinux_end"
 
-# Every SteelSeries HID interface (VID 0x1038). ATTRS{} walks up to the USB device.
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1038", TAG+="uaccess"
+# Apex Pro TKL Gen 3 — lighting (vendor usage page 0xFFC0)
+ENV{ID_MODEL_ID}=="1642", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"
+# Arctis Nova Pro Wireless base station — control
+ENV{ID_MODEL_ID}=="12e0", ENV{ID_USB_INTERFACE_NUM}=="04", TAG+="uaccess"
+# Rival 3 Wireless Gen 2 — control
+ENV{ID_MODEL_ID}=="1872", ENV{ID_USB_INTERFACE_NUM}=="03", TAG+="uaccess"
 
 LABEL="gglinux_end"

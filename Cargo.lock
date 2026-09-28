@@ -127,6 +127,7 @@ dependencies = [
  "gg-hid",
  "gg-ipc",
  "hidapi",
+ "libc",
  "serde_json",
  "tokio",
  "tracing",

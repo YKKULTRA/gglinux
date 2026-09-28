@@ -178,6 +178,19 @@ Transport: **feature reports on iface 1** (leading report-id `0x00`). Uses the `
 (`SteelSeriesApexController.cpp`, `SteelSeriesApexBaseController.h`, `SteelSeriesDevices.h`,
 `SteelSeriesControllerDetect.cpp`) — GPL-2.0-or-later, upgrades cleanly into GPL-3.0.
 
+### 3a′. Typing interfaces (read for reactive lighting) — verified 2026-09-28
+
+Report descriptors read from sysfs on `1038:1642` (no keystrokes were read):
+
+- **iface 0** — boot keyboard, no report ID, 8 bytes: modifier bitmask (usages `E0–E7`), a
+  reserved byte, six key slots (usages `00–FF`; all `0x01` = ErrorRollOver); LED output report.
+- **iface 2** — N-key rollover, no report ID, 32 bytes: one bit per usage `00–FF` (modifiers at
+  bits `E0–E7`); LED output report.
+
+Both use HID keyboard usage codes, the numbering of the lighting table, so a press maps straight
+to its LED. gglinux opens these read-only, and only with the optional
+`61-gglinux-reactive.rules` installed; the default udev rule leaves them root-only.
+
 ### 3b. OLED — **90% there** (apex-tux) — 128×40 monochrome, header byte `0x61`
 apex-tux covers the Gen3 *family* but **not `0x1642` specifically** (it lists `0x1640` full-size,
 `0x1644` dongle, `0x1646` wireless-TKL). Two framings exist — **must confirm which `0x1642` uses on-device:**

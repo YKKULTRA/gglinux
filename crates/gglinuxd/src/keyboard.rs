@@ -7,6 +7,7 @@
 //! install never touches the keyboard.
 
 mod effects;
+mod reader;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,25 +16,45 @@ use std::time::{Duration, Instant};
 
 use gg_device_keyboard::layout::ANSI_TKL;
 use gg_device_keyboard::Keyboard;
-use gg_ipc::{Event, KeyInfo, KeyboardState, Lighting};
+use gg_ipc::{Event, KeyInfo, KeyboardState, Lighting, ReactiveStatus};
 use hidapi::HidApi;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::clock::is_older_than;
+use reader::{OpenError, Reader};
 
 const FRAME: Duration = Duration::from_millis(33);
 const STATIC_REFRESH: Duration = Duration::from_secs(2);
 const REOPEN_INTERVAL: Duration = Duration::from_secs(2);
 const IDLE_WAIT: Duration = Duration::from_millis(500);
+/// The most key presses held for reactive lighting; older ones are dropped first.
+const MAX_HITS: usize = 32;
 
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 pub enum Command {
     GetState(Reply<KeyboardState>),
     SetLighting { lighting: Lighting, reply: Reply<()> },
+    /// A key went down on the Apex, as the reader saw it. Never logged.
+    Pressed { code: u8, at: Instant },
+    /// The reader ended by itself (keyboard gone, read error); it retries later.
+    ReaderStopped,
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
+}
+
+/// Names only: a `Pressed` never prints its key.
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Command::GetState(_) => "GetState",
+            Command::SetLighting { .. } => "SetLighting",
+            Command::Pressed { .. } => "Pressed",
+            Command::ReaderStopped => "ReaderStopped",
+            Command::Shutdown(_) => "Shutdown",
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -55,9 +76,10 @@ impl Handle {
 
 pub fn spawn(event_tx: broadcast::Sender<Event>) -> Handle {
     let (tx, rx) = mpsc::channel();
+    let readers_tx = tx.clone();
     std::thread::Builder::new()
         .name("gg-keyboard".into())
-        .spawn(move || worker(rx, event_tx))
+        .spawn(move || worker(rx, readers_tx, event_tx))
         .expect("spawn gg-keyboard thread");
     Handle { tx }
 }
@@ -71,12 +93,20 @@ struct State {
     last_frame: Option<Instant>,
     lighting: Lighting,
     settings_path: PathBuf,
-    positions: HashMap<u8, f32>,
+    positions: HashMap<u8, effects::Pos>,
     started: Instant,
     published: Option<KeyboardState>,
+    /// Hands key presses to this worker; cloned into each reader.
+    tx: Sender<Command>,
+    /// Reading key presses, while reactive lighting wants them.
+    reader: Option<Reader>,
+    last_reader_attempt: Option<Instant>,
+    reactive: ReactiveStatus,
+    /// Recent presses, newest last; never logged, never saved.
+    hits: Vec<effects::Hit>,
 }
 
-fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
+fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sender<Event>) {
     let api = match HidApi::new() {
         Ok(api) => api,
         Err(e) => {
@@ -96,6 +126,11 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
         positions: effects::positions(),
         started: Instant::now(),
         published: None,
+        tx,
+        reader: None,
+        last_reader_attempt: None,
+        reactive: ReactiveStatus::Off,
+        hits: Vec::new(),
     };
 
     loop {
@@ -106,6 +141,8 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
+            // Unreachable while `state.tx` lives — the worker stops on Shutdown,
+            // which main sends on exit. Kept as a fallback.
             Err(RecvTimeoutError::Disconnected) => {
                 hand_back(&mut state);
                 return;
@@ -114,14 +151,15 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
         if state.device.is_none() {
             try_open(&mut state);
         }
+        sync_reader(&mut state);
         render(&mut state);
         publish(&mut state, &event_tx);
     }
 }
 
-/// How often frames are due for the current effect.
-fn interval(lighting: &Lighting) -> Duration {
-    if effects::animated(&lighting.effect) {
+/// How often frames are due: fast for animated effects and while presses show.
+fn interval(lighting: &Lighting, live_hits: bool) -> Duration {
+    if effects::animated(&lighting.effect) || live_hits {
         FRAME
     } else {
         STATIC_REFRESH
@@ -135,7 +173,53 @@ fn next_wait(state: &State) -> Duration {
     }
     state
         .last_frame
-        .map_or(Duration::ZERO, |t| interval(&state.lighting).saturating_sub(t.elapsed()))
+        .map_or(Duration::ZERO, |t| interval(&state.lighting, !state.hits.is_empty()).saturating_sub(t.elapsed()))
+}
+
+/// Whether key presses should be read right now.
+fn wants_reader(lighting: &Lighting, connected: bool) -> bool {
+    lighting.enabled && lighting.reactive.enabled && connected
+}
+
+/// Keep a press, dropping the oldest past [`MAX_HITS`].
+fn push_hit(hits: &mut Vec<effects::Hit>, hit: effects::Hit) {
+    if hits.len() == MAX_HITS {
+        hits.remove(0);
+    }
+    hits.push(hit);
+}
+
+/// Start or stop the key reader to match the settings.
+fn sync_reader(state: &mut State) {
+    if !wants_reader(&state.lighting, state.device.is_some()) {
+        if state.reader.take().is_some() {
+            debug!("stopped reading key presses");
+        }
+        state.hits.clear();
+        state.reactive = ReactiveStatus::Off;
+        return;
+    }
+    if state.reader.is_some() || !is_older_than(state.last_reader_attempt, REOPEN_INTERVAL) {
+        return;
+    }
+    state.last_reader_attempt = Some(Instant::now());
+    match Reader::start(&state.api, state.tx.clone()) {
+        Ok(reader) => {
+            info!("reading key presses for reactive lighting");
+            state.reader = Some(reader);
+            state.reactive = ReactiveStatus::Reading;
+        }
+        Err(OpenError::NoAccess) => {
+            if state.reactive != ReactiveStatus::NoAccess {
+                info!("reactive lighting needs the optional udev rule 61-gglinux-reactive.rules");
+            }
+            state.reactive = ReactiveStatus::NoAccess;
+        }
+        Err(OpenError::Unavailable(why)) => {
+            debug!(%why, "keyboard typing interfaces not available");
+            state.reactive = ReactiveStatus::Off;
+        }
+    }
 }
 
 fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Event>) -> bool {
@@ -157,6 +241,18 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             state.last_frame = None; // draw the change now
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
+        }
+        Command::Pressed { code, at } => {
+            if state.reader.is_some() {
+                let t = at.saturating_duration_since(state.started).as_secs_f64();
+                push_hit(&mut state.hits, effects::Hit { code, t });
+                state.last_frame = None; // show it now
+            }
+        }
+        Command::ReaderStopped => {
+            state.reader = None;
+            state.reactive = ReactiveStatus::Off;
+            state.last_reader_attempt = Some(Instant::now()); // retry after REOPEN_INTERVAL
         }
         Command::Shutdown(reply) => {
             hand_back(state);
@@ -188,13 +284,16 @@ fn try_open(state: &mut State) {
 
 /// Send a frame if one is due.
 fn render(state: &mut State) {
-    if !state.lighting.enabled || !is_older_than(state.last_frame, interval(&state.lighting)) {
+    if !state.lighting.enabled || !is_older_than(state.last_frame, interval(&state.lighting, !state.hits.is_empty())) {
         return;
     }
+    let t = state.started.elapsed().as_secs_f64();
+    let duration = f64::from(state.lighting.reactive.duration_s);
+    state.hits.retain(|h| t - h.t < duration);
+    let hits = &state.hits;
     let Some(device) = state.device.as_ref() else { return };
-    let t = state.started.elapsed().as_secs_f32();
     let result = if state.taken { Ok(()) } else { device.init() }
-        .and_then(|()| device.show(|code| effects::color(&state.lighting, &state.positions, code, t)));
+        .and_then(|()| device.show(|code| effects::color(&state.lighting, &state.positions, code, t, hits)));
     match result {
         Ok(()) => {
             state.taken = true;
@@ -230,6 +329,7 @@ fn snapshot(state: &State) -> KeyboardState {
             .map(|&(code, label, x, y, w)| KeyInfo { code, label: label.to_owned(), x, y, w })
             .collect(),
         lighting: state.lighting.clone(),
+        reactive: state.reactive,
     }
 }
 
@@ -265,5 +365,42 @@ fn save(path: &Path, lighting: &Lighting) {
     };
     if let Err(e) = write() {
         warn!(path = %path.display(), error = %format!("{e:#}"), "could not save lighting settings");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gg_ipc::{Effect, Reactive};
+
+    fn lighting(enabled: bool, reactive: bool, effect: Effect) -> Lighting {
+        Lighting { enabled, effect, reactive: Reactive { enabled: reactive, ..Reactive::default() }, ..Lighting::default() }
+    }
+
+    #[test]
+    fn the_reader_runs_only_with_lighting_and_reactive_on_and_the_keyboard_here() {
+        assert!(wants_reader(&lighting(true, true, Effect::Static), true));
+        assert!(!wants_reader(&lighting(false, true, Effect::Static), true), "lighting off");
+        assert!(!wants_reader(&lighting(true, false, Effect::Static), true), "reactive off");
+        assert!(!wants_reader(&lighting(true, true, Effect::Static), false), "keyboard away");
+    }
+
+    #[test]
+    fn at_most_32_presses_are_kept_oldest_dropped_first() {
+        let mut hits = Vec::new();
+        for i in 0..40u8 {
+            push_hit(&mut hits, effects::Hit { code: i, t: f64::from(i) });
+        }
+        assert_eq!(hits.len(), MAX_HITS);
+        assert_eq!(hits[0].code, 8, "the eight oldest went");
+        assert_eq!(hits[MAX_HITS - 1].code, 39);
+    }
+
+    #[test]
+    fn live_presses_animate_even_a_static_effect() {
+        let still = lighting(true, true, Effect::Static);
+        assert_eq!(interval(&still, false), STATIC_REFRESH);
+        assert_eq!(interval(&still, true), FRAME);
+        assert_eq!(interval(&lighting(true, true, Effect::Wave { period_s: 4.0 }), false), FRAME);
     }
 }

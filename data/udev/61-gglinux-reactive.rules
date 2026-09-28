@@ -1,0 +1,22 @@
+# gglinux — OPTIONAL: lets reactive lighting see key presses on the Apex Pro TKL Gen 3.
+#
+# Reactive lighting needs to see which keys you press. This rule lets any program you
+# run read what you type on the Apex while you're logged in. gglinux reads only while
+# reactive lighting is on, and keeps presses in memory only until their light fades.
+# Install it only if you want reactive lighting:
+#   ./scripts/install-local.sh --reactive
+# Undo:
+#   sudo rm /etc/udev/rules.d/61-gglinux-reactive.rules
+#   sudo udevadm control --reload
+#   then replug the keyboard (an ACL already on a node outlives its rule).
+
+ACTION=="remove", GOTO="gglinux_reactive_end"
+SUBSYSTEM!="hidraw", GOTO="gglinux_reactive_end"
+IMPORT{builtin}="usb_id"
+ENV{ID_VENDOR_ID}!="1038", GOTO="gglinux_reactive_end"
+ENV{ID_MODEL_ID}!="1642", GOTO="gglinux_reactive_end"
+
+# Interface 0: the boot keyboard report. Interface 2: the N-key-rollover report.
+ENV{ID_USB_INTERFACE_NUM}=="00|02", TAG+="uaccess"
+
+LABEL="gglinux_reactive_end"
