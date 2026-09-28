@@ -42,7 +42,7 @@ cargo test --workspace
 ```
 
 Install it, the `systemd --user` unit, and the udev rule that grants your desktop session access to
-SteelSeries HID nodes:
+the SteelSeries HID interfaces gglinux controls:
 
 ```sh
 ./scripts/install-local.sh          # prompts for sudo once, for the udev rule
@@ -50,7 +50,21 @@ systemctl --user enable --now gglinuxd
 ```
 
 Without that udev rule the hidraw nodes stay `root:root 0600`: devices will still be *listed* (that
-only reads sysfs) but cannot be opened or controlled.
+only reads sysfs) but cannot be opened or controlled. The rule opens only control interfaces — never
+a keyboard's typing interfaces. If you installed gglinux before 2026-09-28, run
+`./scripts/install-local.sh --no-build` again: the old rule opened every SteelSeries interface,
+including the Apex's typing ones, and the installer clears the access that rule left behind.
+`./scripts/check-udev.sh` shows which interfaces the repo's rules open, without installing anything.
+
+**Reactive lighting (optional).** Reactive lighting needs to see which keys you press. The optional
+udev rule lets any program you run read what you type on the Apex while you're logged in. gglinux
+reads only while reactive lighting is on, and keeps presses in memory only until their light fades.
+
+```sh
+./scripts/install-local.sh --no-build --reactive     # opt in
+sudo rm /etc/udev/rules.d/61-gglinux-reactive.rules  # opt out, then replug the keyboard
+sudo udevadm control --reload
+```
 
 **Sonar** (the audio channels, EQ and virtual mic) needs PipeWire ≥ 1.0 with WirePlumber 0.5; it
 drives them with PipeWire's own `pw-dump`, `pw-metadata`, `pw-cli` and `wpctl`, so there is nothing
