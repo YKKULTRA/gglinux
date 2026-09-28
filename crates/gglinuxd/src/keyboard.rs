@@ -7,6 +7,8 @@
 //! install never touches the keyboard.
 
 mod effects;
+#[allow(dead_code)] // wired up in the next task
+mod reader;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,8 +34,26 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 pub enum Command {
     GetState(Reply<KeyboardState>),
     SetLighting { lighting: Lighting, reply: Reply<()> },
+    /// A key went down on the Apex, as the reader saw it. Never logged.
+    #[allow(dead_code)] // wired up in the next task
+    Pressed { code: u8, at: Instant },
+    /// The reader ended by itself (keyboard gone, read error); it retries later.
+    ReaderStopped,
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
+}
+
+/// Names only: a `Pressed` never prints its key.
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Command::GetState(_) => "GetState",
+            Command::SetLighting { .. } => "SetLighting",
+            Command::Pressed { .. } => "Pressed",
+            Command::ReaderStopped => "ReaderStopped",
+            Command::Shutdown(_) => "Shutdown",
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -158,6 +178,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
         }
+        Command::Pressed { .. } | Command::ReaderStopped => {}
         Command::Shutdown(reply) => {
             hand_back(state);
             let _ = reply.send(Ok(()));
