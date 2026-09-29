@@ -2,6 +2,7 @@
 //! Apex Pro TKL Gen 3. Pure — the HTTP server and the clock live in the daemon.
 
 pub mod paint;
+pub mod prefixes;
 pub mod proto;
 pub mod registry;
 pub mod zones;
