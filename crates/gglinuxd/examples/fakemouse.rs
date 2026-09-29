@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus,
+    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus, GameInfo, GameSenseState,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
@@ -47,6 +47,8 @@ struct Fake {
     sonar: SonarState,
     /// Keyboard lighting as last set; no layout, since nothing draws it here.
     keyboard: KeyboardState,
+    /// GameSense as the client last set it.
+    gamesense: GameSenseState,
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
@@ -89,6 +91,7 @@ fn main() -> Result<()> {
         controls: HeadsetControls::default(),
         sonar: fake_sonar(),
         keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default(), reactive: ReactiveStatus::Off },
+        gamesense: GameSenseState::default(),
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -272,6 +275,37 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.keyboard.lighting = lighting;
             ResponseData::Success
         }
+        Request::GetGamesenseState => ResponseData::Gamesense { state: s.gamesense.clone() },
+        Request::SetGamesenseEnabled { enabled } => {
+            s.gamesense.enabled = enabled;
+            s.gamesense.address = enabled.then(|| "127.0.0.1:51234".to_string());
+            s.gamesense.prefixes = if enabled { 17 } else { 0 };
+            ResponseData::Success
+        }
+        Request::SetGameEnabled { game, enabled } => match s.gamesense.games.iter_mut().find(|g| g.name == game) {
+            Some(g) => {
+                g.enabled = enabled;
+                ResponseData::Success
+            }
+            None => ResponseData::Error { message: format!("unknown game {game}") },
+        },
+        Request::RemoveGame { game } => {
+            s.gamesense.games.retain(|g| g.name != game);
+            ResponseData::Success
+        }
+        Request::GamesenseTest => {
+            if !s.gamesense.games.iter().any(|g| g.name == "GGLINUX_TEST") {
+                s.gamesense.games.push(GameInfo {
+                    name: "GGLINUX_TEST".into(),
+                    display_name: Some("gglinux test".into()),
+                    developer: Some("gglinux".into()),
+                    enabled: true,
+                    active: true,
+                    events: vec!["HEALTH".into()],
+                });
+            }
+            ResponseData::Success
+        }
     }
 }
 
@@ -412,6 +446,11 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetMicVolume { .. } => "set_mic_volume",
         Request::GetKeyboardState => "get_keyboard_state",
         Request::SetLighting { .. } => "set_lighting",
+        Request::GetGamesenseState => "get_gamesense_state",
+        Request::SetGamesenseEnabled { .. } => "set_gamesense_enabled",
+        Request::SetGameEnabled { .. } => "set_game_enabled",
+        Request::RemoveGame { .. } => "remove_game",
+        Request::GamesenseTest => "gamesense_test",
     }
 }
 

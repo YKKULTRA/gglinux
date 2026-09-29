@@ -332,6 +332,12 @@ async fn dispatch(
                 .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
                 .await,
         ),
+        // Wired to the GameSense controller in the next task.
+        Request::GetGamesenseState
+        | Request::SetGamesenseEnabled { .. }
+        | Request::SetGameEnabled { .. }
+        | Request::RemoveGame { .. }
+        | Request::GamesenseTest => ResponseData::Error { message: "GameSense is not wired up yet".into() },
     };
     ServerMessage::response(frame.id, result)
 }

@@ -512,6 +512,31 @@ pub struct KeyboardState {
     pub reactive: ReactiveStatus,
 }
 
+/// A game that has talked to the GameSense server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameInfo {
+    pub name: String,
+    pub display_name: Option<String>,
+    pub developer: Option<String>,
+    /// `false` keeps the game's events off the keyboard.
+    pub enabled: bool,
+    /// Heard from within its timeout, so drawing now.
+    pub active: bool,
+    pub events: Vec<String>,
+}
+
+/// The GameSense server as the daemon runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GameSenseState {
+    /// Off by default: turning it on writes into Steam's Proton prefixes.
+    pub enabled: bool,
+    /// `127.0.0.1:<port>` while the server runs.
+    pub address: Option<String>,
+    /// How many Proton prefixes hold gglinux's coreProps.json.
+    pub prefixes: u32,
+    pub games: Vec<GameInfo>,
+}
+
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
 ///
 /// The `set_mouse_*` methods address "the connected Rival 3 Wireless Gen 2" without
@@ -580,6 +605,14 @@ pub enum Request {
     GetKeyboardState,
     /// Replace the keyboard lighting.
     SetLighting { lighting: Lighting },
+    GetGamesenseState,
+    /// Start or stop the GameSense server (and its files in Proton prefixes).
+    SetGamesenseEnabled { enabled: bool },
+    /// Let one game drive the keyboard, or not.
+    SetGameEnabled { game: String, enabled: bool },
+    RemoveGame { game: String },
+    /// Play the built-in test game: an F-key health bar.
+    GamesenseTest,
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -599,6 +632,7 @@ pub enum ResponseData {
     Headset { state: HeadsetState },
     Sonar { state: SonarState },
     Keyboard { state: KeyboardState },
+    Gamesense { state: GameSenseState },
     /// A command was accepted and applied.
     Success,
     Error { message: String },
@@ -620,6 +654,8 @@ pub enum Event {
     SonarChanged { state: SonarState },
     /// Keyboard connection or lighting changed.
     KeyboardChanged { state: KeyboardState },
+    /// GameSense switched on/off, or a game appeared, changed, or went quiet.
+    GamesenseChanged { state: GameSenseState },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -945,5 +981,31 @@ mod tests {
         assert!(with(0.05).validate().is_err());
         assert!(with(3.5).validate().is_err());
         assert!(with(f32::NAN).validate().is_err());
+    }
+
+    #[test]
+    fn gamesense_requests_and_events_use_their_documented_json() {
+        for (line, want) in [
+            (r#"{"id":1,"req":{"method":"get_gamesense_state"}}"#, "GetGamesenseState"),
+            (r#"{"id":2,"req":{"method":"set_gamesense_enabled","params":{"enabled":true}}}"#, "SetGamesenseEnabled"),
+            (r#"{"id":3,"req":{"method":"set_game_enabled","params":{"game":"G","enabled":false}}}"#, "SetGameEnabled"),
+            (r#"{"id":4,"req":{"method":"remove_game","params":{"game":"G"}}}"#, "RemoveGame"),
+            (r#"{"id":5,"req":{"method":"gamesense_test"}}"#, "GamesenseTest"),
+        ] {
+            let req = serde_json::from_str::<RequestFrame>(line).unwrap().req;
+            assert!(format!("{req:?}").starts_with(want), "{line} parsed as {req:?}");
+        }
+        let state = GameSenseState {
+            enabled: true,
+            address: Some("127.0.0.1:5000".into()),
+            prefixes: 17,
+            games: vec![GameInfo { name: "G".into(), display_name: None, developer: None, enabled: true, active: false, events: vec!["E".into()] }],
+        };
+        let v = serde_json::to_value(Event::GamesenseChanged { state: state.clone() }).unwrap();
+        assert_eq!(v["event"], "gamesense_changed");
+        assert_eq!(v["data"]["state"]["prefixes"], 17);
+        let r = serde_json::to_value(ResponseData::Gamesense { state }).unwrap();
+        assert_eq!(r["type"], "gamesense");
+        assert_eq!(GameSenseState::default(), GameSenseState { enabled: false, address: None, prefixes: 0, games: vec![] });
     }
 }
