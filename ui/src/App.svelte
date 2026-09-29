@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { daemon } from "./lib/daemon.svelte";
   import DeviceCard from "./lib/DeviceCard.svelte";
+  import GamesPanel from "./lib/GamesPanel.svelte";
   import HeadsetPanel from "./lib/HeadsetPanel.svelte";
   import KeyboardPanel from "./lib/KeyboardPanel.svelte";
   import MousePanel from "./lib/MousePanel.svelte";
@@ -9,19 +10,20 @@
   import Icon from "./lib/Icon.svelte";
   import type { IconName } from "./lib/icons";
 
-  type Page = "engine" | "sonar" | "moments" | "settings";
+  type Page = "engine" | "sonar" | "games" | "moments" | "settings";
 
   const NAV: { id: Page; icon: IconName; label: string; blurb: string }[] = [
     { id: "engine", icon: "engine", label: "Engine", blurb: "Devices, lighting, bindings" },
     { id: "sonar", icon: "sonar", label: "Sonar", blurb: "Per-app audio routing and EQ" },
+    { id: "games", icon: "games", label: "Games", blurb: "GameSense: games drive your lighting" },
     { id: "moments", icon: "moments", label: "Moments", blurb: "Instant replay and clips" },
-    { id: "settings", icon: "settings", label: "Settings", blurb: "Profiles, GameSense, updates" },
+    { id: "settings", icon: "settings", label: "Settings", blurb: "Profiles, updates" },
   ];
 
   // Milestones that will fill the not-yet-built pages (see PLAN.md).
-  const COMING: Record<Exclude<Page, "engine" | "sonar">, string> = {
+  const COMING: Record<Exclude<Page, "engine" | "sonar" | "games">, string> = {
     moments: "M7 — gpu-screen-recorder replay buffer and clip library",
-    settings: "M6/M7 — GameSense server, Proton discovery, profile sync",
+    settings: "M7 — profiles and per-game switching",
   };
 
   let page = $state<Page>("engine");
@@ -123,6 +125,16 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
       </header>
       {#if daemon.connected}
         <SonarPanel />
+      {:else}
+        <section class="notice"><h2>gglinuxd isn&rsquo;t running</h2></section>
+      {/if}
+    {:else if page === "games"}
+      <header class="page-head">
+        <h1>Games</h1>
+        <p>{NAV[2].blurb}</p>
+      </header>
+      {#if daemon.connected}
+        <GamesPanel />
       {:else}
         <section class="notice"><h2>gglinuxd isn&rsquo;t running</h2></section>
       {/if}

@@ -75,6 +75,14 @@ extra to build. Two packages are **optional**, for the mic chain only:
 | `noise-suppression-for-voice` | RNNoise noise suppression (`librnnoise_ladspa.so`) | no virtual mic |
 | `swh-plugins` | the `sc4m` compressor | no virtual mic |
 
+**GameSense** (games and apps driving the keyboard lighting) is off until you turn it on in the
+Games page. Turning it on starts a server on `127.0.0.1` and writes a small `coreProps.json`
+(`{"address":"127.0.0.1:<port>"}`) into every Proton prefix under
+`steamapps/compatdata/*/pfx/drive_c/ProgramData/SteelSeries/SteelSeries Engine 3/`, so Windows games
+under Proton find it; turning it off removes those files (gglinux never touches a coreProps.json it
+didn't write). Native Arch `steam` only — Flatpak Steam isn't supported. Few games speak GameSense;
+**Run test** shows what it looks like.
+
 ```sh
 sudo pacman -S noise-suppression-for-voice swh-plugins   # Arch; both are in [extra]
 ```
