@@ -16,6 +16,8 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info, warn};
 
+#[allow(dead_code)] // wired in Task 3
+mod clips;
 mod clock;
 mod gamesense;
 mod headset;
