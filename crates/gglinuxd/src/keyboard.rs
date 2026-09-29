@@ -52,7 +52,6 @@ pub enum Command {
     /// The reader ended by itself (keyboard gone, read error); it retries later.
     ReaderStopped,
     /// Something an overlay shows changed: draw soon. No reply.
-    #[allow(dead_code)] // sent from GameSense (the next tasks)
     Wake,
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
@@ -89,7 +88,6 @@ impl Handle {
     }
 
     /// Ask for a prompt frame; fire and forget.
-    #[allow(dead_code)] // used by GameSense (the next tasks)
     pub fn wake(&self) {
         let _ = self.tx.send(Command::Wake);
     }
