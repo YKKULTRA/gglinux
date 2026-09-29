@@ -94,6 +94,11 @@ pub fn animated(effect: &Effect) -> bool {
     !matches!(effect, Effect::Static)
 }
 
+/// An overlay's colour at the lighting's brightness.
+pub fn dim(c: Rgb, brightness: u8) -> Rgb {
+    scale(c, f32::from(brightness) / 100.0)
+}
+
 /// A fully saturated, full-value colour; `hue` wraps at 1.
 pub fn hsv(hue: f32) -> Rgb {
     let h = hue.rem_euclid(1.0) * 6.0;
@@ -286,5 +291,11 @@ mod tests {
         let wave = lit(Effect::Wave { period_s: 4.0 });
         assert_ne!(color(&wave, &p, 0x29, month, &[]), color(&wave, &p, 0x29, month + 1.0 / 30.0, &[]),
             "and the wave still moves from one frame to the next");
+    }
+
+    #[test]
+    fn dim_applies_the_brightness_to_overlay_colours() {
+        assert_eq!(dim(Rgb { r: 200, g: 100, b: 0 }, 50), Rgb { r: 100, g: 50, b: 0 });
+        assert_eq!(dim(Rgb { r: 200, g: 100, b: 0 }, 100), Rgb { r: 200, g: 100, b: 0 });
     }
 }

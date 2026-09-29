@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     let workers = Workers {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
-        keyboard: keyboard::spawn(event_tx.clone()),
+        keyboard: keyboard::spawn(event_tx.clone(), Vec::new()),
         sonar: sonar::spawn(event_tx.clone()),
     };
 
