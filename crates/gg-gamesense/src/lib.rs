@@ -3,4 +3,7 @@
 
 pub mod paint;
 pub mod proto;
+pub mod registry;
 pub mod zones;
+
+pub use registry::{GameSummary, Layer, Registry, SavedEvent, SavedGame};
