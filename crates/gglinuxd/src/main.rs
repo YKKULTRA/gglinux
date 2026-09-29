@@ -17,6 +17,8 @@ use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info, warn};
 
 mod clock;
+#[allow(dead_code)] // used from the next task
+mod gamesense;
 mod headset;
 mod keyboard;
 mod mouse;
