@@ -56,6 +56,7 @@ pub fn color(lighting: &Lighting, positions: &HashMap<u8, Pos>, code: u8, t: f64
             hsv(x - cycle(t, period_s))
         }
         Effect::Spectrum { period_s } => hsv(cycle(t, period_s)),
+        Effect::Visualizer { .. } => Rgb::default(), // drawn from audio levels: next tasks
     };
     let r = &lighting.reactive;
     let w = if r.enabled { reactive_weight(r, positions, code, t, hits) } else { 0.0 };
@@ -145,7 +146,7 @@ mod tests {
     const RED: gg_ipc::Rgb = gg_ipc::Rgb { r: 255, g: 0, b: 0 };
 
     fn lit(effect: Effect) -> Lighting {
-        Lighting { enabled: true, effect, keys: Vec::new(), brightness: 100, reactive: gg_ipc::Reactive::default() }
+        Lighting { enabled: true, effect, keys: Vec::new(), brightness: 100, reactive: gg_ipc::Reactive::default(), mic_mute: gg_ipc::MicMuteLight::default() }
     }
 
     #[test]

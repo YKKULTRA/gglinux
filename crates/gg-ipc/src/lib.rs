@@ -387,6 +387,8 @@ pub enum Effect {
     Wave { period_s: f32 },
     /// Every key cycles the rainbow together, once per `period_s`.
     Spectrum { period_s: f32 },
+    /// The keys as a spectrum analyser of whatever is playing.
+    Visualizer { sensitivity: f32 },
 }
 
 /// One key's static colour, by HID usage code.
@@ -426,6 +428,21 @@ impl Default for Reactive {
     }
 }
 
+/// A key lit while the default microphone is muted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MicMuteLight {
+    pub enabled: bool,
+    /// HID code of the key; must be on the keyboard.
+    pub key: u8,
+    pub color: Rgb,
+}
+
+impl Default for MicMuteLight {
+    fn default() -> Self {
+        MicMuteLight { enabled: false, key: 0x48, color: Rgb { r: 255, g: 0, b: 0 } }
+    }
+}
+
 /// Keyboard lighting as gglinux runs it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lighting {
@@ -439,10 +456,14 @@ pub struct Lighting {
     /// Presses drawn over the effect; absent in files saved before it existed.
     #[serde(default)]
     pub reactive: Reactive,
+    /// Absent in files saved before it existed.
+    #[serde(default)]
+    pub mic_mute: MicMuteLight,
 }
 
 impl Lighting {
     pub const PERIOD_S: std::ops::RangeInclusive<f32> = 0.5..=60.0;
+    pub const SENSITIVITY: std::ops::RangeInclusive<f32> = 0.25..=4.0;
 
     /// Check ranges, with a message meant for the user.
     pub fn validate(&self) -> Result<(), String> {
@@ -454,10 +475,16 @@ impl Lighting {
             Effect::Breathing { period_s, .. } | Effect::Wave { period_s } | Effect::Spectrum { period_s } => {
                 Some(period_s)
             }
+            Effect::Visualizer { .. } => None,
         };
         if let Some(p) = period {
             if !(p.is_finite() && Self::PERIOD_S.contains(&p)) {
                 return Err(format!("effect period {p} s out of range (0.5..=60)"));
+            }
+        }
+        if let Effect::Visualizer { sensitivity } = self.effect {
+            if !(sensitivity.is_finite() && Self::SENSITIVITY.contains(&sensitivity)) {
+                return Err(format!("visualizer sensitivity {sensitivity} out of range (0.25..=4)"));
             }
         }
         let d = self.reactive.duration_s;
@@ -476,6 +503,7 @@ impl Default for Lighting {
             keys: Vec::new(),
             brightness: 100,
             reactive: Reactive::default(),
+            mic_mute: MicMuteLight::default(),
         }
     }
 }
@@ -1007,5 +1035,22 @@ mod tests {
         let r = serde_json::to_value(ResponseData::Gamesense { state }).unwrap();
         assert_eq!(r["type"], "gamesense");
         assert_eq!(GameSenseState::default(), GameSenseState { enabled: false, address: None, prefixes: 0, games: vec![] });
+    }
+
+    #[test]
+    fn the_visualizer_effect_and_its_sensitivity_bounds() {
+        let v: Effect = serde_json::from_str(r#"{"kind":"visualizer","sensitivity":1.5}"#).unwrap();
+        assert_eq!(v, Effect::Visualizer { sensitivity: 1.5 });
+        let with = |sensitivity| Lighting { effect: Effect::Visualizer { sensitivity }, ..Lighting::default() };
+        assert!(with(0.25).validate().is_ok() && with(4.0).validate().is_ok());
+        assert!(with(0.2).validate().is_err() && with(4.5).validate().is_err() && with(f32::NAN).validate().is_err());
+    }
+
+    #[test]
+    fn the_mic_mute_light_defaults_off_on_pause_in_red_and_old_files_still_load() {
+        let d = MicMuteLight::default();
+        assert_eq!((d.enabled, d.key, d.color), (false, 0x48, Rgb { r: 255, g: 0, b: 0 }));
+        let old = r#"{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}"#;
+        assert_eq!(serde_json::from_str::<Lighting>(old).unwrap().mic_mute, d);
     }
 }
