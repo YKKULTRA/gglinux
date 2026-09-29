@@ -194,10 +194,18 @@ export type Effect =
   | { kind: "static" }
   | { kind: "breathing"; color: Rgb; period_s: number }
   | { kind: "wave"; period_s: number }
-  | { kind: "spectrum"; period_s: number };
+  | { kind: "spectrum"; period_s: number }
+  | { kind: "visualizer"; sensitivity: number };
 
 export interface KeyColor {
   code: number;
+  color: Rgb;
+}
+
+export interface MicMuteLight {
+  enabled: boolean;
+  /** HID code of the key */
+  key: number;
   color: Rgb;
 }
 
@@ -219,6 +227,7 @@ export interface Lighting {
   /** 0..=100 % */
   brightness: number;
   reactive: Reactive;
+  mic_mute: MicMuteLight;
 }
 
 export interface KeyInfo {

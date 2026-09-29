@@ -83,6 +83,9 @@ under Proton find it; turning it off removes those files (gglinux never touches 
 didn't write). Native Arch `steam` only — Flatpak Steam isn't supported. Few games speak GameSense;
 **Run test** shows what it looks like.
 
+**Audio visualizer and mic-mute light** use PipeWire's own `pw-record` and `wpctl`; nothing extra to
+install. The visualizer analyses what's playing live and never records it.
+
 ```sh
 sudo pacman -S noise-suppression-for-voice swh-plugins   # Arch; both are in [extra]
 ```

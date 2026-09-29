@@ -271,6 +271,12 @@ pages, `coreProps.json` in every Proton prefix while enabled, games drawn over t
 overlay (taking the keyboard over when gglinux lighting is off, handing back after the game goes
 quiet), and a Games page with a built-in test game. None of the owner's installed games speak the
 SDK. Not yet verified on hardware. Next: M6b game-independent effects on the same overlay interface.
+
+**M6b built-in effects done in software** (2026-09-29; spec
+`docs/superpowers/specs/2026-09-29-builtin-effects-design.md`): an **Audio** visualizer effect (18
+bands from `pw-record` of the default output, bars rising from the bottom row) and a **mic-mute
+light** (a chosen key, red by default, while PipeWire's default microphone is muted). Not yet
+verified on hardware.
 clears state after 15 s.
 
 ### M7 — Suite features & polish
