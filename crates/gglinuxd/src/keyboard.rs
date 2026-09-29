@@ -8,28 +8,27 @@
 
 mod effects;
 mod reader;
-#[allow(dead_code)] // wired into the worker in Task 6
 mod audio;
-#[allow(dead_code)] // wired into the worker in Task 6
 mod mic;
-#[allow(dead_code)] // used from the capture task
 mod spectrum;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gg_device_keyboard::layout::ANSI_TKL;
 use gg_device_keyboard::{Keyboard, Rgb};
-use gg_ipc::{Event, KeyInfo, KeyboardState, Lighting, ReactiveStatus};
+use gg_ipc::{Effect, Event, KeyInfo, KeyboardState, Lighting, ReactiveStatus};
 use hidapi::HidApi;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::clock::is_older_than;
+use audio::{Capture, Levels};
 use reader::{OpenError, Reader};
+use spectrum::BANDS;
 
 const FRAME: Duration = Duration::from_millis(33);
 const STATIC_REFRESH: Duration = Duration::from_secs(2);
@@ -37,6 +36,7 @@ const REOPEN_INTERVAL: Duration = Duration::from_secs(2);
 const IDLE_WAIT: Duration = Duration::from_millis(500);
 /// The most key presses held for reactive lighting; older ones are dropped first.
 const MAX_HITS: usize = 32;
+const MIC_POLL: Duration = Duration::from_millis(500);
 
 /// Colours by HID code, drawn over the lighting.
 pub type Layer = HashMap<u8, Rgb>;
@@ -62,7 +62,6 @@ pub enum Command {
     /// The audio capture's program ended by itself; retried later.
     AudioStopped,
     /// The default microphone was muted or unmuted.
-    #[allow(dead_code)] // read from Task 6
     MicMuted(bool),
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
@@ -139,6 +138,12 @@ struct State {
     /// Painters over the lighting, and what they painted this loop.
     overlays: Vec<Arc<dyn Overlay>>,
     layers: Vec<Layer>,
+    /// Visualizer band levels, written by the capture thread.
+    levels: Levels,
+    capture: Option<Capture>,
+    last_capture_attempt: Option<Instant>,
+    mic_watch: Option<mic::Watch>,
+    mic_muted: bool,
 }
 
 fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sender<Event>, overlays: Vec<Arc<dyn Overlay>>) {
@@ -168,6 +173,11 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
         hits: Vec::new(),
         overlays,
         layers: Vec::new(),
+        levels: Arc::new(Mutex::new([0.0; BANDS])),
+        capture: None,
+        last_capture_attempt: None,
+        mic_watch: None,
+        mic_muted: false,
     };
 
     loop {
@@ -191,6 +201,8 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
         let now = Instant::now();
         state.layers = state.overlays.iter().filter_map(|o| o.paint(now)).collect();
         sync_reader(&mut state);
+        sync_audio(&mut state);
+        sync_mic(&mut state);
         if should_hand_back(state.taken, state.lighting.enabled, !state.layers.is_empty()) {
             hand_back(&mut state);
         }
@@ -245,6 +257,63 @@ fn wake_forces_frame(last_frame: Option<Instant>) -> bool {
     is_older_than(last_frame, FRAME)
 }
 
+fn wants_audio(lighting: &Lighting, drawing: bool) -> bool {
+    drawing && matches!(lighting.effect, Effect::Visualizer { .. })
+}
+
+fn wants_mic(lighting: &Lighting, connected: bool) -> bool {
+    lighting.enabled && lighting.mic_mute.enabled && connected
+}
+
+/// The mute light's colour for this key, if it's the mute key.
+fn mic_color(mic: Option<(u8, gg_ipc::Rgb)>, code: u8) -> Option<Rgb> {
+    mic.filter(|&(key, _)| key == code).map(|(_, c)| Rgb { r: c.r, g: c.g, b: c.b })
+}
+
+/// Settings that name keys must name keys this keyboard has.
+fn check_keys(lighting: &Lighting) -> Result<(), String> {
+    let key = lighting.mic_mute.key;
+    if !ANSI_TKL.iter().any(|k| k.0 == key) {
+        return Err(format!("the mic-mute key {key:#04x} is not on this keyboard"));
+    }
+    Ok(())
+}
+
+/// Run the visualizer's audio capture exactly while it's drawn.
+fn sync_audio(state: &mut State) {
+    let on_screen = state.device.is_some() && drawing(state.lighting.enabled, !state.layers.is_empty());
+    if !wants_audio(&state.lighting, on_screen) {
+        if state.capture.take().is_some() {
+            *state.levels.lock().unwrap_or_else(|e| e.into_inner()) = [0.0; BANDS];
+        }
+        return;
+    }
+    if state.capture.is_some() || !is_older_than(state.last_capture_attempt, REOPEN_INTERVAL) {
+        return;
+    }
+    state.last_capture_attempt = Some(Instant::now());
+    match Capture::start(&audio::PW_RECORD, Arc::clone(&state.levels), state.tx.clone()) {
+        Ok(c) => {
+            debug!("capturing audio for the visualizer");
+            state.capture = Some(c);
+        }
+        Err(e) => debug!(error = %e, "could not start pw-record for the visualizer"),
+    }
+}
+
+/// Watch the microphone exactly while the mute light is wanted.
+fn sync_mic(state: &mut State) {
+    if !wants_mic(&state.lighting, state.device.is_some()) {
+        state.mic_watch = None;
+        state.mic_muted = false;
+        return;
+    }
+    if state.mic_watch.is_none() {
+        let argv = mic::WPCTL.iter().map(|s| s.to_string()).collect();
+        state.mic_watch = Some(mic::Watch::start(argv, MIC_POLL, state.tx.clone()));
+    }
+}
+
 /// Keep a press, dropping the oldest past [`MAX_HITS`].
 fn push_hit(hits: &mut Vec<effects::Hit>, hit: effects::Hit) {
     if hits.len() == MAX_HITS {
@@ -292,7 +361,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             let _ = reply.send(Ok(snapshot(state)));
         }
         Command::SetLighting { lighting, reply } => {
-            if let Err(message) = lighting.validate() {
+            if let Err(message) = lighting.validate().and_then(|()| check_keys(&lighting)) {
                 let _ = reply.send(Err(message));
                 return true;
             }
@@ -316,8 +385,15 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 state.last_frame = None;
             }
         }
-        Command::AudioStopped => {}
-        Command::MicMuted(_) => {}
+        Command::AudioStopped => {
+            state.capture = None;
+            *state.levels.lock().unwrap_or_else(|e| e.into_inner()) = [0.0; BANDS];
+            state.last_capture_attempt = Some(Instant::now());
+        }
+        Command::MicMuted(m) => {
+            state.mic_muted = m;
+            state.last_frame = None;
+        }
         Command::ReaderStopped => {
             state.reader = None;
             state.reactive = ReactiveStatus::Off;
@@ -364,12 +440,15 @@ fn render(state: &mut State) {
     state.hits.retain(|h| t - h.t < duration);
     let hits = &state.hits;
     let layers = &state.layers;
+    let bands = *state.levels.lock().unwrap_or_else(|e| e.into_inner());
+    let m = &state.lighting.mic_mute;
+    let mic = (state.lighting.enabled && m.enabled && state.mic_muted).then_some((m.key, m.color));
     let Some(device) = state.device.as_ref() else { return };
     let result = if state.taken { Ok(()) } else { device.init() }
         .and_then(|()| {
-            device.show(|code| match overlay_color(layers, code) {
+            device.show(|code| match mic_color(mic, code).or_else(|| overlay_color(layers, code)) {
                 Some(c) => effects::dim(c, state.lighting.brightness),
-                None => effects::color(&state.lighting, &state.positions, code, t, hits, &[]),
+                None => effects::color(&state.lighting, &state.positions, code, t, hits, &bands),
             })
         });
     match result {
@@ -515,5 +594,35 @@ mod tests {
         assert!(wake_forces_frame(None));
         assert!(!wake_forces_frame(Some(Instant::now())), "a frame just went out: wait for the cadence");
         assert!(wake_forces_frame(Some(Instant::now() - FRAME)));
+    }
+
+    #[test]
+    fn the_capture_and_the_mic_watch_run_only_when_wanted() {
+        let viz = Lighting { effect: Effect::Visualizer { sensitivity: 1.0 }, ..lighting(true, false, Effect::Static) };
+        assert!(wants_audio(&viz, true));
+        assert!(!wants_audio(&viz, false), "not drawing");
+        assert!(!wants_audio(&lighting(true, false, Effect::Static), true), "another effect");
+        let mut m = lighting(true, false, Effect::Static);
+        m.mic_mute.enabled = true;
+        assert!(wants_mic(&m, true));
+        assert!(!wants_mic(&m, false), "keyboard away");
+        m.enabled = false;
+        assert!(!wants_mic(&m, true), "lighting off");
+    }
+
+    #[test]
+    fn the_mute_light_wins_over_overlays() {
+        let red = gg_ipc::Rgb { r: 255, g: 0, b: 0 };
+        assert_eq!(mic_color(Some((0x48, red)), 0x48), Some(gg_device_keyboard::Rgb { r: 255, g: 0, b: 0 }));
+        assert_eq!(mic_color(Some((0x48, red)), 0x47), None);
+        assert_eq!(mic_color(None, 0x48), None);
+    }
+
+    #[test]
+    fn a_mute_key_must_be_on_the_keyboard() {
+        let mut l = lighting(true, false, Effect::Static);
+        assert!(check_keys(&l).is_ok());
+        l.mic_mute.key = 0x59; // keypad 1: not on a TKL
+        assert!(check_keys(&l).is_err());
     }
 }
