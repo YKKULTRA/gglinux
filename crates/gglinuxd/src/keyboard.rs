@@ -8,6 +8,8 @@
 
 mod effects;
 mod reader;
+#[allow(dead_code)] // wired into the worker in Task 6
+mod audio;
 #[allow(dead_code)] // used from the capture task
 mod spectrum;
 
@@ -55,6 +57,8 @@ pub enum Command {
     ReaderStopped,
     /// Something an overlay shows changed: draw soon. No reply.
     Wake,
+    /// The audio capture's program ended by itself; retried later.
+    AudioStopped,
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
 }
@@ -68,6 +72,7 @@ impl std::fmt::Debug for Command {
             Command::Pressed { .. } => "Pressed",
             Command::ReaderStopped => "ReaderStopped",
             Command::Wake => "Wake",
+            Command::AudioStopped => "AudioStopped",
             Command::Shutdown(_) => "Shutdown",
         })
     }
@@ -305,6 +310,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 state.last_frame = None;
             }
         }
+        Command::AudioStopped => {}
         Command::ReaderStopped => {
             state.reader = None;
             state.reactive = ReactiveStatus::Off;
