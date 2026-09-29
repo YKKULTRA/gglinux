@@ -16,7 +16,6 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info, warn};
 
-#[allow(dead_code)] // wired in Task 3
 mod clips;
 mod clock;
 mod gamesense;
@@ -26,6 +25,7 @@ mod mouse;
 mod profiles;
 mod sonar;
 
+use clips::{Command as ClipsCommand, Handle as ClipsHandle};
 use gamesense::{Command as GamesenseCommand, Handle as GamesenseHandle};
 use headset::{Command as HeadsetCommand, Handle as HeadsetHandle};
 use keyboard::{Command as KeyboardCommand, Handle as KeyboardHandle};
@@ -36,8 +36,9 @@ use sonar::{Command as SonarCommand, Handle as SonarHandle};
 /// Capacity of the per-client event broadcast buffer.
 const EVENT_CHANNEL_CAP: usize = 256;
 
-/// Longest the daemon waits, on exit, for the base-station screen to be blanked.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+/// Longest the daemon waits, on exit, for the devices and the clip recorder
+/// (which may take its own 3 s to stop cleanly).
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(4);
 
 /// Handles to the device workers, passed to every client task.
 #[derive(Clone)]
@@ -48,6 +49,7 @@ struct Workers {
     sonar: SonarHandle,
     gamesense: GamesenseHandle,
     profiles: ProfilesHandle,
+    clips: ClipsHandle,
 }
 
 #[tokio::main]
@@ -85,6 +87,7 @@ async fn main() -> Result<()> {
         headset: headset::spawn(event_tx.clone()),
         gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
         profiles: profiles::spawn(event_tx.clone(), keyboard.clone()),
+        clips: clips::spawn(event_tx.clone()),
         keyboard,
         sonar: sonar::spawn(event_tx.clone()),
     };
@@ -378,9 +381,16 @@ async fn dispatch(
         Request::SetGameRules { rules } => {
             outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::SetRules { rules, reply }).await)
         }
-        // Wired to the clips controller in Task 3.
-        Request::GetClipsState | Request::SetClipsSettings { .. } | Request::SaveClip | Request::DeleteClip { .. } => {
-            ResponseData::Error { message: "clips are not wired up yet".into() }
+        Request::GetClipsState => match workers.clips.send(ClipsCommand::GetState).await {
+            Ok(state) => ResponseData::Clips { state },
+            Err(message) => ResponseData::Error { message },
+        },
+        Request::SetClipsSettings { settings } => {
+            outcome(workers.clips.send::<()>(|reply| ClipsCommand::SetSettings { settings, reply }).await)
+        }
+        Request::SaveClip => outcome(workers.clips.send(ClipsCommand::Save).await),
+        Request::DeleteClip { name } => {
+            outcome(workers.clips.send::<()>(|reply| ClipsCommand::Delete { name, reply }).await)
         }
     };
     ServerMessage::response(frame.id, result)
@@ -397,19 +407,23 @@ fn outcome(result: Result<(), String>) -> ResponseData {
 /// Leave the devices as their owner expects them — base-station screen dark,
 /// keyboard lighting back on its own profile — waiting at most [`SHUTDOWN_GRACE`].
 async fn shutdown_devices(workers: &Workers) {
-    let both = async {
+    let all = async {
         tokio::join!(
             workers.headset.send::<()>(HeadsetCommand::Shutdown),
             workers.keyboard.send::<()>(KeyboardCommand::Shutdown),
+            workers.clips.send::<()>(ClipsCommand::Shutdown),
         )
     };
-    match tokio::time::timeout(SHUTDOWN_GRACE, both).await {
-        Ok((headset, keyboard)) => {
+    match tokio::time::timeout(SHUTDOWN_GRACE, all).await {
+        Ok((headset, keyboard, clips)) => {
             if let Err(e) = headset {
                 warn!(error = %e, "headset shutdown failed");
             }
             if let Err(e) = keyboard {
                 warn!(error = %e, "keyboard shutdown failed");
+            }
+            if let Err(e) = clips {
+                warn!(error = %e, "clip recorder shutdown failed");
             }
             debug!("devices left as found");
         }
