@@ -3,6 +3,7 @@
   import { daemon } from "./lib/daemon.svelte";
   import DeviceCard from "./lib/DeviceCard.svelte";
   import GamesPanel from "./lib/GamesPanel.svelte";
+  import ProfilesPanel from "./lib/ProfilesPanel.svelte";
   import HeadsetPanel from "./lib/HeadsetPanel.svelte";
   import KeyboardPanel from "./lib/KeyboardPanel.svelte";
   import MousePanel from "./lib/MousePanel.svelte";
@@ -17,13 +18,12 @@
     { id: "sonar", icon: "sonar", label: "Sonar", blurb: "Per-app audio routing and EQ" },
     { id: "games", icon: "games", label: "Games", blurb: "GameSense: games drive your lighting" },
     { id: "moments", icon: "moments", label: "Moments", blurb: "Instant replay and clips" },
-    { id: "settings", icon: "settings", label: "Settings", blurb: "Profiles, updates" },
+    { id: "settings", icon: "settings", label: "Settings", blurb: "Profiles and per-game switching" },
   ];
 
   // Milestones that will fill the not-yet-built pages (see PLAN.md).
-  const COMING: Record<Exclude<Page, "engine" | "sonar" | "games">, string> = {
+  const COMING: Record<Exclude<Page, "engine" | "sonar" | "games" | "settings">, string> = {
     moments: "M7 — gpu-screen-recorder replay buffer and clip library",
-    settings: "M7 — profiles and per-game switching",
   };
 
   let page = $state<Page>("engine");
@@ -135,6 +135,16 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
       </header>
       {#if daemon.connected}
         <GamesPanel />
+      {:else}
+        <section class="notice"><h2>gglinuxd isn&rsquo;t running</h2></section>
+      {/if}
+    {:else if page === "settings"}
+      <header class="page-head">
+        <h1>Settings</h1>
+        <p>{NAV[4].blurb}</p>
+      </header>
+      {#if daemon.connected}
+        <ProfilesPanel />
       {:else}
         <section class="notice"><h2>gglinuxd isn&rsquo;t running</h2></section>
       {/if}
