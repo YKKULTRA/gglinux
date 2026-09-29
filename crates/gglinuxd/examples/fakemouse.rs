@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus, GameInfo, GameSenseState,
+    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
@@ -49,6 +49,8 @@ struct Fake {
     keyboard: KeyboardState,
     /// GameSense as the client last set it.
     gamesense: GameSenseState,
+    /// Profiles and rules as the client last set them.
+    profiles: ProfilesState,
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
@@ -92,6 +94,7 @@ fn main() -> Result<()> {
         sonar: fake_sonar(),
         keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default(), reactive: ReactiveStatus::Off },
         gamesense: GameSenseState::default(),
+        profiles: ProfilesState::default(),
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -293,6 +296,28 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.gamesense.games.retain(|g| g.name != game);
             ResponseData::Success
         }
+        Request::GetProfiles => ResponseData::Profiles { state: s.profiles.clone() },
+        Request::SaveProfile { name } => {
+            if !s.profiles.profiles.contains(&name) {
+                s.profiles.profiles.push(name);
+            }
+            ResponseData::Success
+        }
+        Request::ApplyProfile { name } => {
+            if s.profiles.profiles.contains(&name) {
+                ResponseData::Success
+            } else {
+                ResponseData::Error { message: format!("no profile named \"{name}\"") }
+            }
+        }
+        Request::DeleteProfile { name } => {
+            s.profiles.profiles.retain(|p| p != &name);
+            ResponseData::Success
+        }
+        Request::SetGameRules { rules } => {
+            s.profiles.rules = rules;
+            ResponseData::Success
+        }
         Request::GamesenseTest => {
             if !s.gamesense.games.iter().any(|g| g.name == "GGLINUX_TEST") {
                 s.gamesense.games.push(GameInfo {
@@ -451,6 +476,11 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetGameEnabled { .. } => "set_game_enabled",
         Request::RemoveGame { .. } => "remove_game",
         Request::GamesenseTest => "gamesense_test",
+        Request::GetProfiles => "get_profiles",
+        Request::SaveProfile { .. } => "save_profile",
+        Request::ApplyProfile { .. } => "apply_profile",
+        Request::DeleteProfile { .. } => "delete_profile",
+        Request::SetGameRules { .. } => "set_game_rules",
     }
 }
 

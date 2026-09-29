@@ -565,6 +565,30 @@ pub struct GameSenseState {
     pub games: Vec<GameInfo>,
 }
 
+/// A saved keyboard look.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub lighting: Lighting,
+}
+
+/// While a process with this name runs, use this profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameRule {
+    pub process: String,
+    pub profile: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ProfilesState {
+    pub profiles: Vec<String>,
+    pub rules: Vec<GameRule>,
+    /// The rule applied right now, if a game from the list is running.
+    pub active: Option<GameRule>,
+    /// Process names running now, for picking rules. Only in answers, not in events.
+    pub running: Vec<String>,
+}
+
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
 ///
 /// The `set_mouse_*` methods address "the connected Rival 3 Wireless Gen 2" without
@@ -641,6 +665,12 @@ pub enum Request {
     RemoveGame { game: String },
     /// Play the built-in test game: an F-key health bar.
     GamesenseTest,
+    GetProfiles,
+    /// Save the current lighting under this name.
+    SaveProfile { name: String },
+    ApplyProfile { name: String },
+    DeleteProfile { name: String },
+    SetGameRules { rules: Vec<GameRule> },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -661,6 +691,7 @@ pub enum ResponseData {
     Sonar { state: SonarState },
     Keyboard { state: KeyboardState },
     Gamesense { state: GameSenseState },
+    Profiles { state: ProfilesState },
     /// A command was accepted and applied.
     Success,
     Error { message: String },
@@ -684,6 +715,8 @@ pub enum Event {
     KeyboardChanged { state: KeyboardState },
     /// GameSense switched on/off, or a game appeared, changed, or went quiet.
     GamesenseChanged { state: GameSenseState },
+    /// Profiles, rules, or the active rule changed.
+    ProfilesChanged { state: ProfilesState },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -1052,5 +1085,27 @@ mod tests {
         assert_eq!((d.enabled, d.key, d.color), (false, 0x48, Rgb { r: 255, g: 0, b: 0 }));
         let old = r#"{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}"#;
         assert_eq!(serde_json::from_str::<Lighting>(old).unwrap().mic_mute, d);
+    }
+
+    #[test]
+    fn profile_requests_and_events_use_their_documented_json() {
+        for line in [
+            r#"{"id":1,"req":{"method":"get_profiles"}}"#,
+            r#"{"id":2,"req":{"method":"save_profile","params":{"name":"Night"}}}"#,
+            r#"{"id":3,"req":{"method":"apply_profile","params":{"name":"Night"}}}"#,
+            r#"{"id":4,"req":{"method":"delete_profile","params":{"name":"Night"}}}"#,
+            r#"{"id":5,"req":{"method":"set_game_rules","params":{"rules":[{"process":"RDR2.exe","profile":"Night"}]}}}"#,
+        ] {
+            serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+        }
+        let state = ProfilesState {
+            profiles: vec!["Night".into()],
+            rules: vec![GameRule { process: "RDR2.exe".into(), profile: "Night".into() }],
+            active: None,
+            running: vec![],
+        };
+        let v = serde_json::to_value(Event::ProfilesChanged { state }).unwrap();
+        assert_eq!(v["event"], "profiles_changed");
+        assert_eq!(v["data"]["state"]["rules"][0]["process"], "RDR2.exe");
     }
 }

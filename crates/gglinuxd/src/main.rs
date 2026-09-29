@@ -356,6 +356,12 @@ async fn dispatch(
             workers.gamesense.send::<()>(|reply| GamesenseCommand::RemoveGame { game, reply }).await,
         ),
         Request::GamesenseTest => outcome(workers.gamesense.send(GamesenseCommand::RunTest).await),
+        // Wired to the profiles controller in Task 4.
+        Request::GetProfiles
+        | Request::SaveProfile { .. }
+        | Request::ApplyProfile { .. }
+        | Request::DeleteProfile { .. }
+        | Request::SetGameRules { .. } => ResponseData::Error { message: "profiles are not wired up yet".into() },
     };
     ServerMessage::response(frame.id, result)
 }
