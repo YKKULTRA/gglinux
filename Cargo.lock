@@ -96,6 +96,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gg-gamesense"
+version = "0.0.1"
+dependencies = [
+ "gg-device-keyboard",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gg-hid"
 version = "0.0.1"
 dependencies = [

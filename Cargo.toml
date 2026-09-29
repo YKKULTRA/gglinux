@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gg-ipc", "crates/gg-hid", "crates/gg-device-mouse", "crates/gg-device-headset", "crates/gg-device-keyboard", "crates/gg-audio", "crates/gglinuxd"]
+members = ["crates/gg-ipc", "crates/gg-hid", "crates/gg-device-mouse", "crates/gg-device-headset", "crates/gg-device-keyboard", "crates/gg-gamesense", "crates/gg-audio", "crates/gglinuxd"]
 exclude = ["ui"]
 
 [workspace.package]
@@ -20,6 +20,9 @@ anyhow = "1"
 hidapi = "2"
 udev = "0.9"
 libc = "0.2"
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 # Slimmer, faster debug builds for the C-heavy hidapi dep.
 [profile.dev.package."*"]
