@@ -21,6 +21,8 @@ mod gamesense;
 mod headset;
 mod keyboard;
 mod mouse;
+#[allow(dead_code)] // wired in Task 4
+mod profiles;
 mod sonar;
 
 use gamesense::{Command as GamesenseCommand, Handle as GamesenseHandle};
