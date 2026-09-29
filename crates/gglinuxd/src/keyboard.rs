@@ -356,7 +356,7 @@ fn render(state: &mut State) {
         .and_then(|()| {
             device.show(|code| match overlay_color(layers, code) {
                 Some(c) => effects::dim(c, state.lighting.brightness),
-                None => effects::color(&state.lighting, &state.positions, code, t, hits),
+                None => effects::color(&state.lighting, &state.positions, code, t, hits, &[]),
             })
         });
     match result {
