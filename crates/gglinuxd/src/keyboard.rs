@@ -8,6 +8,8 @@
 
 mod effects;
 mod reader;
+#[allow(dead_code)] // used from the capture task
+mod spectrum;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
