@@ -589,6 +589,82 @@ pub struct ProfilesState {
     pub running: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClipQuality {
+    Medium,
+    High,
+    VeryHigh,
+    Ultra,
+}
+
+/// The instant-replay recorder's settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipsSettings {
+    /// Off by default: while on, the screen is kept in a rolling buffer.
+    pub enabled: bool,
+    /// How much a saved clip holds.
+    pub seconds: u32,
+    pub fps: u32,
+    pub quality: ClipQuality,
+    pub desktop_audio: bool,
+    pub mic: bool,
+    /// Absolute folder; `None` means `~/Videos/gglinux`.
+    pub dir: Option<String>,
+}
+
+impl Default for ClipsSettings {
+    fn default() -> Self {
+        ClipsSettings { enabled: false, seconds: 30, fps: 60, quality: ClipQuality::High, desktop_audio: true, mic: false, dir: None }
+    }
+}
+
+impl ClipsSettings {
+    pub const SECONDS: std::ops::RangeInclusive<u32> = 5..=300;
+    pub const FPS: std::ops::RangeInclusive<u32> = 15..=240;
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !Self::SECONDS.contains(&self.seconds) {
+            return Err(format!("clip length {} s out of range (5..=300)", self.seconds));
+        }
+        if !Self::FPS.contains(&self.fps) {
+            return Err(format!("{} fps out of range (15..=240)", self.fps));
+        }
+        if let Some(dir) = &self.dir {
+            if !std::path::Path::new(dir).is_absolute() {
+                return Err(format!("the clips folder must be an absolute path, not {dir:?}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipInfo {
+    pub name: String,
+    pub bytes: u64,
+    /// Seconds since the Unix epoch.
+    pub modified: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClipsState {
+    /// `gpu-screen-recorder` is installed.
+    pub available: bool,
+    pub enabled: bool,
+    /// The recorder is running now.
+    pub recording: bool,
+    pub settings: ClipsSettings,
+    /// The folder clips go to.
+    pub dir: String,
+    pub clips: Vec<ClipInfo>,
+    /// The last thing that went wrong, for the UI.
+    pub error: Option<String>,
+    /// The hotkey KDE bound, if any.
+    pub hotkey: Option<String>,
+}
+
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
 ///
 /// The `set_mouse_*` methods address "the connected Rival 3 Wireless Gen 2" without
@@ -671,6 +747,11 @@ pub enum Request {
     ApplyProfile { name: String },
     DeleteProfile { name: String },
     SetGameRules { rules: Vec<GameRule> },
+    GetClipsState,
+    SetClipsSettings { settings: ClipsSettings },
+    /// Save the replay buffer as a clip.
+    SaveClip,
+    DeleteClip { name: String },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -692,6 +773,7 @@ pub enum ResponseData {
     Keyboard { state: KeyboardState },
     Gamesense { state: GameSenseState },
     Profiles { state: ProfilesState },
+    Clips { state: ClipsState },
     /// A command was accepted and applied.
     Success,
     Error { message: String },
@@ -717,6 +799,8 @@ pub enum Event {
     GamesenseChanged { state: GameSenseState },
     /// Profiles, rules, or the active rule changed.
     ProfilesChanged { state: ProfilesState },
+    /// The recorder started or stopped, a clip was saved or deleted, or settings changed.
+    ClipsChanged { state: ClipsState },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -1107,5 +1191,27 @@ mod tests {
         let v = serde_json::to_value(Event::ProfilesChanged { state }).unwrap();
         assert_eq!(v["event"], "profiles_changed");
         assert_eq!(v["data"]["state"]["rules"][0]["process"], "RDR2.exe");
+    }
+
+    #[test]
+    fn clips_settings_default_off_validate_and_parse() {
+        let d = ClipsSettings::default();
+        assert_eq!((d.enabled, d.seconds, d.fps, d.quality, d.desktop_audio, d.mic, d.dir.as_deref()),
+            (false, 30, 60, ClipQuality::High, true, false, None));
+        assert!(d.validate().is_ok());
+        assert!(ClipsSettings { seconds: 4, ..d.clone() }.validate().is_err());
+        assert!(ClipsSettings { fps: 241, ..d.clone() }.validate().is_err());
+        assert!(ClipsSettings { dir: Some("relative/dir".into()), ..d.clone() }.validate().is_err());
+        let partial: ClipsSettings = serde_json::from_str(r#"{"enabled":true,"quality":"very_high"}"#).unwrap();
+        assert_eq!((partial.enabled, partial.quality, partial.seconds), (true, ClipQuality::VeryHigh, 30));
+        for line in [
+            r#"{"id":1,"req":{"method":"get_clips_state"}}"#,
+            r#"{"id":2,"req":{"method":"save_clip"}}"#,
+            r#"{"id":3,"req":{"method":"delete_clip","params":{"name":"Replay.mp4"}}}"#,
+            r#"{"id":4,"req":{"method":"set_clips_settings","params":{"settings":{"enabled":true}}}}"#,
+        ] {
+            serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+        }
+        assert_eq!(serde_json::to_value(Event::ClipsChanged { state: ClipsState::default() }).unwrap()["event"], "clips_changed");
     }
 }

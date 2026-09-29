@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState,
+    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
 };
 
@@ -51,6 +51,8 @@ struct Fake {
     gamesense: GameSenseState,
     /// Profiles and rules as the client last set them.
     profiles: ProfilesState,
+    /// The replay recorder, pretending gpu-screen-recorder is installed.
+    clips: ClipsState,
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
@@ -95,6 +97,12 @@ fn main() -> Result<()> {
         keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default(), reactive: ReactiveStatus::Off },
         gamesense: GameSenseState::default(),
         profiles: ProfilesState::default(),
+        clips: ClipsState {
+            available: true,
+            dir: "/home/you/Videos/gglinux".into(),
+            clips: vec![ClipInfo { name: "Replay_2026-09-29_20-00-00.mp4".into(), bytes: 48_000_000, modified: 1_790_700_000 }],
+            ..ClipsState::default()
+        },
         devices: devices(with_mouse),
         fail: value("--fail"),
     }));
@@ -318,6 +326,27 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.profiles.rules = rules;
             ResponseData::Success
         }
+        Request::GetClipsState => ResponseData::Clips { state: s.clips.clone() },
+        Request::SetClipsSettings { settings } => {
+            s.clips.enabled = settings.enabled;
+            s.clips.recording = settings.enabled;
+            s.clips.settings = settings;
+            ResponseData::Success
+        }
+        Request::SaveClip => {
+            if s.clips.enabled {
+                let n = s.clips.clips.len() + 1;
+                let modified = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                s.clips.clips.insert(0, ClipInfo { name: format!("Replay_{n}.mp4"), bytes: 1_000_000, modified });
+                ResponseData::Success
+            } else {
+                ResponseData::Error { message: "clips are off".into() }
+            }
+        }
+        Request::DeleteClip { name } => {
+            s.clips.clips.retain(|c| c.name != name);
+            ResponseData::Success
+        }
         Request::GamesenseTest => {
             if !s.gamesense.games.iter().any(|g| g.name == "GGLINUX_TEST") {
                 s.gamesense.games.push(GameInfo {
@@ -481,6 +510,10 @@ fn method_name(req: &Request) -> &'static str {
         Request::ApplyProfile { .. } => "apply_profile",
         Request::DeleteProfile { .. } => "delete_profile",
         Request::SetGameRules { .. } => "set_game_rules",
+        Request::GetClipsState => "get_clips_state",
+        Request::SetClipsSettings { .. } => "set_clips_settings",
+        Request::SaveClip => "save_clip",
+        Request::DeleteClip { .. } => "delete_clip",
     }
 }
 

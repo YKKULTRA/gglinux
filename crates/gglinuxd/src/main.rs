@@ -376,6 +376,10 @@ async fn dispatch(
         Request::SetGameRules { rules } => {
             outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::SetRules { rules, reply }).await)
         }
+        // Wired to the clips controller in Task 3.
+        Request::GetClipsState | Request::SetClipsSettings { .. } | Request::SaveClip | Request::DeleteClip { .. } => {
+            ResponseData::Error { message: "clips are not wired up yet".into() }
+        }
     };
     ServerMessage::response(frame.id, result)
 }
