@@ -31,7 +31,6 @@ pub enum Internal {
     Exited { generation: u64 },
     Refresh,
     Hotkey(Result<String, String>),
-    #[allow(dead_code)] // sent by the portal hotkey (Task 4)
     SaveFromHotkey,
 }
 
