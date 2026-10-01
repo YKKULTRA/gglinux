@@ -285,6 +285,7 @@ mod tests {
     fn the_stream_mix_is_in_the_dropin_only_when_on() {
         let off = dropin("hs", None, false).unwrap();
         assert!(!off.contains(STREAM_SINK));
+        assert!(!off.contains("libpipewire-module-loopback"));
         let on = dropin("hs", None, true).unwrap();
         assert!(on.contains("support.null-audio-sink"));
         assert!(on.contains("monitor.channel-volumes = true"));
@@ -292,7 +293,14 @@ mod tests {
         for c in Channel::ALL {
             assert!(on.contains(&format!("\"{}\"", stream_feed_name(c))), "{c:?} feed");
             assert!(on.contains(&format!("\"{}.stream_in\"", sink_name(c))), "{c:?} capture");
+            // The capture side's alignment, so a swapped pair doesn't match.
+            assert!(on.contains(&format!("target.object       = \"{}\"", sink_name(c))), "{c:?} capture target");
         }
+        assert_eq!(
+            on.matches(&format!("target.object      = \"{STREAM_SINK}\"")).count(),
+            4,
+            "every feed plays into the stream sink"
+        );
         assert!(on.contains("stream.capture.sink = true"));
         assert!(on.starts_with("# Written by gglinux"), "the header stays first");
     }
