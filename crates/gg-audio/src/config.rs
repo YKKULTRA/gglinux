@@ -136,10 +136,14 @@ pub fn dropin(output: &str, mic_input: Option<&str>, streamer: bool) -> Result<S
 
 /// The stream mix's device: a null sink whose own volume (the master level)
 /// applies to its monitor, which is what OBS records.
+///
+/// `nofail`, like every stream piece: if it can't be made, PipeWire skips it
+/// and still loads the channels, rather than failing to start at all.
 fn stream_sink() -> String {
     format!(
         r#"context.objects = [
   {{ factory = adapter
+    flags = [ nofail ]
     args = {{
       factory.name            = support.null-audio-sink
       node.name               = "{STREAM_SINK}"
@@ -161,6 +165,7 @@ fn stream_sink() -> String {
 fn stream_feed(channel: Channel) -> String {
     format!(
         r#"    {{ name = libpipewire-module-loopback
+      flags = [ nofail ]
       args = {{
         node.description = "gglinux {label} to Stream"
         audio.position   = [ FL FR ]
@@ -290,6 +295,11 @@ mod tests {
         assert!(on.contains("support.null-audio-sink"));
         assert!(on.contains("monitor.channel-volumes = true"));
         assert_eq!(on.matches("libpipewire-module-loopback").count(), 4);
+        assert_eq!(
+            on.matches("flags = [ nofail ]").count(),
+            5,
+            "a broken stream piece must not take PipeWire, and the channels, down"
+        );
         for c in Channel::ALL {
             assert!(on.contains(&format!("\"{}\"", stream_feed_name(c))), "{c:?} feed");
             assert!(on.contains(&format!("\"{}.stream_in\"", sink_name(c))), "{c:?} capture");

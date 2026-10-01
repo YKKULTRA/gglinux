@@ -37,6 +37,9 @@ pub struct Sonar<T: PwTools> {
     /// PipeWire has now. Cleared when they vanish, so a PipeWire restart gglinux
     /// did not do — a reboot, say — gets the levels back once they reappear.
     levels_applied: bool,
+    /// The same for the stream mix, kept apart so a stream that's late or
+    /// missing never holds back the channels' own levels.
+    stream_levels_applied: bool,
 }
 
 impl<T: PwTools> Sonar<T> {
@@ -54,6 +57,7 @@ impl<T: PwTools> Sonar<T> {
             routed: HashMap::new(),
             available: false,
             levels_applied: false,
+            stream_levels_applied: false,
         };
         sonar.refresh();
         if sonar.settings.enabled && !sonar.dropin_path.exists() {
@@ -203,6 +207,7 @@ impl<T: PwTools> Sonar<T> {
         self.persist();
         self.apply_levels()?;
         self.levels_applied = true;
+        self.keep_levels(); // the stream levels, if the stream mix is up yet
         self.routed.clear();
         self.route();
         Ok(())
@@ -223,6 +228,7 @@ impl<T: PwTools> Sonar<T> {
         self.settings.enabled = false;
         self.routed.clear();
         self.levels_applied = false;
+        self.stream_levels_applied = false;
         let previous = self.settings.previous_default.take();
         self.persist();
         if let Some(name) = previous {
@@ -394,6 +400,7 @@ impl<T: PwTools> Sonar<T> {
         }
         self.take_defaults()?;
         self.levels_applied = false;
+        self.stream_levels_applied = false;
         self.keep_levels();
         self.routed.clear();
         self.route();
@@ -557,15 +564,12 @@ impl<T: PwTools> Sonar<T> {
         }
     }
 
-    /// Push the saved levels once per appearance of the channels (and of the
-    /// stream mix, while streamer mode is on).
+    /// Push the saved levels once per appearance of the channels, and the
+    /// stream levels once per appearance of the stream mix (while streamer mode
+    /// is on). Each waits only for its own nodes.
     fn keep_levels(&mut self) {
         let channels = Channel::ALL.iter().all(|&c| self.graph.node(&config::sink_name(c)).is_some());
-        let stream = !self.settings.streamer
-            || (self.graph.node(config::STREAM_SINK).is_some()
-                && Channel::ALL.iter().all(|&c| self.graph.node(&config::stream_feed_name(c)).is_some()));
-        let present = channels && stream;
-        if !present {
+        if !channels {
             self.levels_applied = false;
         } else if !self.levels_applied {
             match self.apply_levels() {
@@ -573,9 +577,20 @@ impl<T: PwTools> Sonar<T> {
                 Err(e) => warn!(error = %format!("{e:#}"), "could not restore Sonar volumes"),
             }
         }
+        let stream = self.settings.streamer
+            && self.graph.node(config::STREAM_SINK).is_some()
+            && Channel::ALL.iter().all(|&c| self.graph.node(&config::stream_feed_name(c)).is_some());
+        if !stream {
+            self.stream_levels_applied = false;
+        } else if !self.stream_levels_applied {
+            match self.apply_stream_levels() {
+                Ok(()) => self.stream_levels_applied = true,
+                Err(e) => warn!(error = %format!("{e:#}"), "could not restore the stream levels"),
+            }
+        }
     }
 
-    /// Push saved channel volumes, EQ, stream levels and ChatMix to PipeWire.
+    /// Push saved channel volumes, EQ, the mic and ChatMix to PipeWire.
     fn apply_levels(&self) -> Result<()> {
         for (&channel, &volume) in &self.settings.volumes {
             if let Some(node) = self.graph.node(&config::sink_name(channel)) {
@@ -585,6 +600,13 @@ impl<T: PwTools> Sonar<T> {
         for channel in Channel::ALL {
             self.apply_chain(channel)?;
         }
+        self.apply_mic()?;
+        self.apply_chatmix()
+    }
+
+    /// Push the saved stream levels to the feeds and the master to the stream
+    /// device.
+    fn apply_stream_levels(&self) -> Result<()> {
         for channel in Channel::ALL {
             if let Some(node) = self.graph.node(&config::stream_feed_name(channel)) {
                 self.tools.run(&tools::set_volume(node.id, self.settings.stream_volume(channel)))?;
@@ -593,8 +615,7 @@ impl<T: PwTools> Sonar<T> {
         if let Some(node) = self.graph.node(config::STREAM_SINK) {
             self.tools.run(&tools::set_volume(node.id, self.settings.stream_master))?;
         }
-        self.apply_mic()?;
-        self.apply_chatmix()
+        Ok(())
     }
 
     /// Set a channel's whole filter chain, if PipeWire has the channel now.
@@ -1178,5 +1199,30 @@ mod tests {
         *fake.stream_comes_up.borrow_mut() = true; // …then the stream mix
         sonar.tick();
         assert_eq!(media(&fake), before + 1);
+    }
+
+    #[test]
+    fn a_missing_stream_mix_leaves_the_channels_their_levels() {
+        let (settings_path, dropin) = paths("stream-missing");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_volume(Channel::Chat, 0.4).unwrap();
+        sonar.set_chatmix(0.5).unwrap();
+        *fake.stream_comes_up.borrow_mut() = false;
+        fake.runs.borrow_mut().clear();
+        sonar.set_streamer(true).unwrap();
+        assert!(sonar.is_enabled(), "never rolled back for the stream");
+        assert!(!sonar.snapshot().stream.present);
+        assert!(fake.ran(&["wpctl", "set-volume", "21", "0.400"]), "Chat's own volume");
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
+
+        // The stream mix turns up later: only its own levels are pushed.
+        fake.runs.borrow_mut().clear();
+        *fake.stream_comes_up.borrow_mut() = true;
+        sonar.tick();
+        assert!(fake.ran(&["wpctl", "set-volume", "25", "1.000"]), "the master level");
+        assert!(!fake.ran(&["wpctl", "set-volume", "21", "0.400"]), "the channels are not pushed again");
     }
 }
