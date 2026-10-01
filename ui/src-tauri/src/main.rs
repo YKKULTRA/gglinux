@@ -9,6 +9,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Only its tests use it until the Tauri commands for it are wired up.
+#[allow(dead_code)]
+mod system;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
