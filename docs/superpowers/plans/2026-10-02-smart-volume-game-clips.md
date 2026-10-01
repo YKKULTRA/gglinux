@@ -17,6 +17,11 @@
     slider.
   - The stage is written only when PipeWire has the meter plugin. The startup drop-in upgrade
     keeps that in step.
+  - The channel modules that carry the stage are `nofail`. If PipeWire refuses the stage, it
+    still starts (without the channels). gglinux then sees the channels missing, records the
+    refusal, and rewrites the drop-in without the stage.
+  - It replaces the owner's LADSPA fallback, so it's on trial: hardware acceptance is a
+    go/no-go (spec, Status).
 - **Games-only clips:** the profiles watcher publishes "the game from the rules running now" on a
   `tokio::sync::watch` channel, and the clips controller follows it. There is no second `/proc`
   scanner.
@@ -36,7 +41,15 @@
     `SPA_PLUGIN_DIR` (split like a path), then `/usr/lib64/spa-0.2`, `/usr/lib/spa-0.2`,
     `/usr/local/lib/spa-0.2`.
   - Without it, the drop-in is byte-for-byte today's.
-  - **Never use a LADSPA plugin in a channel chain.**
+  - **Never use a LADSPA plugin in a channel chain.** The owner's LADSPA fallback is a follow-up
+    plan, written only on a no-go.
+- **A graph PipeWire refuses must never stop PipeWire.**
+  - With the stage, each channel module carries `flags = [ nofail ]`; without it, nothing changes.
+  - The stage is refused when the drop-in on disk carries it and PipeWire answers, but the channels
+    don't come within `APPEAR_TIMEOUT`. This is checked after `enable()`'s and `set_streamer`'s
+    restarts, and on every startup with Sonar on.
+  - A refusal is persisted (`smart_volume_refused`) before the stage-less rewrite and its restart.
+  - Turning Sonar off forgets it, and so does `enable()`, at its start and when it rolls back.
 - **The stage's nodes, in order, after `eq_10`:** `sv_meter` (ebur128, `use-histogram = true`),
   `sv_fast` and `sv_slow` (lufs2gain), `sv_pick` and `sv_range` (clamp), `sv_gain` (linear) and
   `vol` (linear). `vol` is always the last node. `capture.volumes = [ { control = "vol:Mult" } ]`
@@ -49,7 +62,8 @@
 - **Live controls:** `pw-cli set-param <channel sink id> Props { params = [ … ] }`, a separate
   command from the EQ's. **Toggling or changing a level never restarts PipeWire.**
 - **Settings:**
-  - `sonar.json` `smart_volume: { <channel>: { enabled, level } }` (unset = off, Balanced);
+  - `sonar.json` `smart_volume: { <channel>: { enabled, level } }` (unset = off, Balanced) and
+    `smart_volume_refused` (default false);
   - `clips.json` `games_only` (default false).
   - Both structs are `#[serde(default)]`, so old files load.
 - **Games-only clips:**
@@ -61,6 +75,8 @@
 - **Checks:**
   - `bash -c 'cargo test --workspace --all-targets 2>&1 | grep -E "^test result" | awk "{p+=\$4;f+=\$6} END{print \"passed=\"p\" failed=\"f; exit f>0}"'`
     (`passed=279 failed=0` at the base, `58df557`);
+  - expected totals: Task 1 281, Task 2 285, Task 3 288, Task 4 294, Task 5 298, Task 6 298,
+    Task 7 299, Task 8 303, Tasks 9 and 10 303;
   - `cargo clippy --workspace --all-targets 2>&1 | grep -cE "^(warning|error)"` → `0`;
   - `cd ui && npm run check` → 0 errors, 0 warnings.
 - **Style:** as before: plain-English doc comments, the surrounding density, no new dependencies.
@@ -74,13 +90,28 @@
    - Task 4: `without_the_meter_the_channels_are_as_before`,
      `a_meter_that_disappears_takes_the_stage_out_on_startup`;
    - Task 2: `the_meter_is_found_by_file`.
-2. **A graph PipeWire refuses** would silence every channel.
-   - The exact node and port names were read from PipeWire 1.6.9 (spec Facts). The text is pinned
-     by the Task 3 tests `smart_volume_ends_every_channels_chain` (placement after `eq_10`, nine
-     links, `vol` last) and `the_smart_volume_dropin_parses` (`spa-json-dump`).
-   - `enable()` already rolls back when the channels don't appear
-     (`enable_rolls_back_when_the_channels_never_appear`).
-   - What remains is hardware acceptance step 1.
+
+   The meter can't go missing while the builtins are there: same package (spec Facts).
+2. **A graph PipeWire refuses would stop PipeWire from starting**, which means all audio, not just
+   the channels.
+   - Why: the channel modules aren't `nofail` today, and a filter-chain module whose graph fails to
+     load is fatal in `context.modules` (spec Facts).
+   - The stage is the first non-builtin plugin and the first `capture.volumes` in a channel chain,
+     and none of it has run live. The meter file is only a proxy for the port names, `lufs2gain`
+     and `capture.volumes` being accepted.
+   - So the staged channel modules are `nofail`, and the stage-less drop-in stays byte-for-byte.
+     Pinned by `smart_volume_ends_every_channels_chain` and
+     `without_smart_volume_the_chain_is_as_before` (Task 3).
+   - A refusal is caught and the stage taken out on every path that loads it: Task 5's
+     `a_refused_stage_is_taken_out_when_sonar_turns_on`, `a_refused_stage_is_taken_out_on_startup`,
+     `a_stage_refused_at_login_is_taken_out_on_startup` and
+     `a_stage_refused_after_a_streamer_restart_is_taken_out`.
+   - The rollback still works when the channels never come at all:
+     `enable_rolls_back_when_the_channels_never_appear` (now three restarts).
+   - The names were read from PipeWire 1.6.9 (spec Facts), and the text parses
+     (`the_smart_volume_dropin_parses`).
+   - What remains is hardware acceptance step 1. It includes playing into every channel, since a
+     failure when the plugins are instantiated only errors that stream.
 3. **Toggling must never restart PipeWire.** Pinned by the Task 4 test
    `smart_volume_switches_live_without_a_restart`.
 4. **Off must be an exact passthrough** (both bounds 1.0, × 1 is exact in float). Pinned by the
@@ -90,23 +121,35 @@
    - Pinned by `smart_volume_ends_every_channels_chain` (`capture.volumes` on `vol:Mult`, `vol`
      the last node).
    - Heard in hardware acceptance step 2.
-6. **Realtime cost.**
-   - PipeWire connects every meter output, so `ebur128` runs all its modes.
-   - `use-histogram = true` stops the loudness-range calculation from allocating in the audio
-     thread (spec Facts).
-   - Pinned by `the_stage_ends_with_the_volume_and_the_quieter_meter_wins` (Task 2), which checks
-     the node text.
-   - The ~65 MB extra in PipeWire is measured in hardware acceptance step 5.
+6. **Realtime cost.** No test pins it.
+   - PipeWire connects every meter output, so `ebur128` runs all its modes. Every block it sums the
+     400 ms and the 3 s windows from scratch.
+   - Measured on this machine (spec Facts):
+     - 0.12–0.14 ms per side per block on a P-core, 0.23–0.28 ms on an E-core, whatever the
+       quantum;
+     - paid with Smart Volume off, by every playing channel;
+     - with all four playing, about 18% / 36% of the cycle at quantum 256, and 35% / 70% at 128.
+   - `use-histogram = true` (checked in the node text by
+     `the_stage_ends_with_the_volume_and_the_quieter_meter_wins`, Task 2) only stops the
+     loudness range from allocating in the audio thread. It does nothing for this cost.
+   - Hardware acceptance step 6 is the go/no-go: quantum 256 against M3's bar, with 128 recorded.
+     Step 5 records the memory (up to ~65 MB).
 7. **"A game is running" must not depend on the keyboard.** The lighting step can fail (no
-   keyboard), so the game is published before it. Pinned by the Task 6 test
+   keyboard), so the game is published before it. Pinned by the Task 7 test
    `the_running_game_is_shared_even_without_a_keyboard`.
 8. **Games-only stopping.**
    - `SIGINT` after the grace, never `SIGKILL` first; the same recorder if the game comes back;
      no restart storm after the game has gone.
-   - Pinned by the Task 7 tests `games_only_waits_for_a_game_and_stops_after_it_leaves`,
+   - Pinned by the Task 8 tests `games_only_waits_for_a_game_and_stops_after_it_leaves`,
      `a_game_back_within_the_grace_keeps_the_recorder` and `a_crash_after_the_game_is_not_retried`.
-9. **Old settings files.** Pinned by `settings_from_before_smart_volume_still_load` (Task 4) and
-   `games_only_clips_default_off_and_old_files_still_load` (Task 1).
+9. **Old settings files.** Pinned by `settings_from_before_smart_volume_still_load` (Tasks 4 and
+   5) and `games_only_clips_default_off_and_old_files_still_load` (Task 1).
+10. **This departs from the owner's LADSPA fallback** (spec, Status).
+    - The reason given is the hard constraint: the meter ships with the builtins, and a LADSPA
+      plugin can go missing before gglinuxd runs.
+    - What it gives up against `sc4m_1916` is listed in the spec.
+    - Hardware acceptance steps 3–6 are its go/no-go. A no-go means a follow-up plan for the owner's
+      guarded LADSPA path, not a quiet fix.
 
 ---
 
@@ -122,7 +165,7 @@
 - Produces:
   - `SmartLevel { Quiet, Balanced (default), Loud }` (snake_case);
   - `SmartVolume { enabled: bool, level: SmartLevel }` (`#[serde(default)]`, `Copy`, `Default`);
-  - `SmartVolumeState { available: bool, settings: Vec<SmartVolume> }`;
+  - `SmartVolumeState { available: bool, reason: Option<String>, settings: Vec<SmartVolume> }`;
   - `SonarState.smart_volume: SmartVolumeState`;
   - `Request::SetSmartVolume { channel: Channel, settings: SmartVolume }`;
   - `ClipsSettings.games_only: bool`;
@@ -190,8 +233,10 @@ pub struct SmartVolume {
 /// Smart Volume across the channels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmartVolumeState {
-    /// Whether PipeWire has the loudness meter Smart Volume is built on.
+    /// Whether the channels carry Smart Volume's stage, so it can be switched.
     pub available: bool,
+    /// Why not, for the Sonar tab: the meter is missing, or PipeWire refused the stage.
+    pub reason: Option<String>,
     /// Per channel, in `Channel::ALL` order.
     pub settings: Vec<SmartVolume>,
 }
@@ -226,17 +271,17 @@ pub struct SmartVolumeState {
 - `gg-audio/src/sonar.rs`:
   - import `SmartVolume, SmartVolumeState` from `gg_ipc`;
   - `snapshot()` gains
-    `smart_volume: SmartVolumeState { available: false, settings: vec![SmartVolume::default(); Channel::ALL.len()] },`
+    `smart_volume: SmartVolumeState { available: false, reason: None, settings: vec![SmartVolume::default(); Channel::ALL.len()] },`
     (Task 4 replaces it).
-- `gglinuxd/src/clips.rs`: `state()` gains `game: None, waiting: false,` (Task 7).
+- `gglinuxd/src/clips.rs`: `state()` gains `game: None, waiting: false,` (Task 8).
 - `gglinuxd/src/main.rs`: after the `SetStreamMaster` arm,
   `Request::SetSmartVolume { .. } => ResponseData::Error { message: "Smart Volume isn't wired up yet".into() },`
-  (Task 5).
+  (Task 6).
 
 **`fakemouse.rs`:**
 - Import `SmartVolume, SmartVolumeState`.
 - `fake_sonar()` gains
-  `smart_volume: SmartVolumeState { available: true, settings: vec![SmartVolume::default(); 4] },`.
+  `smart_volume: SmartVolumeState { available: true, reason: None, settings: vec![SmartVolume::default(); 4] },`.
 - The arm, after `SetStreamMaster`:
 
 ```rust
@@ -487,12 +532,18 @@ fn gain(db: f32) -> f32 {
         assert_eq!(text.matches(r#"{ control = "vol:Mult" }"#).count(), 4, "the sink's volume comes after the leveller");
         assert_eq!(text.matches("input = ").count(), 4 * (22 + 9));
         assert!(!text.contains("type = ladspa"), "no optional plugin in a channel");
+        assert_eq!(
+            text.matches("{ name = libpipewire-module-filter-chain\n      flags = [ nofail ]").count(),
+            4,
+            "a graph PipeWire refuses must cost the channels, not PipeWire"
+        );
     }
 
     #[test]
     fn without_smart_volume_the_chain_is_as_before() {
         let text = dropin("alsa_output.x", None, false, false).unwrap();
         assert!(!text.contains("ebur128") && !text.contains("capture.volumes") && !text.contains("name = vol "));
+        assert!(!text.contains("nofail"), "the channel modules are as before");
         assert_eq!(
             text.matches("{ type = builtin name = eq_10 label = bq_highshelf control = { \"Freq\" = 16000.0 \"Q\" = 0.707 \"Gain\" = 0.0 } }\n          ]").count(),
             4,
@@ -534,7 +585,17 @@ In `sonar.rs`:
 - `use crate::{eq, smart};`.
 - `dropin` takes `smart_volume: bool`; its doc comment gains "…and Smart Volume at the end of
   every channel's chain when `smart_volume` is set (only when PipeWire has the meter; see
-  [`smart`])." It passes the flag on as `graph = filter_graph(smart_volume)`.
+  [`smart`]). The channel modules are then `nofail`: if PipeWire refuses the stage, it still
+  starts, without the channels, and gglinux takes the stage out." It passes the flag on as
+  `graph = filter_graph(smart_volume)`.
+- With `smart_volume`, each channel module gets a `flags` line, like `stream_feed`'s. The template's
+  first line becomes `    {{ name = libpipewire-module-filter-chain{flags}`, with the argument:
+
+```rust
+            // A graph PipeWire refuses then costs the channels, not PipeWire. Without the
+            // stage the modules are as before, so existing drop-ins stay byte-for-byte.
+            flags = if smart_volume { "\n      flags = [ nofail ]" } else { "" },
+```
 - `filter_graph` becomes:
 
 ```rust
@@ -587,8 +648,8 @@ fn filter_graph(smart_volume: bool) -> String {
 ```
 
 - `dropin`'s call becomes `graph = filter_graph(smart_volume),`.
-- Without `smart_volume`, the output is byte-for-byte what `filter_graph()` printed before. The
-  links are built by the same format, just through the `link` closure.
+- Without `smart_volume`, the output is byte-for-byte what `dropin` printed before: no `flags`
+  line, and the links built by the same format, just through the `link` closure.
 
 - [ ] **Step 4: Run** `cargo test -p gg-audio`, then the workspace tests and clippy. Expected: all
   pass, including `the_smart_volume_dropin_parses` (`/usr/bin/spa-json-dump` is installed here);
@@ -608,7 +669,9 @@ fn filter_graph(smart_volume: bool) -> String {
   - `Settings.smart_volume: BTreeMap<Channel, SmartVolume>` and
     `Settings::smart_volume(Channel) -> SmartVolume`;
   - `Sonar::set_smart_volume(Channel, SmartVolume) -> Result<()>`;
-  - `SonarState.smart_volume` filled in for real.
+  - private `Sonar::{smart_volume_unavailable() -> Option<&'static str>, smart_volume_available() -> bool}`.
+    Task 5 adds the refusal to the first;
+  - `SonarState.smart_volume` filled in for real, `reason` included.
 
 - [ ] **Step 1: Failing tests**
 
@@ -666,7 +729,7 @@ Add:
         assert_eq!(fake.count("systemctl"), restarts, "never a PipeWire restart");
         assert_eq!(settings::load(&settings_path).smart_volume(Channel::Media), off);
         let s = sonar.snapshot().smart_volume;
-        assert!(s.available);
+        assert!(s.available && s.reason.is_none());
         assert_eq!(s.settings, vec![SmartVolume::default(), SmartVolume::default(), off, SmartVolume::default()]);
     }
 
@@ -678,7 +741,9 @@ Add:
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
         assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
-        assert!(!sonar.snapshot().smart_volume.available);
+        let s = sonar.snapshot().smart_volume;
+        assert!(!s.available, "{s:?}");
+        assert!(s.reason.as_deref().is_some_and(|r| r.contains("libspa-filter-graph-plugin-ebur128.so")), "{s:?}");
         let on = SmartVolume { enabled: true, ..SmartVolume::default() };
         assert!(sonar.set_smart_volume(Channel::Game, on).is_err());
         assert!(
@@ -751,8 +816,8 @@ Add:
 `sonar.rs`:
 1. `use crate::{config, eq, mic, mix, smart};`.
 2. `enable` writes
-   `config::dropin(&output, mic_input.as_deref(), self.settings.streamer, self.tools.smart_volume_supported())?`.
-   `expected_dropin` ends `config::dropin(output, mic, self.settings.streamer, self.tools.smart_volume_supported())`.
+   `config::dropin(&output, mic_input.as_deref(), self.settings.streamer, self.smart_volume_available())?`.
+   `expected_dropin` ends `config::dropin(output, mic, self.settings.streamer, self.smart_volume_available())`.
    Both replace Task 3's `false`.
 3. After `set_stream_master`:
 
@@ -760,8 +825,8 @@ Add:
     /// Turn Smart Volume on or off for a channel, or change its level: live,
     /// through the stage's own controls, never a PipeWire restart.
     pub fn set_smart_volume(&mut self, channel: Channel, smart_volume: SmartVolume) -> Result<()> {
-        if !self.tools.smart_volume_supported() {
-            bail!("Smart Volume needs PipeWire's EBU R128 loudness meter, which this PipeWire doesn't have");
+        if let Some(why) = self.smart_volume_unavailable() {
+            bail!("{why}");
         }
         self.settings.smart_volume.insert(channel, smart_volume);
         self.persist();
@@ -769,13 +834,35 @@ Add:
     }
 ```
 
-4. Next to `apply_chain`:
+4. In the internals, after `choose_mic`:
+
+```rust
+    /// Why Smart Volume can't be used here, if it can't.
+    fn smart_volume_unavailable(&self) -> Option<&'static str> {
+        if !self.tools.smart_volume_supported() {
+            Some(
+                "Smart Volume needs PipeWire's EBU R128 loudness meter \
+                 (libspa-filter-graph-plugin-ebur128.so, part of pipewire-audio), \
+                 which this PipeWire doesn't have.",
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Whether the channels carry Smart Volume's stage, or will on the next write.
+    fn smart_volume_available(&self) -> bool {
+        self.smart_volume_unavailable().is_none()
+    }
+```
+
+5. Next to `apply_chain`:
 
 ```rust
     /// Set a channel's Smart Volume controls, if PipeWire has the channel and
     /// the drop-in carries the stage.
     fn apply_smart_volume(&self, channel: Channel) -> Result<()> {
-        if !self.tools.smart_volume_supported() {
+        if !self.smart_volume_available() {
             return Ok(());
         }
         if let Some(node) = self.graph.node(&config::sink_name(channel)) {
@@ -786,7 +873,7 @@ Add:
     }
 ```
 
-5. `apply_levels`: the channel loop becomes
+6. `apply_levels`: the channel loop becomes
 
 ```rust
         for channel in Channel::ALL {
@@ -796,11 +883,12 @@ Add:
 ```
 
    Its doc comment: "Push saved channel volumes, EQ, Smart Volume, the mic and ChatMix to PipeWire."
-6. `snapshot()` replaces Task 1's placeholder with:
+7. `snapshot()` replaces Task 1's placeholder with:
 
 ```rust
             smart_volume: SmartVolumeState {
-                available: self.tools.smart_volume_supported(),
+                available: self.smart_volume_available(),
+                reason: self.smart_volume_unavailable().map(str::to_owned),
                 settings: Channel::ALL.iter().map(|&c| self.settings.smart_volume(c)).collect(),
             },
 ```
@@ -811,7 +899,276 @@ Add:
 
 ---
 
-### Task 5: Smart Volume requests in the daemon
+### Task 5: A stage PipeWire refuses is taken out (`gg-audio`)
+
+**Files:** `crates/gg-audio/src/settings.rs`, `crates/gg-audio/src/sonar.rs`
+
+**Interfaces:**
+- Produces:
+  - `Settings.smart_volume_refused: bool`;
+  - in `sonar.rs`, a module-level `fn channels_up(&Graph) -> bool`, and the private
+    `Sonar::{dropin_mic() -> Option<String>, staged() -> bool, check_stage(), drop_refused_stage(&str, Option<&str>) -> bool}`;
+  - `smart_volume_unavailable()` also reports a refusal.
+- The test `Fake` gains `refuses_stage: RefCell<bool>` (false in `new`).
+- Consumes: Task 3's `nofail` channel modules, and `smart::INPUT` to recognise a drop-in that
+  carries the stage.
+
+- [ ] **Step 1: Failing tests**
+
+In `settings.rs`, `settings_from_before_smart_volume_still_load` gains
+`assert!(!s.smart_volume_refused);`.
+
+In the `sonar.rs` tests:
+- `Fake` gains, after `channels_come_up`:
+
+```rust
+        /// A PipeWire that refuses Smart Volume's stage: with `sv_meter` in the
+        /// drop-in it starts without the channels (their modules are `nofail`).
+        refuses_stage: RefCell<bool>,
+```
+
+  `new` sets `refuses_stage: RefCell::new(false),`. Its `run` becomes:
+
+```rust
+        fn run(&self, argv: &[String]) -> Result<()> {
+            if argv[0] == "systemctl" {
+                let refused = *self.refuses_stage.borrow()
+                    && std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("sv_meter"));
+                *self.up.borrow_mut() = self.channels_come_up && self.dropin.exists() && !refused;
+            }
+            self.runs.borrow_mut().push(argv.to_vec());
+            Ok(())
+        }
+```
+
+- `enable_rolls_back_when_the_channels_never_appear`: its last two assertions become
+
+```rust
+        assert_eq!(fake.count("systemctl"), 3, "to apply, again without Smart Volume's stage, then to undo");
+        let saved = settings::load(&settings_path);
+        assert!(!saved.enabled && !saved.smart_volume_refused, "the stage wasn't to blame");
+```
+
+- `a_current_dropin_is_left_alone`: before `Sonar::new`, add
+  `*fake.up.borrow_mut() = true; // PipeWire already runs this drop-in`. The startup check
+  would otherwise read the fake's channels being absent as a refusal.
+
+Add:
+
+```rust
+    #[test]
+    fn a_refused_stage_is_taken_out_when_sonar_turns_on() {
+        let (settings_path, dropin) = paths("smart-refused");
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.refuses_stage.borrow_mut() = true;
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        sonar.enable().unwrap();
+        assert!(sonar.is_enabled(), "the channels run, without Smart Volume");
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(fake.count("systemctl"), 2, "once with the stage, once without");
+        assert!(settings::load(&settings_path).smart_volume_refused);
+        let s = sonar.snapshot().smart_volume;
+        assert!(!s.available && s.reason.as_deref().is_some_and(|r| r.contains("off and on")), "{s:?}");
+        let on = SmartVolume { enabled: true, ..SmartVolume::default() };
+        assert!(sonar.set_smart_volume(Channel::Game, on).is_err());
+        sonar.disable().unwrap();
+        assert!(!settings::load(&settings_path).smart_volume_refused, "turning Sonar on again tries the stage again");
+    }
+
+    #[test]
+    fn a_refused_stage_is_taken_out_on_startup() {
+        let (settings_path, dropin) = paths("smart-refused-upgrade");
+        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        // Sonar was on before Smart Volume, so the startup upgrade adds the stage.
+        let before = config::dropin(BT, Some(MIC), false, false).unwrap();
+        std::fs::write(&dropin, &before).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.refuses_stage.borrow_mut() = true;
+        let sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        assert!(sonar.is_enabled());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), before);
+        assert_eq!(fake.count("systemctl"), 2, "the upgrade, then the stage taken out");
+        assert!(settings::load(&settings_path).smart_volume_refused);
+        assert!(!sonar.snapshot().smart_volume.available);
+    }
+
+    #[test]
+    fn a_stage_refused_at_login_is_taken_out_on_startup() {
+        let (settings_path, dropin) = paths("smart-refused-login");
+        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        // The drop-in is current, but this PipeWire (a newer one, say) refused it at login.
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, true).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.refuses_stage.borrow_mut() = true;
+        let _sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(fake.count("systemctl"), 1, "one restart, without the stage");
+        assert!(settings::load(&settings_path).smart_volume_refused);
+    }
+
+    #[test]
+    fn a_stage_refused_after_a_streamer_restart_is_taken_out() {
+        let (settings_path, dropin) = paths("smart-refused-streamer");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        sonar.enable().unwrap();
+        *fake.refuses_stage.borrow_mut() = true; // PipeWire was upgraded since
+        sonar.set_streamer(true).unwrap();
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), true, false).unwrap());
+        assert_eq!(fake.count("systemctl"), 3, "on, streamer mode, then without the stage");
+        assert!(sonar.is_enabled() && settings::load(&settings_path).smart_volume_refused);
+    }
+```
+
+- [ ] **Step 2: Run** `cargo test -p gg-audio`. Expected: compile errors (`smart_volume_refused`
+  missing).
+
+- [ ] **Step 3: Implement**
+
+`settings.rs`: `Settings` gains, after `smart_volume`:
+
+```rust
+    /// PipeWire wouldn't make the channels with Smart Volume's stage, so they
+    /// run without it. Only ever set while Sonar is on: turning Sonar off
+    /// forgets it, so turning it on again tries the stage again.
+    pub smart_volume_refused: bool,
+```
+
+`Default` gains `smart_volume_refused: false,`.
+
+`sonar.rs`:
+1. After `APPEAR_POLL`:
+
+```rust
+/// Whether PipeWire has all four channel sinks.
+fn channels_up(g: &Graph) -> bool {
+    Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some())
+}
+```
+
+   `enable` drops its `let channels_up = …;` closure (its `all_up` now calls the function).
+   `set_streamer`'s `ready` becomes
+   `|g: &Graph| channels_up(g) && (!enabled || g.node(config::STREAM_SINK).is_some())`.
+2. `smart_volume_unavailable` gains, before its `else`:
+
+```rust
+        } else if self.settings.smart_volume_refused {
+            Some(
+                "PipeWire wouldn't make the channels with Smart Volume, so they run without it. \
+                 Turn Sonar off and on to try again.",
+            )
+```
+
+3. `expected_dropin` takes its mic from a new helper next to it:
+
+```rust
+    /// The mic the drop-in carries: the saved one, if the plugins exist.
+    fn dropin_mic(&self) -> Option<String> {
+        self.settings.mic_input.clone().filter(|_| self.tools.mic_plugins_present())
+    }
+
+    /// The drop-in this version writes for the saved output and mic.
+    fn expected_dropin(&self, output: &str) -> Result<String> {
+        config::dropin(output, self.dropin_mic().as_deref(), self.settings.streamer, self.smart_volume_available())
+    }
+```
+
+4. After `upgrade_dropin`:
+
+```rust
+    /// Whether the drop-in on disk carries Smart Volume's stage.
+    fn staged(&self) -> bool {
+        std::fs::read_to_string(&self.dropin_path).is_ok_and(|t| t.contains(smart::INPUT))
+    }
+
+    /// On startup with Sonar on, whether or not the drop-in was just rewritten:
+    /// a PipeWire upgraded since may refuse a stage it took before.
+    fn check_stage(&mut self) {
+        let Some(output) = self.settings.output.clone() else { return };
+        if self.staged() && !self.wait_until(channels_up) {
+            let mic = self.dropin_mic();
+            self.drop_refused_stage(&output, mic.as_deref());
+        }
+    }
+
+    /// The channels didn't come. If the drop-in carries Smart Volume's stage
+    /// and PipeWire answers, PipeWire refused the stage: the channel modules
+    /// that carry it are `nofail`, so it started without them. Remember that
+    /// (first, so a crash can't bring the stage back), write the drop-in
+    /// without the stage and restart PipeWire once more. Returns whether the
+    /// channels are up now.
+    fn drop_refused_stage(&mut self, output: &str, mic: Option<&str>) -> bool {
+        if !self.staged() || !self.available {
+            return false;
+        }
+        warn!("PipeWire did not make the Sonar channels with Smart Volume's stage; going on without it");
+        self.settings.smart_volume_refused = true;
+        self.persist();
+        let result = config::dropin(output, mic, self.settings.streamer, false)
+            .and_then(|text| {
+                std::fs::write(&self.dropin_path, text)
+                    .with_context(|| format!("writing {}", self.dropin_path.display()))
+            })
+            .and_then(|()| self.tools.run(&tools::restart_pipewire()));
+        if let Err(e) = result {
+            warn!(error = %format!("{e:#}"), "could not take Smart Volume's stage out");
+            return false;
+        }
+        self.wait_until(channels_up)
+    }
+```
+
+5. `new`: `sonar.upgrade_dropin();` is followed by `sonar.check_stage();`. Its doc comment gains
+   "With Sonar on, it also checks that PipeWire took Smart Volume's stage."
+6. `enable`: after its `if self.settings.enabled { return Ok(()); }`, add
+   `self.settings.smart_volume_refused = false; // Sonar is off: a refusal on record is stale`.
+   The branch for missing channels becomes
+
+```rust
+            if channels_up(&self.graph) {
+                // The mic module is nofail: the channels are fine without it.
+                warn!("the Sonar mic did not load; continuing without it");
+            } else if !self.drop_refused_stage(&output, mic_input.as_deref()) {
+                warn!("Sonar channels did not appear; undoing");
+                let _ = std::fs::remove_file(&self.dropin_path);
+                let _ = self.tools.run(&tools::restart_pipewire());
+                // Not the stage's fault: turning Sonar on again tries it again.
+                self.settings.smart_volume_refused = false;
+                self.persist();
+                bail!(
+                    "PipeWire did not create the Sonar channels within {} s, so the change was undone",
+                    APPEAR_TIMEOUT.as_secs()
+                );
+            }
+            // Otherwise PipeWire refused Smart Volume's stage: the channels run without it.
+```
+
+7. `set_streamer`: the warning after `wait_until(ready)` becomes
+
+```rust
+        if !self.wait_until(ready) {
+            let mic = self.dropin_mic();
+            if channels_up(&self.graph) || !self.drop_refused_stage(&output, mic.as_deref()) {
+                // Never undone for this: the channels may be fine without the stream.
+                warn!(enabled, "the channels or the stream mix did not appear after the restart");
+            }
+        }
+```
+
+8. `disable`: after `self.settings.enabled = false;`, add
+   `self.settings.smart_volume_refused = false; // turning Sonar on again tries the stage again`.
+
+- [ ] **Step 4: Run** the workspace tests and clippy. Expected: `passed=298 failed=0`, the 4 new
+  tests among them; clippy `0`.
+- [ ] **Step 5: Commit** — `gg-audio: a Smart Volume stage PipeWire refuses is taken out`
+
+---
+
+### Task 6: Smart Volume requests in the daemon
 
 **Files:** `crates/gglinuxd/src/sonar.rs`, `crates/gglinuxd/src/main.rs`
 
@@ -843,12 +1200,12 @@ Add:
         ),
 ```
 
-- [ ] **Step 2: Run** the workspace tests and clippy. Expected: `passed=294 failed=0`; clippy `0`.
+- [ ] **Step 2: Run** the workspace tests and clippy. Expected: `passed=298 failed=0`; clippy `0`.
 - [ ] **Step 3: Commit** — `gglinuxd: Smart Volume requests`
 
 ---
 
-### Task 6: Profiles share the running game (`gglinuxd/src/profiles.rs`)
+### Task 7: Profiles share the running game (`gglinuxd/src/profiles.rs`)
 
 **Files:** `crates/gglinuxd/src/profiles.rs`, `crates/gglinuxd/src/main.rs`
 
@@ -857,7 +1214,7 @@ Add:
   - `profiles::spawn(event_tx, keyboard, game_tx: watch::Sender<Option<String>>) -> Handle`;
   - `Controller::new(store, path, port, event_tx, game_tx)`.
 - The published value is the `process` of `pick()`'s rule, as the rule spells it, or `None`.
-- `main.rs` holds the receiver as `_game_rx` until Task 7.
+- `main.rs` holds the receiver as `_game_rx` until Task 8.
 
 - [ ] **Step 1: Failing test.**
 - Import `watch` alongside `broadcast, mpsc, oneshot`.
@@ -937,12 +1294,12 @@ Add:
 
   and `profiles: profiles::spawn(event_tx.clone(), keyboard.clone(), game_tx),`.
 
-- [ ] **Step 4: Run** the workspace tests and clippy. Expected: `passed=295 failed=0`; clippy `0`.
+- [ ] **Step 4: Run** the workspace tests and clippy. Expected: `passed=299 failed=0`; clippy `0`.
 - [ ] **Step 5: Commit** — `gglinuxd: profiles share which game is running`
 
 ---
 
-### Task 7: Games-only clips (`gglinuxd/src/clips.rs`)
+### Task 8: Games-only clips (`gglinuxd/src/clips.rs`)
 
 **Files:** `crates/gglinuxd/src/clips.rs`, `crates/gglinuxd/src/main.rs`
 
@@ -951,7 +1308,7 @@ Add:
   - `clips::spawn(event_tx, games: watch::Receiver<Option<String>>) -> Handle`;
   - `Controller::{set_game(Option<String>), linger_over()}` (async);
   - the fields `game` and `linger_until`.
-- Consumes: Task 6's channel.
+- Consumes: Task 7's channel.
 
 - [ ] **Step 1: Failing tests** (append to the `clips.rs` tests)
 
@@ -1152,14 +1509,14 @@ const GAME_GRACE: Duration = Duration::from_secs(15);
 `main.rs`: rename `_game_rx` to `game_rx`, and `clips: clips::spawn(event_tx.clone(), game_rx),`.
 
 - [ ] **Step 4: Run** `cargo test -p gglinuxd clips`, then the workspace and clippy. Expected: the
-  4 new tests pass with the existing 5 controller and 7 recorder tests; `passed=299 failed=0`;
+  4 new tests pass with the existing 5 controller and 7 recorder tests; `passed=303 failed=0`;
   clippy `0`. Run `cargo test -p gglinuxd clips::tests` 10 times in a row: all green. The stand-in
   can hit `ETXTBSY`; the tests go through `start()`, which retries. Ledger any flake.
 - [ ] **Step 5: Commit** — `gglinuxd: clips only while a game from the rules runs`
 
 ---
 
-### Task 8: The UI
+### Task 9: The UI
 
 **Files:** `ui/src/lib/types.ts`, `ui/src/lib/daemon.svelte.ts`, `ui/src/lib/SonarPanel.svelte`,
 `ui/src/lib/MomentsPanel.svelte`
@@ -1178,8 +1535,10 @@ export interface SmartVolume {
 }
 
 export interface SmartVolumeState {
-  /** Whether PipeWire has the loudness meter Smart Volume is built on. */
+  /** Whether the channels carry Smart Volume's stage, so it can be switched. */
   available: boolean;
+  /** Why not: the meter is missing, or PipeWire refused the stage. */
+  reason: string | null;
   /** Per channel, in Game, Chat, Media, Aux order. */
   settings: SmartVolume[];
 }
@@ -1220,11 +1579,8 @@ export interface SmartVolumeState {
       <section>
         <div class="head"><h4>Smart Volume</h4></div>
         {#if !sonar.smart_volume.available}
-          <p class="hint">
-            Smart Volume needs PipeWire's loudness meter
-            (<code>libspa-filter-graph-plugin-ebur128.so</code>, part of <code>pipewire-audio</code>),
-            which this PipeWire doesn't have.
-          </p>
+          <!-- The daemon says why: the meter is missing, or PipeWire refused the stage. -->
+          <p class="hint">{sonar.smart_volume.reason ?? "Smart Volume isn't available."}</p>
         {:else}
           {#each sonar.channels as c, i (c.channel)}
             {@const sv = sonar.smart_volume.settings[i]}
@@ -1295,7 +1651,7 @@ and replace the last two lines of the `.meta` paragraph after it,
 
 ---
 
-### Task 9: Docs: README, and the PLAN.md honesty pass
+### Task 10: Docs: README, and the PLAN.md honesty pass
 
 **Files:** `README.md`, `PLAN.md`
 
@@ -1307,7 +1663,8 @@ and replace the last two lines of the `.meta` paragraph after it,
 ```markdown
 **Smart Volume** needs no extra package: it is built from PipeWire's own EBU R128 loudness meter
 (`libspa-filter-graph-plugin-ebur128.so`, part of `pipewire-audio` on Arch). On a PipeWire without
-it, the channels stay exactly as they were and the Sonar tab says Smart Volume is unavailable.
+it, the channels stay exactly as they were and the Sonar tab says Smart Volume is unavailable. If
+PipeWire won't build the channels with it, gglinux takes it out again and the Sonar tab says so.
 ```
 
 - [ ] **Step 2: PLAN.md, M6's split "Accept:" sentence.** Today the M6 paragraph ends
@@ -1340,8 +1697,11 @@ against an unseen sysfs layout would be untested guesswork.
 **Smart Volume** per Sonar channel (off, Quiet, Balanced or Loud), a loudness leveller at the end
 of each channel's chain built only from PipeWire's own filters and switched live, with no restart;
 and **games-only clips**, which keep the replay buffer only while a program from the game rules
-runs. Event-based highlights (kills and the like) stay out of scope. Not yet verified: Sonar
-hasn't run live, and `gpu-screen-recorder` isn't installed.
+runs. Event-based highlights (kills and the like) stay out of scope. Smart Volume stands in for
+the LADSPA compressor the owner named as the fallback, so it's on trial. Its sound and its CPU cost
+(about 1–2 ms of every cycle with all four channels playing, paid even when it's off) are a
+go/no-go at Sonar's first live test. Not yet verified: Sonar hasn't run live, and
+`gpu-screen-recorder` isn't installed.
 ```
 
 - [ ] **Step 5: PLAN.md, the parity checklist.** Replace everything from
@@ -1373,6 +1733,7 @@ owner's decision).
   library: not planned.
 - Virtual mic with RNNoise suppression, gate and compressor (ClearCast's job): **built** (M3c).
 - Smart Volume: **built** (M7e) — a loudness leveller made of PipeWire's own filters, per channel.
+  Its sound and CPU cost are a go/no-go at Sonar's first live test.
 - Streamer mode: **built** (M7c).
 - Virtual surround: **skipped**.
 
@@ -1408,7 +1769,7 @@ highlights: **skipped**.
 - Keep the document's voice: plain sentences, no new emphasis styles.
 
 - [ ] **Step 6: Final checks and commit.**
-- Run the workspace tests and clippy, and `npm run check`. Expected: `passed=299 failed=0`;
+- Run the workspace tests and clippy, and `npm run check`. Expected: `passed=303 failed=0`;
   clippy `0`; 0 errors, 0 warnings.
 - `git diff --stat` shows only `README.md` and `PLAN.md`.
 - Commit — `docs: Smart Volume, games-only clips, and an honest parity checklist`
@@ -1417,20 +1778,52 @@ highlights: **skipped**.
 
 **Smart Volume** (with Sonar's first live test; turning Sonar on restarts PipeWire, so it's the
 owner's call):
-1. Turn Sonar on. The four channels show as present in the Sonar tab. In
-   `journalctl --user -u pipewire -b | grep -iE "filter-chain|ebur128|lufs2gain|clamp|error"` there
-   is no error about the channels' graph. `pw-dump | grep -c '"gglinux_game"'` is non-zero.
+1. Turn Sonar on.
+   - The four channels show as present in the Sonar tab, and Smart Volume is offered there: no
+     "PipeWire wouldn't make the channels…" note, and no `"smart_volume_refused": true` in
+     `sonar.json`. `pw-dump | grep -c '"gglinux_game"'` is non-zero.
+   - Play a few seconds into each channel in turn, for example
+     `pw-play --target gglinux_game <file>`, then `gglinux_chat`, `gglinux_media`, `gglinux_aux`.
+     Each is heard. This catches a failure when a channel's plugins are instantiated, which errors
+     only that stream.
+   - `journalctl --user -u pipewire -b | grep -iE "filter-chain|ebur128|lufs2gain|clamp|can't start graph|error"`
+     shows no error about the channels' graph.
+   - If Smart Volume was refused, the channels run without it. Note the journal's error: it's what
+     a fix needs.
 2. With Smart Volume **on** for Game:
    - the Game volume slider still changes the loudness;
    - the keyboard's volume keys (Game is the default output) do too;
    - muting Game mutes it.
-3. Play something with quiet dialogue and loud bangs on Game: Balanced brings the dialogue up and
-   the bangs down. Switching on, off and between levels is instant, with no gap in the sound
-   (no PipeWire restart).
-4. Listen for pumping or a rough, stepped sound on each level, especially Loud. Note the level and
-   what was playing.
-5. Measure `ps -o rss= -C pipewire` before and after Sonar is on (about +65 MB is expected). In
-   `pw-top`, the channels show no xruns.
+3. **(go/no-go)** Play something with quiet dialogue and loud bangs on Game: Balanced brings the
+   dialogue up and the bangs down. Switching on, off and between levels is instant, with no gap
+   in the sound (no PipeWire restart).
+4. **(go/no-go)** Listen for pumping or a rough, stepped sound on each level, especially Loud. Note
+   the level and what was playing.
+5. **(go/no-go)** Memory: measure `ps -o rss= -C pipewire` before Sonar is on, and again with all
+   four channels playing. About +65 MB is expected (about 16 MB per playing channel, at 48 kHz).
+6. **(go/no-go)** CPU at a small quantum.
+   - Turn Smart Volume **off** on all four channels: the meters run anyway.
+   - Keep something playing into each channel, as in step 1, looped.
+   - Run `pw-metadata -n settings 0 clock.force-quantum 256` for a few minutes, then `128`, then
+     `0` to undo.
+   - In `pw-top`, note for the four `gglinux_*` channel nodes the BUSY and B/Q columns, and the
+     ERR (xrun) count, at each quantum.
+   - Expected BUSY per channel: about 0.25 ms when the data thread is on a P-core, 0.5 ms on an
+     E-core (spec Facts).
+   - Go: no new xruns at quantum 256, M3's bar ("xruns clean at quantum 512→256"). Quantum 128 is
+     recorded, not judged.
+
+**The go/no-go** (steps 3–6):
+- **Go:** Smart Volume stays as built.
+- **No-go:**
+  - Note in PLAN.md which step failed, and what was heard or measured.
+  - Write a follow-up plan for the owner's guarded LADSPA path (spec, "The owner's LADSPA
+    fallback"): `sc4m_1916` per side behind a plugin-file check, `nofail` channel modules, the
+    startup upgrade and the refusal check. `smart.rs`'s nodes, links, props and plugin check
+    change; the rest carries over.
+- **The owner's other choices**, which need the owner's word: drop Smart Volume, or put the stage
+  only in channels that have it on (one PipeWire restart the first time it's turned on for a
+  channel).
 
 **Games-only clips:**
 1. `sudo pacman -S gpu-screen-recorder`.
