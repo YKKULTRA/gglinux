@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Install gglinux for the current user: binary -> ~/.local/bin, systemd --user unit,
-# and the udev rule that grants your desktop session access to SteelSeries devices.
+# Install gglinux for the current user: the daemon and ggctl -> ~/.local/bin, systemd --user
+# unit, the UI with its desktop entry, and the udev rule that grants your desktop session access
+# to SteelSeries devices.
 #
-# Usage: ./scripts/install-local.sh [--no-udev] [--no-build] [--reactive]
+# Usage: ./scripts/install-local.sh [--no-udev] [--no-build] [--no-ui] [--reactive]
+#
+# --no-ui skips building and installing the UI (it needs npm and webkit2gtk-4.1).
 #
 # --reactive also installs the optional rule that lets reactive lighting see key presses on
 # the Apex Pro TKL Gen 3 — which lets any program you run read what you type on it.
@@ -11,11 +14,13 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 do_udev=1
 do_build=1
+do_ui=1
 do_reactive=0
 for arg in "$@"; do
   case "$arg" in
     --no-udev)  do_udev=0 ;;
     --no-build) do_build=0 ;;
+    --no-ui)    do_ui=0 ;;
     --reactive) do_reactive=1 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
@@ -26,13 +31,28 @@ if [[ $do_build -eq 1 ]]; then
   cargo build --release --manifest-path "$repo/Cargo.toml" --bins
 fi
 
-echo "==> installing gglinuxd -> ~/.local/bin"
+echo "==> installing gglinuxd and ggctl -> ~/.local/bin"
 install -Dm755 "$repo/target/release/gglinuxd" "$HOME/.local/bin/gglinuxd"
+install -Dm755 "$repo/target/release/ggctl" "$HOME/.local/bin/ggctl"
 
 echo "==> installing systemd --user unit"
 install -Dm644 "$repo/data/systemd/gglinuxd.service" \
   "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/gglinuxd.service"
 systemctl --user daemon-reload
+
+if [[ $do_ui -eq 1 ]]; then
+  if [[ $do_build -eq 1 ]]; then
+    echo "==> building the UI (release)"
+    (cd "$repo/ui" && npm ci && npm run tauri build -- --no-bundle)
+  fi
+  echo "==> installing the UI -> ~/.local/bin/gglinux"
+  install -Dm755 "$repo/ui/src-tauri/target/release/gglinux" "$HOME/.local/bin/gglinux"
+  # ~/.local/bin may not be on the desktop session's PATH, so the entry names the full path.
+  sed "s|^Exec=.*|Exec=\"$HOME/.local/bin/gglinux\"|" "$repo/data/gglinux.desktop" \
+    | install -Dm644 /dev/stdin "$HOME/.local/share/applications/gglinux.desktop"
+  install -Dm644 "$repo/ui/src-tauri/icons/128x128.png" \
+    "$HOME/.local/share/icons/hicolor/128x128/apps/gglinux.png"
+fi
 
 if [[ $do_udev -eq 1 ]]; then
   echo "==> installing udev rule (needs root)"
@@ -66,3 +86,10 @@ Check it:
     systemctl --user status gglinuxd
     journalctl --user -u gglinuxd -f
 EOF
+if [[ $do_ui -eq 1 ]]; then
+  cat <<EOF
+
+Open gglinux from the app menu. To have it start with your desktop, the daemon included,
+tick Settings → "Start gglinux when I log in".
+EOF
+fi
