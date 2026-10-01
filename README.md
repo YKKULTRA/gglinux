@@ -53,7 +53,8 @@ systemctl --user enable --now gglinuxd
 `gglinuxd`, `ggctl` and the UI (`gglinux`) go to `~/.local/bin`, and the UI gets a desktop entry and
 an icon, so it's in your app menu. Building the UI needs npm and the packages under [UI](#ui). To
 start with your desktop, tick **Settings → Start gglinux when I log in**: it enables the daemon's
-unit and starts the UI hidden in the tray.
+unit and starts the UI hidden in the tray. Opening gglinux from the menu while it's in the tray
+brings up its window rather than starting a second copy.
 
 Without that udev rule the hidraw nodes stay `root:root 0600`: devices will still be *listed* (that
 only reads sysfs) but cannot be opened or controlled. The rule opens only control interfaces — never

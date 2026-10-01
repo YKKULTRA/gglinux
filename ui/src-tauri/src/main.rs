@@ -194,6 +194,11 @@ fn set_connected(app: &AppHandle, bridge: &Bridge, connected: bool) {
     }
 }
 
+/// Autostart launches gglinux with `--hidden`: stay in the tray until asked.
+fn hidden(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--hidden")
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -253,6 +258,16 @@ fn main() {
     let bridge = Arc::new(Bridge::default());
 
     tauri::Builder::default()
+        // Registered first, as the plugin asks. A second launch (the app menu
+        // while the autostarted copy sits in the tray) hands its arguments to
+        // the running copy over D-Bus and exits, so there's only ever one tray
+        // icon and one daemon connection. The running copy shows its window,
+        // unless that launch was a --hidden one too.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !hidden(&args) {
+                show_main(app);
+            }
+        }))
         .manage(Arc::clone(&bridge))
         .invoke_handler(tauri::generate_handler![
             daemon_status,
@@ -265,9 +280,8 @@ fn main() {
         ])
         .setup(move |app| {
             build_tray(app.handle())?;
-            // The window starts invisible. Autostart passes --hidden: stay in
-            // the tray until asked.
-            if !std::env::args().any(|a| a == "--hidden") {
+            // The window starts invisible.
+            if !hidden(&std::env::args().collect::<Vec<_>>()) {
                 show_main(app.handle());
             }
             tauri::async_runtime::spawn(bridge_loop(app.handle().clone(), bridge));
@@ -287,7 +301,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::open_folder;
+    use super::{hidden, open_folder};
+
+    #[test]
+    fn only_hidden_launches_stay_in_the_tray() {
+        // Arguments as both launches see them: the program path first.
+        let args = |line: &str| line.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert!(hidden(&args("/usr/bin/gglinux --hidden")));
+        assert!(!hidden(&args("/usr/bin/gglinux")));
+        assert!(!hidden(&args("/opt/--hidden/gglinux")));
+    }
 
     #[test]
     fn open_folder_refuses_anything_but_a_folder() {
