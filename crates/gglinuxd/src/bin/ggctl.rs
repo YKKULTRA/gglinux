@@ -1,4 +1,5 @@
-//! CLI client for gglinuxd. Run the daemon, then `cargo run -p gglinuxd --example ggctl`.
+//! CLI client for gglinuxd. Installed as `ggctl`; from a checkout:
+//! `cargo run -p gglinuxd --bin ggctl`.
 //!
 //! ```text
 //! ggctl                                   # watch: device list, then live events
@@ -8,7 +9,10 @@
 //! ggctl mouse polling 1000 [--save]
 //! ggctl mouse buttons button1,button2,button3,button4,button5,dpi [--save]
 //! ggctl mouse save                        # commit whatever is applied to onboard memory
-//! ggctl clip save                         # save the instant replay
+//! ggctl clip save                         # save the instant replay (bind this to a key)
+//! ggctl profile list                      # saved lighting profiles
+//! ggctl profile apply <name>
+//! ggctl gamesense test|on|off
 //! ```
 //!
 //! Prefer this over `gg-device-mouse`'s `mousectl` whenever the daemon is running:
@@ -23,24 +27,16 @@ use gg_ipc::{DpiStage, Request, RequestFrame, ResponseData, ServerMessage};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let save = args.iter().any(|a| a == "--save");
-    let positional: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .filter(|a| !a.starts_with("--"))
-        .collect();
+    // Before connecting, so a typo fails the same whether or not the daemon runs.
+    let action = parse(&args)?;
 
     let path = gg_ipc::socket_path();
     let stream = UnixStream::connect(&path)
         .with_context(|| format!("connecting to {} — is gglinuxd running?", path.display()))?;
 
-    let request = match positional.split_first() {
-        // No arguments: stream everything the daemon sends until it goes quiet.
-        None => return watch(stream),
-        Some((&"mouse", rest)) => mouse_request(rest, &args, save)?,
-        Some((&"clip", ["save"])) => Request::SaveClip,
-        Some((&"clip", _)) => bail!("usage: ggctl clip save"),
-        Some((other, _)) => bail!("unknown command '{other}' (try: mouse, clip, or no argument to watch)"),
+    let request = match action {
+        Action::Watch => return watch(stream),
+        Action::Send(request) => request,
     };
 
     match send(stream, request)? {
@@ -73,15 +69,57 @@ fn main() -> Result<()> {
                 None => println!("applied:   nothing yet this session (mouse is on its onboard settings)"),
             }
         }
+        ResponseData::Profiles { state } => {
+            for name in state.profiles {
+                println!("{name}");
+            }
+        }
         ResponseData::Success => {
             println!("ok");
-            if !save && positional.get(1).is_some_and(|c| *c != "save") {
+            // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.
+            let save = args.iter().any(|a| a == "--save");
+            if !save && matches!(positional(&args).as_slice(), ["mouse", command, ..] if *command != "save") {
                 println!("note: not saved — pass --save to keep this across a power cycle");
             }
         }
         other => println!("{other:?}"),
     }
     Ok(())
+}
+
+/// What the command line asks for.
+enum Action {
+    /// Stream everything the daemon sends until it goes quiet.
+    Watch,
+    Send(Request),
+}
+
+fn parse(args: &[String]) -> Result<Action> {
+    let save = args.iter().any(|a| a == "--save");
+    Ok(Action::Send(match positional(args).split_first() {
+        None => return Ok(Action::Watch),
+        Some((&"mouse", rest)) => mouse_request(rest, args, save)?,
+        Some((&"clip", ["save"])) => Request::SaveClip,
+        Some((&"clip", _)) => bail!("usage: ggctl clip save"),
+        Some((&"profile", ["list"])) => Request::GetProfiles,
+        // Names may have spaces, so `profile apply Late Night` needs no quotes.
+        Some((&"profile", ["apply", name @ ..])) if !name.is_empty() => {
+            Request::ApplyProfile { name: name.join(" ") }
+        }
+        Some((&"profile", _)) => bail!("usage: ggctl profile list | ggctl profile apply <name>"),
+        Some((&"gamesense", ["test"])) => Request::GamesenseTest,
+        Some((&"gamesense", ["on"])) => Request::SetGamesenseEnabled { enabled: true },
+        Some((&"gamesense", ["off"])) => Request::SetGamesenseEnabled { enabled: false },
+        Some((&"gamesense", _)) => bail!("usage: ggctl gamesense test|on|off"),
+        Some((other, _)) => {
+            bail!("unknown command '{other}' (try: mouse, clip, profile, gamesense, or nothing to watch)")
+        }
+    }))
+}
+
+/// The arguments that aren't `--flags`.
+fn positional(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).filter(|a| !a.starts_with("--")).collect()
 }
 
 fn mouse_request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
@@ -180,4 +218,51 @@ fn parse_stages(spec: &str) -> Result<Vec<DpiStage>> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    fn sends(line: &str) -> Request {
+        match parse(&args(line)).unwrap() {
+            Action::Send(r) => r,
+            Action::Watch => panic!("{line} parsed as watch"),
+        }
+    }
+
+    #[test]
+    fn no_arguments_watches() {
+        assert!(matches!(parse(&[]).unwrap(), Action::Watch));
+    }
+
+    #[test]
+    fn the_new_commands_map_to_their_requests() {
+        assert!(matches!(sends("clip save"), Request::SaveClip));
+        assert!(matches!(sends("profile list"), Request::GetProfiles));
+        assert!(matches!(sends("gamesense test"), Request::GamesenseTest));
+        assert!(matches!(sends("gamesense on"), Request::SetGamesenseEnabled { enabled: true }));
+        assert!(matches!(sends("gamesense off"), Request::SetGamesenseEnabled { enabled: false }));
+        assert!(matches!(sends("mouse"), Request::GetMouseState));
+        assert!(matches!(sends("mouse polling 1000"), Request::SetMousePolling { hz: 1000, save: false }));
+    }
+
+    #[test]
+    fn profile_names_may_contain_spaces() {
+        match sends("profile apply Late Night") {
+            Request::ApplyProfile { name } => assert_eq!(name, "Late Night"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn mistakes_are_errors() {
+        for bad in ["clip", "clip delete", "profile", "profile apply", "gamesense maybe", "frobnicate"] {
+            assert!(parse(&args(bad)).is_err(), "{bad}");
+        }
+    }
 }

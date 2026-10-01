@@ -93,15 +93,19 @@ sudo pacman -S noise-suppression-for-voice swh-plugins   # Arch; both are in [ex
 
 Everything else works without them, and the mic appears on the next start once they are installed.
 
-Poke at it without the UI, via the `ggctl` client:
+Poke at it without the UI, or from scripts and keyboard shortcuts, with `ggctl`. Installed, it's
+plain `ggctl …`; from a checkout:
 
 ```sh
-cargo run -p gglinuxd --example ggctl                    # device list + live hotplug events
-cargo run -p gglinuxd --example ggctl -- mouse           # battery + applied settings
-cargo run -p gglinuxd --example ggctl -- mouse dpi 800,1600 --select 0 --save
-cargo run -p gglinuxd --example ggctl -- mouse polling 1000 --save
-cargo run -p gglinuxd --example ggctl -- mouse buttons button1,button2,button3,button4,button5,dpi
-cargo run -p gglinuxd --example ggctl -- clip save       # save the instant replay
+cargo run -p gglinuxd --bin ggctl                       # device list + live hotplug events
+cargo run -p gglinuxd --bin ggctl -- mouse              # battery + applied settings
+cargo run -p gglinuxd --bin ggctl -- mouse dpi 800,1600 --select 0 --save
+cargo run -p gglinuxd --bin ggctl -- mouse polling 1000 --save
+cargo run -p gglinuxd --bin ggctl -- mouse buttons button1,button2,button3,button4,button5,dpi
+cargo run -p gglinuxd --bin ggctl -- clip save          # save the instant replay (bind it to a key)
+cargo run -p gglinuxd --bin ggctl -- profile list       # saved lighting profiles, one per line
+cargo run -p gglinuxd --bin ggctl -- profile apply Late Night
+cargo run -p gglinuxd --bin ggctl -- gamesense test     # also: gamesense on, gamesense off
 ```
 
 Settings apply immediately but are lost when the mouse sleeps unless you pass `--save`, which commits
