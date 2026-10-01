@@ -9,6 +9,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   Channel,
+  ClipsSettings,
+  ClipsState,
   DeviceInfo,
   DpiStage,
   EqBand,
@@ -55,6 +57,8 @@ class Daemon {
   gamesense = $state<GameSenseState | null>(null);
   /** Profiles and game rules; null until first fetched. */
   profiles = $state<ProfilesState | null>(null);
+  /** The replay recorder, its settings and the clip library; null until first fetched. */
+  clips = $state<ClipsState | null>(null);
   /** Last transport/protocol error, for surfacing in the UI. */
   lastError = $state<string | null>(null);
 
@@ -80,6 +84,7 @@ class Daemon {
         this.keyboard = null;
         this.gamesense = null;
         this.profiles = null;
+        this.clips = null;
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -282,6 +287,38 @@ class Daemon {
     return this.#profilesCommand({ method: "set_game_rules", params: { rules } });
   }
 
+  async getClipsState(): Promise<ClipsState> {
+    const res = await this.request({ method: "get_clips_state" });
+    if (res.type !== "clips") throw new Error(`unexpected response: ${res.type}`);
+    this.clips = res.state;
+    return res.state;
+  }
+
+  /** Restarts the recorder, which can take it 4 s to stop, so it gets a longer timeout. */
+  setClipsSettings(settings: ClipsSettings): Promise<void> {
+    return this.#clipsCommand({ method: "set_clips_settings", params: { settings } }, 10000);
+  }
+
+  /** The new file shows up a moment later, in a `clips_changed` event. */
+  saveClip(): Promise<void> {
+    return this.#clipsCommand({ method: "save_clip" });
+  }
+
+  deleteClip(name: string): Promise<void> {
+    return this.#clipsCommand({ method: "delete_clip", params: { name } });
+  }
+
+  /** Show a folder in the file manager. The UI process does this, not the daemon. */
+  async openFolder(path: string): Promise<void> {
+    await invoke("open_folder", { path });
+  }
+
+  async #clipsCommand(req: Request, timeoutMs?: number): Promise<void> {
+    const res = await this.request(req, timeoutMs);
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getClipsState();
+  }
+
   async #profilesCommand(req: Request): Promise<void> {
     const res = await this.request(req);
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
@@ -348,6 +385,9 @@ class Daemon {
       case "profiles_changed":
         // Events carry no running-program list; keep the last one fetched.
         this.profiles = { ...ev.data.state, running: this.profiles?.running ?? [] };
+        break;
+      case "clips_changed":
+        this.clips = ev.data.state;
         break;
     }
   }

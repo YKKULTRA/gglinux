@@ -274,6 +274,46 @@ export interface ProfilesState {
   running: string[];
 }
 
+export type ClipQuality = "medium" | "high" | "very_high" | "ultra";
+
+export interface ClipsSettings {
+  /** Off by default: while on, the screen is kept in a rolling buffer. */
+  enabled: boolean;
+  /** How much a saved clip holds, 5..=300 s. */
+  seconds: number;
+  /** 15..=240 */
+  fps: number;
+  quality: ClipQuality;
+  desktop_audio: boolean;
+  mic: boolean;
+  /** Absolute folder; null means `~/Videos/gglinux`. */
+  dir: string | null;
+}
+
+export interface ClipInfo {
+  name: string;
+  bytes: number;
+  /** Seconds since the Unix epoch. */
+  modified: number;
+}
+
+export interface ClipsState {
+  /** `gpu-screen-recorder` is installed. */
+  available: boolean;
+  enabled: boolean;
+  /** The recorder is running now. */
+  recording: boolean;
+  settings: ClipsSettings;
+  /** The folder clips go to. */
+  dir: string;
+  /** Newest first. */
+  clips: ClipInfo[];
+  /** The last thing that went wrong. */
+  error: string | null;
+  /** The hotkey KDE bound, if any. */
+  hotkey: string | null;
+}
+
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
 export type Request =
   | { method: "list_devices" }
@@ -309,7 +349,11 @@ export type Request =
   | { method: "save_profile"; params: { name: string } }
   | { method: "apply_profile"; params: { name: string } }
   | { method: "delete_profile"; params: { name: string } }
-  | { method: "set_game_rules"; params: { rules: GameRule[] } };
+  | { method: "set_game_rules"; params: { rules: GameRule[] } }
+  | { method: "get_clips_state" }
+  | { method: "set_clips_settings"; params: { settings: ClipsSettings } }
+  | { method: "save_clip" }
+  | { method: "delete_clip"; params: { name: string } };
 
 export interface RequestFrame {
   id: number;
@@ -325,6 +369,7 @@ export type ResponseData =
   | { type: "keyboard"; state: KeyboardState }
   | { type: "gamesense"; state: GameSenseState }
   | { type: "profiles"; state: ProfilesState }
+  | { type: "clips"; state: ClipsState }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -337,7 +382,8 @@ export type DaemonEvent =
   | { event: "sonar_changed"; data: { state: SonarState } }
   | { event: "keyboard_changed"; data: { state: KeyboardState } }
   | { event: "gamesense_changed"; data: { state: GameSenseState } }
-  | { event: "profiles_changed"; data: { state: ProfilesState } };
+  | { event: "profiles_changed"; data: { state: ProfilesState } }
+  | { event: "clips_changed"; data: { state: ClipsState } };
 
 export type ServerMessage =
   | { kind: "response"; id: number; result: ResponseData }
