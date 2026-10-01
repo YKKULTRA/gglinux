@@ -321,11 +321,6 @@ class Daemon {
     return this.#clipsCommand({ method: "delete_clip", params: { name } });
   }
 
-  /** Show a folder in the file manager. The UI process does this, not the daemon. */
-  async openFolder(path: string): Promise<void> {
-    await invoke("open_folder", { path });
-  }
-
   async #clipsCommand(req: Request, timeoutMs?: number): Promise<void> {
     const res = await this.request(req, timeoutMs);
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);

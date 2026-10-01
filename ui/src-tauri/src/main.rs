@@ -9,10 +9,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// Only its tests use it until the Tauri commands for it are wired up.
-#[allow(dead_code)]
 mod system;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,6 +73,84 @@ fn open_folder(path: String) -> Result<(), String> {
     // Reap it when it exits, so each click doesn't leave a zombie behind.
     std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// `$XDG_CONFIG_HOME/autostart` (so usually `~/.config/autostart`): the folder
+/// beside gglinux's own config folder.
+fn autostart_dir() -> PathBuf {
+    gg_ipc::config_dir().with_file_name("autostart")
+}
+
+/// Run a program to the end; when it fails, its stderr is the error.
+fn run_quietly(argv: &[&str]) -> Result<(), String> {
+    let out = std::process::Command::new(argv[0])
+        .args(&argv[1..])
+        .output()
+        .map_err(|e| format!("{}: {e}", argv[0]))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(if err.is_empty() {
+        format!("{} {}", argv[0], out.status)
+    } else {
+        err
+    })
+}
+
+#[tauri::command]
+fn get_autostart() -> bool {
+    system::autostart_on(&autostart_dir())
+}
+
+/// Off the main thread, like `import_settings`: `systemctl` can take a moment.
+#[tauri::command(async)]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    system::set_autostart(&autostart_dir(), &exe, enabled, &run_quietly)
+}
+
+/// Write a backup of every setting; returns its path.
+#[tauri::command]
+fn export_settings() -> Result<String, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    let bundle = system::export(&gg_ipc::config_dir(), now);
+    let path =
+        system::export_dir(&home()).join(format!("gglinux-backup-{}.json", system::stamp(now)));
+    let text = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Restore a backup and restart the daemon so it loads it; returns what
+/// happened, for the UI. Off the main thread, since the restart waits for the
+/// daemon to stop and start again.
+#[tauri::command(async)]
+fn import_settings(text: String) -> Result<String, String> {
+    let wrote = system::import(&gg_ipc::config_dir(), &text)?;
+    if wrote.is_empty() {
+        return Ok("The backup holds no settings, so nothing changed.".into());
+    }
+    let restarted =
+        run_quietly(&["systemctl", "--user", "try-restart", "gglinuxd.service"]).is_ok();
+    Ok(format!(
+        "Restored {}. {}",
+        wrote.join(", "),
+        if restarted {
+            "gglinuxd restarted to load them."
+        } else {
+            "Restart gglinuxd to load them."
+        }
+    ))
 }
 
 /// Connect, pump lines to the frontend, and retry forever.
@@ -180,10 +257,19 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             daemon_status,
             daemon_send,
-            open_folder
+            open_folder,
+            get_autostart,
+            set_autostart,
+            export_settings,
+            import_settings
         ])
         .setup(move |app| {
             build_tray(app.handle())?;
+            // The window starts invisible. Autostart passes --hidden: stay in
+            // the tray until asked.
+            if !std::env::args().any(|a| a == "--hidden") {
+                show_main(app.handle());
+            }
             tauri::async_runtime::spawn(bridge_loop(app.handle().clone(), bridge));
             Ok(())
         })

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Instant replay: the recorder switch and settings, save, and the clip library.
 
+  import { openFolder } from "./app";
   import { daemon } from "./daemon.svelte";
   import type { ClipQuality, ClipsSettings } from "./types";
 
@@ -91,7 +92,7 @@
     <section>
       <div class="head">
         <h4>Clips</h4>
-        <button class="ghost" onclick={() => run(() => daemon.openFolder(st!.dir))}>Open folder</button>
+        <button class="ghost" onclick={() => run(() => openFolder(st!.dir))}>Open folder</button>
       </div>
       {#if st.clips.length === 0}
         <p class="meta">No clips yet in <code>{st.dir}</code>.</p>
