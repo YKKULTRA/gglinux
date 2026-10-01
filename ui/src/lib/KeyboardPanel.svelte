@@ -244,7 +244,7 @@
           {#if kb.reactive === "no_access"}
             <div class="notice">
               <p>{ACCESS_WARNING}</p>
-              <p>To allow it: <code>./scripts/install-local.sh --no-build --reactive</code></p>
+              <p>To allow it: <code>./scripts/install-local.sh --no-build --no-ui --reactive</code></p>
             </div>
           {/if}
         {/if}
