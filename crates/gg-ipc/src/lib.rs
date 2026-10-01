@@ -348,6 +348,18 @@ pub struct MicState {
     pub settings: MicSettings,
 }
 
+/// Streamer mode: a second mix of the channels, on the "gglinux Stream" device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamMix {
+    pub enabled: bool,
+    /// Whether PipeWire has the stream device now.
+    pub present: bool,
+    /// Per-channel stream level, 0..=1, in `Channel::ALL` order.
+    pub volumes: Vec<f32>,
+    /// The stream's master level, 0..=1.
+    pub master: f32,
+}
+
 /// Sonar as the daemon sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SonarState {
@@ -365,6 +377,7 @@ pub struct SonarState {
     pub eq: Vec<ChannelEq>,
     pub headphone: HeadphoneEq,
     pub mic: MicState,
+    pub stream: StreamMix,
 }
 
 /// An sRGB colour.
@@ -729,6 +742,12 @@ pub enum Request {
     SetMicSettings { settings: MicSettings },
     /// 0..=1.
     SetMicVolume { volume: f32 },
+    /// Turn streamer mode on or off (restarts PipeWire while Sonar is on).
+    SetStreamer { enabled: bool },
+    /// A channel's level in the stream mix, 0..=1.
+    SetStreamVolume { channel: Channel, volume: f32 },
+    /// The stream mix's master level, 0..=1.
+    SetStreamMaster { volume: f32 },
     /// Keyboard connection, layout and lighting.
     GetKeyboardState,
     /// Replace the keyboard lighting.

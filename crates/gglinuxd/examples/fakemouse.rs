@@ -30,7 +30,7 @@ use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
     DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
-    MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState,
+    MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SonarState, StreamMix,
 };
 
 /// How often to push a `mouse_battery` notification.
@@ -275,6 +275,10 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.sonar.mic.volume = Some(volume);
             ResponseData::Success
         }
+        // Played along with in Task 3.
+        Request::SetStreamer { .. } | Request::SetStreamVolume { .. } | Request::SetStreamMaster { .. } => {
+            error("streamer mode is not faked yet".into())
+        }
         Request::GetKeyboardState => ResponseData::Keyboard { state: s.keyboard.clone() },
         Request::SetLighting { lighting } => {
             // Like a machine without the optional udev rule, so the UI's hint shows.
@@ -418,6 +422,7 @@ fn fake_sonar() -> SonarState {
             volume: Some(1.0),
             settings: MicSettings::default(),
         },
+        stream: StreamMix { enabled: false, present: false, volumes: vec![1.0; 4], master: 1.0 },
     }
 }
 
@@ -498,6 +503,9 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetMicInput { .. } => "set_mic_input",
         Request::SetMicSettings { .. } => "set_mic_settings",
         Request::SetMicVolume { .. } => "set_mic_volume",
+        Request::SetStreamer { .. } => "set_streamer",
+        Request::SetStreamVolume { .. } => "set_stream_volume",
+        Request::SetStreamMaster { .. } => "set_stream_master",
         Request::GetKeyboardState => "get_keyboard_state",
         Request::SetLighting { .. } => "set_lighting",
         Request::GetGamesenseState => "get_gamesense_state",

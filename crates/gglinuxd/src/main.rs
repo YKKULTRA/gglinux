@@ -338,6 +338,10 @@ async fn dispatch(
         Request::SetMicVolume { volume } => outcome(
             workers.sonar.send::<()>(|reply| SonarCommand::SetMicVolume { volume, reply }).await,
         ),
+        // Wired to the Sonar worker in Task 3.
+        Request::SetStreamer { .. } | Request::SetStreamVolume { .. } | Request::SetStreamMaster { .. } => {
+            ResponseData::Error { message: "streamer mode is not wired up yet".into() }
+        }
         Request::GetKeyboardState => match workers.keyboard.send(KeyboardCommand::GetState).await {
             Ok(state) => ResponseData::Keyboard { state },
             Err(message) => ResponseData::Error { message },
