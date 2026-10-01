@@ -147,6 +147,56 @@
 
       <section>
         <div class="head">
+          <h4>Streamer mode</h4>
+          {#if busy === "streamer"}<span class="unit wide">Restarting PipeWire…</span>{/if}
+        </div>
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={sonar.stream.enabled}
+            disabled={busy !== null}
+            onchange={(e) => run("streamer", () => daemon.setStreamer(e.currentTarget.checked))}
+          />
+          A separate mix for your stream
+        </label>
+        <p class="hint">Turning this on or off restarts PipeWire: a second or two of silence.</p>
+        {#if sonar.stream.enabled}
+          {#if !sonar.stream.present}
+            <p class="hint warn">PipeWire hasn't created the stream device yet.</p>
+          {/if}
+          {#each sonar.channels as c, i (c.channel)}
+            <div class="row">
+              <span class="label">{label(c.channel)}</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={Math.round(sonar.stream.volumes[i] * 100)}
+                onchange={(e) =>
+                  quietly(() => daemon.setStreamVolume(c.channel, e.currentTarget.valueAsNumber / 100))}
+              />
+              <span class="unit">{pct(sonar.stream.volumes[i])}</span>
+            </div>
+          {/each}
+          <div class="row">
+            <span class="label">Master</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={Math.round(sonar.stream.master * 100)}
+              onchange={(e) => quietly(() => daemon.setStreamMaster(e.currentTarget.valueAsNumber / 100))}
+            />
+            <span class="unit">{pct(sonar.stream.master)}</span>
+          </div>
+          <p class="hint">In OBS, add an Audio Output Capture of <em>Monitor of gglinux Stream</em>.</p>
+        {/if}
+      </section>
+
+      <section>
+        <div class="head">
           <h4>ChatMix</h4>
           <button class="ghost" disabled={busy !== null} onclick={() => run("chatmix", () => daemon.setChatMix(0))}>
             Centre
@@ -433,6 +483,9 @@
     margin: 0.6rem 0 0;
     font-size: 0.76rem;
     color: var(--text-dim);
+  }
+  .hint.warn {
+    color: var(--danger);
   }
   .apply {
     padding: 0.4rem 0.85rem;

@@ -31,6 +31,9 @@ pub enum Command {
     SetMicInput { name: String, reply: Reply<()> },
     SetMicSettings { settings: MicSettings, reply: Reply<()> },
     SetMicVolume { volume: f32, reply: Reply<()> },
+    SetStreamer { enabled: bool, reply: Reply<()> },
+    SetStreamVolume { channel: Channel, volume: f32, reply: Reply<()> },
+    SetStreamMaster { volume: f32, reply: Reply<()> },
 }
 
 #[derive(Clone)]
@@ -121,6 +124,15 @@ fn handle(command: Command, sonar: &mut Sonar<SystemTools>) {
         }
         Command::SetMicVolume { volume, reply } => {
             let _ = reply.send(sonar.set_mic_volume(volume).map_err(text));
+        }
+        Command::SetStreamer { enabled, reply } => {
+            let _ = reply.send(sonar.set_streamer(enabled).map_err(text));
+        }
+        Command::SetStreamVolume { channel, volume, reply } => {
+            let _ = reply.send(sonar.set_stream_volume(channel, volume).map_err(text));
+        }
+        Command::SetStreamMaster { volume, reply } => {
+            let _ = reply.send(sonar.set_stream_master(volume).map_err(text));
         }
     }
 }

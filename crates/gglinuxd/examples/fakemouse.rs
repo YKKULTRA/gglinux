@@ -275,9 +275,20 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.sonar.mic.volume = Some(volume);
             ResponseData::Success
         }
-        // Played along with in Task 3.
-        Request::SetStreamer { .. } | Request::SetStreamVolume { .. } | Request::SetStreamMaster { .. } => {
-            error("streamer mode is not faked yet".into())
+        Request::SetStreamer { enabled } => {
+            s.sonar.stream.enabled = enabled;
+            s.sonar.stream.present = enabled;
+            ResponseData::Success
+        }
+        Request::SetStreamVolume { channel, volume } => {
+            if let Some(i) = Channel::ALL.iter().position(|&c| c == channel) {
+                s.sonar.stream.volumes[i] = volume;
+            }
+            ResponseData::Success
+        }
+        Request::SetStreamMaster { volume } => {
+            s.sonar.stream.master = volume;
+            ResponseData::Success
         }
         Request::GetKeyboardState => ResponseData::Keyboard { state: s.keyboard.clone() },
         Request::SetLighting { lighting } => {

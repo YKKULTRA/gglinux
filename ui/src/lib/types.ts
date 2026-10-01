@@ -169,6 +169,16 @@ export interface MicState {
   settings: MicSettings;
 }
 
+/** Streamer mode: a second mix of the channels, for OBS. */
+export interface StreamMix {
+  enabled: boolean;
+  /** Whether PipeWire has the "gglinux Stream" device now. */
+  present: boolean;
+  /** Per-channel stream level, 0..=1, in Game, Chat, Media, Aux order. */
+  volumes: number[];
+  master: number;
+}
+
 export interface SonarState {
   available: boolean;
   enabled: boolean;
@@ -182,6 +192,7 @@ export interface SonarState {
   eq: ChannelEq[];
   headphone: HeadphoneEq;
   mic: MicState;
+  stream: StreamMix;
 }
 
 export interface Rgb {
@@ -338,6 +349,9 @@ export type Request =
   | { method: "set_mic_input"; params: { name: string } }
   | { method: "set_mic_settings"; params: { settings: MicSettings } }
   | { method: "set_mic_volume"; params: { volume: number } }
+  | { method: "set_streamer"; params: { enabled: boolean } }
+  | { method: "set_stream_volume"; params: { channel: Channel; volume: number } }
+  | { method: "set_stream_master"; params: { volume: number } }
   | { method: "get_keyboard_state" }
   | { method: "set_lighting"; params: { lighting: Lighting } }
   | { method: "get_gamesense_state" }
