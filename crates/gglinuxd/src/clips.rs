@@ -51,7 +51,27 @@ struct Running {
     pid: i32,
     generation: u64,
     started: Instant,
+    /// Fires as soon as the waiter has reaped the child.
     exited: oneshot::Receiver<()>,
+}
+
+impl Running {
+    /// Send `sig` to the child, unless the waiter has already reaped it: from
+    /// then on the PID is free for another process, even though the `Exited`
+    /// notice may still be queued. Returns whether it was sent; once it says
+    /// no, `exited` is spent and mustn't be awaited.
+    fn signal(&mut self, sig: i32) -> bool {
+        if !matches!(self.exited.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+            return false;
+        }
+        // SAFETY: plain kill(2) on our own child. The waiter fires `exited`
+        // right after reaping it, and Linux hands out PIDs in turn, so the PID
+        // can't have come round to another process in that gap.
+        unsafe {
+            libc::kill(self.pid, sig);
+        }
+        true
+    }
 }
 
 pub struct Controller {
@@ -75,13 +95,6 @@ pub struct Controller {
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
-}
-
-fn signal(pid: i32, sig: i32) {
-    // SAFETY: plain kill(2) on a child this controller started and still believes is running.
-    unsafe {
-        libc::kill(pid, sig);
-    }
 }
 
 impl Controller {
@@ -151,11 +164,11 @@ impl Controller {
 
     pub async fn stop(&mut self) {
         if let Some(mut r) = self.running.take() {
-            signal(r.pid, libc::SIGINT);
-            if tokio::time::timeout(STOP_GRACE, &mut r.exited).await.is_err() {
+            if r.signal(libc::SIGINT) && tokio::time::timeout(STOP_GRACE, &mut r.exited).await.is_err() {
                 warn!("gpu-screen-recorder ignored SIGINT; killing it");
-                signal(r.pid, libc::SIGKILL);
-                let _ = tokio::time::timeout(Duration::from_secs(1), &mut r.exited).await;
+                if r.signal(libc::SIGKILL) {
+                    let _ = tokio::time::timeout(Duration::from_secs(1), &mut r.exited).await;
+                }
             }
             info!("replay buffer stopped");
         }
@@ -164,10 +177,11 @@ impl Controller {
     }
 
     pub async fn save(&mut self) -> Result<(), String> {
-        let Some(r) = &self.running else {
+        // A child that's reaped but not yet handled stays in `running`, so its
+        // `Exited` notice still schedules the restart.
+        if !self.running.as_mut().is_some_and(|r| r.signal(libc::SIGUSR1)) {
             return Err(if self.settings.enabled { "the recorder isn't running".into() } else { "clips are off".into() });
-        };
-        signal(r.pid, libc::SIGUSR1);
+        }
         let internal = self.internal_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(SAVE_SETTLE).await;
@@ -336,6 +350,19 @@ mod tests {
         Controller::new(settings, dir.join("clips.json"), Some(program), event_tx)
     }
 
+    /// `c.start()`, retried while exec says "Text file busy": a fork in another
+    /// test can briefly hold a stand-in that's still being written.
+    async fn start(c: &mut Controller) {
+        let busy = format!("(os error {})", libc::ETXTBSY);
+        for _ in 0..50 {
+            c.start().await;
+            if !c.error.as_deref().is_some_and(|e| e.ends_with(&busy)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     async fn log_has(dir: &Path, line: &str) -> bool {
         for _ in 0..40 {
             if std::fs::read_to_string(dir.join("log")).unwrap_or_default().lines().any(|l| l.starts_with(line)) {
@@ -350,7 +377,7 @@ mod tests {
     async fn start_save_and_the_right_flags() {
         let d = scratch("save");
         let (mut c, _internal) = controller(&d, stand_in(&d, false));
-        c.start().await;
+        start(&mut c).await;
         assert!(c.state().recording);
         assert!(log_has(&d, "start -w portal").await);
         assert!(d.join("clips").is_dir(), "the folder is created");
@@ -364,7 +391,7 @@ mod tests {
     async fn turning_clips_off_interrupts_the_recorder() {
         let d = scratch("off");
         let (mut c, _internal) = controller(&d, stand_in(&d, false));
-        c.start().await;
+        start(&mut c).await;
         assert!(log_has(&d, "start").await);
         c.set_settings(ClipsSettings { enabled: false, ..c.settings.clone() }).await.unwrap();
         assert!(log_has(&d, "int").await, "SIGINT, so the file being written is finished");
@@ -376,7 +403,7 @@ mod tests {
     async fn an_unexpected_exit_is_reported_and_retried() {
         let d = scratch("exit");
         let (mut c, mut internal) = controller(&d, stand_in(&d, true));
-        c.start().await;
+        start(&mut c).await;
         loop {
             let msg = tokio::time::timeout(Duration::from_secs(2), internal.recv()).await.unwrap().unwrap();
             let exited = matches!(msg, Internal::Exited { .. });
@@ -397,8 +424,41 @@ mod tests {
     async fn saving_while_off_is_an_error() {
         let d = scratch("save-off");
         let (mut c, _internal) = controller(&d, stand_in(&d, false));
-        assert!(c.save().await.is_err());
-        assert!(!d.join("log").exists(), "nothing was started or signalled");
+        start(&mut c).await;
+        assert!(log_has(&d, "start").await);
+        c.set_settings(ClipsSettings { enabled: false, ..c.settings.clone() }).await.unwrap();
+        assert_eq!(c.save().await, Err("clips are off".into()));
+        let log = std::fs::read_to_string(d.join("log")).unwrap();
+        assert!(!log.lines().any(|l| l == "usr1"), "no signal was sent:\n{log}");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// The next exit notice, left unhandled.
+    async fn next_exit(internal: &mut mpsc::UnboundedReceiver<Internal>) -> Internal {
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(2), internal.recv()).await.unwrap().unwrap();
+            if matches!(msg, Internal::Exited { .. }) {
+                return msg;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reaped_recorder_is_never_signalled() {
+        let d = scratch("reaped");
+        let (mut c, mut internal) = controller(&d, stand_in(&d, true));
+        start(&mut c).await;
+        // The waiter has reaped the child; hold its notice back, as a busy
+        // `select!` might. The PID is free for anyone now.
+        let exited = next_exit(&mut internal).await;
+        assert_eq!(c.save().await, Err("the recorder isn't running".into()));
+        c.on_internal(exited).await;
+        assert!(c.retry_at.is_some(), "the notice still schedules the restart");
+        // Stopping signals nothing either, and never awaits the notice its check used up.
+        start(&mut c).await;
+        let _exited = next_exit(&mut internal).await;
+        tokio::time::timeout(Duration::from_secs(1), c.stop()).await.unwrap();
+        assert!(!c.state().recording);
         std::fs::remove_dir_all(d).unwrap();
     }
 }

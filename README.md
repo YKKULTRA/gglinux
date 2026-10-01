@@ -101,6 +101,7 @@ cargo run -p gglinuxd --example ggctl -- mouse           # battery + applied set
 cargo run -p gglinuxd --example ggctl -- mouse dpi 800,1600 --select 0 --save
 cargo run -p gglinuxd --example ggctl -- mouse polling 1000 --save
 cargo run -p gglinuxd --example ggctl -- mouse buttons button1,button2,button3,button4,button5,dpi
+cargo run -p gglinuxd --example ggctl -- clip save       # save the instant replay
 ```
 
 Settings apply immediately but are lost when the mouse sleeps unless you pass `--save`, which commits
