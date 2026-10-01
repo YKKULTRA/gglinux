@@ -16,6 +16,16 @@ pub const BACKUP_FILES: [&str; 5] = [
 const ENTRY: &str = "gglinux.desktop";
 const SERVICE: &str = "gglinuxd.service";
 
+/// Where the program is installed. Once its file is replaced on disk (an
+/// upgrade while it sat in the tray), Linux reports the running copy as
+/// `<path> (deleted)`; the new one is at `<path>`.
+pub fn installed_exe(exe: &Path) -> PathBuf {
+    exe.to_str()
+        .and_then(|s| s.strip_suffix(" (deleted)"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| exe.to_path_buf())
+}
+
 /// The autostart entry: the UI, hidden in the tray.
 pub fn autostart_entry(exe: &Path) -> String {
     format!(
@@ -177,6 +187,18 @@ mod tests {
         // `$` and `\` are escaped for the quotes, then backslashes again for the key.
         let e = autostart_entry(Path::new(r"/opt/a$b\c"));
         assert!(e.contains(r#"Exec="/opt/a\\$b\\\\c" --hidden"#), "{e}");
+    }
+
+    #[test]
+    fn a_replaced_program_autostarts_from_where_it_is_installed() {
+        assert_eq!(
+            installed_exe(Path::new("/usr/bin/gglinux (deleted)")),
+            Path::new("/usr/bin/gglinux")
+        );
+        assert_eq!(
+            installed_exe(Path::new("/usr/bin/gglinux")),
+            Path::new("/usr/bin/gglinux")
+        );
     }
 
     #[test]

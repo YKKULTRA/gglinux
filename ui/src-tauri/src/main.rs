@@ -113,6 +113,7 @@ fn get_autostart() -> bool {
 #[tauri::command(async)]
 fn set_autostart(enabled: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = system::installed_exe(&exe);
     system::set_autostart(&autostart_dir(), &exe, enabled, &run_quietly)
 }
 
