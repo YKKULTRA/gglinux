@@ -150,6 +150,8 @@ struct State {
     /// Painters over the lighting, and what they painted this loop.
     overlays: Vec<Arc<dyn Overlay>>,
     layers: Vec<Layer>,
+    /// Whether any overlay painted on the last pass, to tell when they stop.
+    overlay_was_active: bool,
     /// Visualizer band levels, written by the capture thread.
     levels: Levels,
     capture: Option<Capture>,
@@ -189,6 +191,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
         hits: Vec::new(),
         overlays,
         layers: Vec::new(),
+        overlay_was_active: false,
         levels: Arc::new(Mutex::new([0.0; BANDS])),
         capture: None,
         last_capture_attempt: None,
@@ -217,6 +220,11 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
         }
         let now = Instant::now();
         state.layers = state.overlays.iter().filter_map(|o| o.paint(now)).collect();
+        let overlay_active = !state.layers.is_empty();
+        if overlay_ended(state.overlay_was_active, overlay_active) {
+            state.last_frame = None;
+        }
+        state.overlay_was_active = overlay_active;
         if should_look_for(state.device.is_some(), drawing(state.lighting.enabled, !state.layers.is_empty())) {
             look_for(&mut state);
         }
@@ -275,6 +283,12 @@ fn should_hand_back(taken: bool, lighting_enabled: bool, overlay_active: bool) -
 /// The colour overlays give this key: the last active overlay that paints it.
 fn overlay_color(layers: &[Layer], code: u8) -> Option<Rgb> {
     layers.iter().rev().find_map(|l| l.get(&code).copied())
+}
+
+/// Whether the overlays just stopped: what's under them is drawn at once, not
+/// at a static effect's next slow refresh.
+fn overlay_ended(was_active: bool, active: bool) -> bool {
+    was_active && !active
 }
 
 /// A wake draws at once only if the last frame is at least a frame old, so a
@@ -650,6 +664,14 @@ mod tests {
         let still = lighting(true, false, Effect::Static);
         assert_eq!(interval(&still, false, true), FRAME);
         assert_eq!(interval(&still, false, false), STATIC_REFRESH);
+    }
+
+    #[test]
+    fn the_lighting_under_an_overlay_is_drawn_at_once_when_it_ends() {
+        assert!(overlay_ended(true, false), "a static effect would otherwise wait out its slow refresh");
+        assert!(!overlay_ended(true, true), "still painting: frames are due 30 times a second");
+        assert!(!overlay_ended(false, true), "starting: its frames are due at once anyway");
+        assert!(!overlay_ended(false, false));
     }
 
     #[test]
