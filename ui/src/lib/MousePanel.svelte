@@ -93,9 +93,13 @@
   const clampDpi = (n: number) =>
     Math.min(DPI_MAX, Math.max(DPI_MIN, Math.round(n / DPI_STEP) * DPI_STEP));
 
-  function setStage(i: number, raw: number) {
-    if (!Number.isFinite(raw)) return;
-    stages[i] = clampDpi(raw);
+  // Svelte rewrites the box only when the stage changes, so an entry that rounds
+  // or clamps to the stage it already was, or isn't a number, would keep showing
+  // what was typed. Write back what will be applied.
+  function setStage(i: number, box: HTMLInputElement) {
+    const raw = box.valueAsNumber;
+    if (Number.isFinite(raw)) stages[i] = clampDpi(raw);
+    box.value = String(stages[i]);
   }
 
   function addStage() {
@@ -201,7 +205,7 @@
             max={DPI_MAX}
             step={DPI_STEP}
             value={dpi}
-            onchange={(e) => setStage(i, e.currentTarget.valueAsNumber)}
+            onchange={(e) => setStage(i, e.currentTarget)}
           />
           <span class="unit">dpi</span>
           <button
