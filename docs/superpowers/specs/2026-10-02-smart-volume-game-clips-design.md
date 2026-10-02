@@ -250,7 +250,11 @@ Off keeps the level's threshold and makeup on the compressor. They're sent when 
   that isn't there. PipeWire keeps the copy it already loaded until then, so there's no restart
   while the channels are up. If they're already gone (PipeWire restarted in between), it restarts
   PipeWire once more to bring them back. A plugin installed while gglinux runs isn't picked up
-  until Sonar is turned off and on, or gglinux restarts: adding the stage takes a restart.
+  until Sonar is turned off and on, or gglinux restarts: adding the stage takes a restart. Until
+  then the channels PipeWire runs have no stage, so Smart Volume shows as unavailable and
+  `set_smart_volume` is refused. Whether they have it is read from the drop-in each time they come
+  up, so `set_output` and `set_mic_input`, which write it without a restart, keep the stage out of
+  it unless the channels already carry it.
 - **What's left:** `swh-plugins` removed while gglinux isn't running. The next PipeWire start then
   skips the channel modules (they're `nofail`), and apps play to WirePlumber's fallback output,
   not through Sonar, until gglinuxd starts and takes the stage out with one restart. The owner's
@@ -268,9 +272,7 @@ Off keeps the level's threshold and makeup on the compressor. They're sent when 
   - after `enable()`'s restart;
   - after `set_streamer`'s restart;
   - on every startup with Sonar on, whether or not `upgrade_dropin` rewrote the file. A drop-in
-    that already matches can still be refused by a PipeWire upgraded since. `set_output` and
-    `set_mic_input` also write the drop-in without a restart, so the stage can first be loaded at
-    login.
+    that already matches can still be refused by a PipeWire upgraded since.
 - **Then:**
   - `sonar.json` records `smart_volume_refused: true`, first, so a crash can't bring the stage
     back;
@@ -299,7 +301,8 @@ Off keeps the level's threshold and makeup on the compressor. They're sent when 
 - `SmartVolume { enabled, level }` (`#[serde(default)]`);
 - `SonarState.smart_volume: SmartVolumeState { available, reason: Option<String>, settings: Vec<SmartVolume> /* Channel::ALL order */ }`;
   `reason` says why it's unavailable: the compressor is missing (install `swh-plugins`, then turn
-  Sonar off and on), or PipeWire refused the stage (turn Sonar off and on to try again);
+  Sonar off and on), PipeWire refused the stage (turn Sonar off and on to try again), or the
+  channels were made before `swh-plugins` was installed (turn Sonar off and on to add it);
 - the request `set_smart_volume { channel, settings }`.
 
 **UI:**

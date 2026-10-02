@@ -384,7 +384,8 @@ pub struct SmartVolume {
 pub struct SmartVolumeState {
     /// Whether the channels carry Smart Volume's stage, so it can be switched.
     pub available: bool,
-    /// Why not, for the Sonar tab: swh-plugins is missing, or PipeWire refused the stage.
+    /// Why not, for the Sonar tab: swh-plugins is missing, PipeWire refused the
+    /// stage, or the channels were made before swh-plugins was installed.
     pub reason: Option<String>,
     /// Per channel, in `Channel::ALL` order.
     pub settings: Vec<SmartVolume>,
