@@ -130,6 +130,8 @@ struct State {
     device: Option<Keyboard>,
     /// Whether this handle has taken the lighting over (init sent).
     taken: bool,
+    /// When the device list was last read: to open the keyboard, or to see
+    /// that the open one is still there.
     last_open_attempt: Option<Instant>,
     last_frame: Option<Instant>,
     lighting: Lighting,
@@ -213,6 +215,9 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
         }
         let now = Instant::now();
         state.layers = state.overlays.iter().filter_map(|o| o.paint(now)).collect();
+        if should_look_for(state.device.is_some(), drawing(state.lighting.enabled, !state.layers.is_empty())) {
+            look_for(&mut state);
+        }
         sync_reader(&mut state);
         sync_audio(&mut state);
         sync_mic(&mut state);
@@ -252,6 +257,12 @@ fn wants_reader(lighting: &Lighting, connected: bool) -> bool {
 /// Whether gglinux draws on the keyboard: its own lighting, or an overlay taking it over.
 fn drawing(lighting_enabled: bool, overlay_active: bool) -> bool {
     lighting_enabled || overlay_active
+}
+
+/// Whether to look for the open keyboard in the device list: with nothing
+/// drawn nothing is written, so no failed write tells that it went.
+fn should_look_for(open: bool, drawing: bool) -> bool {
+    open && !drawing
 }
 
 /// Give the keyboard back: gglinux holds it, but nothing wants to draw any more.
@@ -447,6 +458,23 @@ fn try_open(state: &mut State) {
     }
 }
 
+/// Let the keyboard go if it's gone from the device list, at most every
+/// [`REOPEN_INTERVAL`].
+fn look_for(state: &mut State) {
+    if !is_older_than(state.last_open_attempt, REOPEN_INTERVAL) {
+        return;
+    }
+    state.last_open_attempt = Some(Instant::now());
+    if state.api.refresh_devices().is_err() {
+        return;
+    }
+    if state.device.as_ref().is_some_and(|d| !d.is_listed(&state.api)) {
+        info!("keyboard disconnected");
+        state.device = None;
+        state.taken = false;
+    }
+}
+
 /// Send a frame if one is due.
 fn render(state: &mut State) {
     let overlay_active = !state.layers.is_empty();
@@ -590,6 +618,13 @@ mod tests {
         assert!(!should_hand_back(true, false, true), "a game still draws");
         assert!(!should_hand_back(true, true, false), "gglinux lighting still draws");
         assert!(!should_hand_back(false, false, false), "not held");
+    }
+
+    #[test]
+    fn an_open_keyboard_is_looked_for_while_nothing_is_drawn_since_no_write_would_fail() {
+        assert!(should_look_for(true, false), "open and idle: only the device list can tell it went");
+        assert!(!should_look_for(true, true), "drawing: a failed frame tells");
+        assert!(!should_look_for(false, false), "not open: opening looks already");
     }
 
     #[test]
