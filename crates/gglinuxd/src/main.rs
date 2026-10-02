@@ -83,13 +83,13 @@ async fn main() -> Result<()> {
     let engine = gamesense::Engine::load();
     let keyboard = keyboard::spawn(event_tx.clone(), vec![engine.overlay()]);
     // The game from the profiles' rules that's running now; games-only clips follow it.
-    let (game_tx, _game_rx) = watch::channel::<Option<String>>(None);
+    let (game_tx, game_rx) = watch::channel::<Option<String>>(None);
     let workers = Workers {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
         gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
         profiles: profiles::spawn(event_tx.clone(), keyboard.clone(), game_tx),
-        clips: clips::spawn(event_tx.clone()),
+        clips: clips::spawn(event_tx.clone(), game_rx),
         keyboard,
         sonar: sonar::spawn(event_tx.clone()),
     };
