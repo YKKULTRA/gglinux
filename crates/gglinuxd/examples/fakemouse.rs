@@ -555,7 +555,11 @@ fn describe(req: &Request) -> String {
             settings.protect, settings.lit_seconds, settings.brightness
         ),
         Request::SetHeadset { change } => format!("set_headset {change:?}"),
-        other => method_name(other).to_string(),
+        // Everything else with its params as they go over the wire.
+        other => match serde_json::to_value(other).ok().and_then(|mut v| v.get_mut("params").map(serde_json::Value::take)) {
+            Some(params) => format!("{} {params}", method_name(other)),
+            None => method_name(other).to_string(),
+        },
     }
 }
 
@@ -623,4 +627,28 @@ fn devices(with_mouse: bool) -> Vec<DeviceInfo> {
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gg_ipc::{Effect, Rgb};
+
+    #[test]
+    fn a_request_with_no_rendering_of_its_own_is_logged_with_its_params() {
+        let volume = Request::SetChannelVolume { channel: Channel::Chat, volume: 0.25 };
+        assert_eq!(describe(&volume), r#"set_channel_volume {"channel":"chat","volume":0.25}"#);
+
+        let lighting = Lighting {
+            enabled: true,
+            effect: Effect::Breathing { color: Rgb { r: 255, g: 0, b: 0 }, period_s: 3.0 },
+            ..Lighting::default()
+        };
+        let shown = describe(&Request::SetLighting { lighting });
+        assert!(shown.starts_with("set_lighting {"), "{shown}");
+        assert!(shown.contains(r#""kind":"breathing""#) && shown.contains(r#""period_s":3.0"#), "{shown}");
+
+        // A request that carries nothing is still just its name.
+        assert_eq!(describe(&Request::SaveClip), "save_clip");
+    }
 }
