@@ -173,7 +173,8 @@ impl Registry {
                 min: e.saved.min_value,
                 max: e.saved.max_value,
                 frame: e.frame.as_ref(),
-                age: now - e.changed_at,
+                // A value can arrive after the caller read `now`: count it as just arrived.
+                age: (now - e.changed_at).max(0.0),
             };
             for h in &e.handlers {
                 layer.extend(paint(h, &reading));
@@ -499,6 +500,16 @@ mod tests {
         assert_eq!(r.paint(2.5).unwrap()[&0x3A], Rgb { r: 0, g: 0, b: 255 }, "same HEALTH value: not a change");
         send(&mut r, "G", "HEALTH", 99.0, 3.0).unwrap();
         assert_eq!(r.paint(3.5).unwrap()[&0x3A], Rgb { r: 255, g: 0, b: 0 });
+    }
+
+    #[test]
+    fn a_value_newer_than_the_frame_starts_its_flash_lit() {
+        // The keyboard reads the clock before it takes the lock, so a value can land in between.
+        let mut r = Registry::default();
+        r.bind_event(bind("G", "HEALTH", json!([{ "device-type": "keyboard", "zone": "f1",
+            "color": { "red": 255, "green": 0, "blue": 0 }, "rate": { "frequency": 4 } }]))).unwrap();
+        send(&mut r, "G", "HEALTH", 10.0, 1.0).unwrap();
+        assert_eq!(r.paint(0.999).unwrap()[&0x3A], Rgb { r: 255, g: 0, b: 0 });
     }
 
     #[test]
