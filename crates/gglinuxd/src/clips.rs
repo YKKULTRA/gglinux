@@ -255,6 +255,8 @@ impl Controller {
             clips: recorder::list(&dir),
             error: self.error.clone(),
             hotkey: self.hotkey.clone(),
+            game: None,
+            waiting: false,
         }
     }
 

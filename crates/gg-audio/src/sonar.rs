@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, MicSettings, MicState,
-    SonarState, StreamMix,
+    SmartVolume, SmartVolumeState, SonarState, StreamMix,
 };
 use tracing::{debug, info, warn};
 
@@ -153,6 +153,11 @@ impl<T: PwTools> Sonar<T> {
                 present: self.graph.node(config::STREAM_SINK).is_some(),
                 volumes: Channel::ALL.iter().map(|&c| self.settings.stream_volume(c)).collect(),
                 master: self.settings.stream_master,
+            },
+            smart_volume: SmartVolumeState {
+                available: false,
+                reason: None,
+                settings: vec![SmartVolume::default(); Channel::ALL.len()],
             },
         }
     }

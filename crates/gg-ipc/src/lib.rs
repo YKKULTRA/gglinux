@@ -360,6 +360,36 @@ pub struct StreamMix {
     pub master: f32,
 }
 
+/// How loud Smart Volume aims a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmartLevel {
+    Quiet,
+    #[default]
+    Balanced,
+    Loud,
+}
+
+/// Smart Volume on one channel: quiet sounds come up, loud ones are held down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmartVolume {
+    /// Off by default.
+    pub enabled: bool,
+    pub level: SmartLevel,
+}
+
+/// Smart Volume across the channels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartVolumeState {
+    /// Whether the channels carry Smart Volume's stage, so it can be switched.
+    pub available: bool,
+    /// Why not, for the Sonar tab: swh-plugins is missing, or PipeWire refused the stage.
+    pub reason: Option<String>,
+    /// Per channel, in `Channel::ALL` order.
+    pub settings: Vec<SmartVolume>,
+}
+
 /// Sonar as the daemon sees it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SonarState {
@@ -378,6 +408,7 @@ pub struct SonarState {
     pub headphone: HeadphoneEq,
     pub mic: MicState,
     pub stream: StreamMix,
+    pub smart_volume: SmartVolumeState,
 }
 
 /// An sRGB colour.
@@ -625,11 +656,13 @@ pub struct ClipsSettings {
     pub mic: bool,
     /// Absolute folder; `None` means `~/Videos/gglinux`.
     pub dir: Option<String>,
+    /// Record only while a program from the profiles' game rules runs.
+    pub games_only: bool,
 }
 
 impl Default for ClipsSettings {
     fn default() -> Self {
-        ClipsSettings { enabled: false, seconds: 30, fps: 60, quality: ClipQuality::High, desktop_audio: true, mic: false, dir: None }
+        ClipsSettings { enabled: false, seconds: 30, fps: 60, quality: ClipQuality::High, desktop_audio: true, mic: false, dir: None, games_only: false }
     }
 }
 
@@ -676,6 +709,10 @@ pub struct ClipsState {
     pub error: Option<String>,
     /// The hotkey KDE bound, if any.
     pub hotkey: Option<String>,
+    /// The game from the rules that's running now, if any.
+    pub game: Option<String>,
+    /// On and games-only, with no game from the rules running: the recorder waits.
+    pub waiting: bool,
 }
 
 /// A request method (client -> server). Adjacently tagged: `{"method":"list_devices"}`.
@@ -748,6 +785,8 @@ pub enum Request {
     SetStreamVolume { channel: Channel, volume: f32 },
     /// The stream mix's master level, 0..=1.
     SetStreamMaster { volume: f32 },
+    /// Turn Smart Volume on or off for a channel, or change its level. Live: no restart.
+    SetSmartVolume { channel: Channel, settings: SmartVolume },
     /// Keyboard connection, layout and lighting.
     GetKeyboardState,
     /// Replace the keyboard lighting.
@@ -1232,5 +1271,33 @@ mod tests {
             serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{line}: {e}"));
         }
         assert_eq!(serde_json::to_value(Event::ClipsChanged { state: ClipsState::default() }).unwrap()["event"], "clips_changed");
+    }
+
+    #[test]
+    fn smart_volume_defaults_off_and_parses() {
+        let d = SmartVolume::default();
+        assert_eq!((d.enabled, d.level), (false, SmartLevel::Balanced));
+        let line = r#"{"id":1,"req":{"method":"set_smart_volume","params":{"channel":"game","settings":{"enabled":true,"level":"loud"}}}}"#;
+        match serde_json::from_str::<RequestFrame>(line).unwrap().req {
+            Request::SetSmartVolume { channel, settings } => {
+                assert_eq!(channel, Channel::Game);
+                assert_eq!(settings, SmartVolume { enabled: true, level: SmartLevel::Loud });
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        let partial: SmartVolume = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(partial.level, SmartLevel::Balanced);
+        assert_eq!(serde_json::to_string(&SmartLevel::Quiet).unwrap(), r#""quiet""#);
+    }
+
+    #[test]
+    fn games_only_clips_default_off_and_old_files_still_load() {
+        assert!(!ClipsSettings::default().games_only);
+        let old: ClipsSettings = serde_json::from_str(r#"{"enabled":true,"seconds":45}"#).unwrap();
+        assert!(!old.games_only);
+        let on: ClipsSettings = serde_json::from_str(r#"{"enabled":true,"games_only":true}"#).unwrap();
+        assert!(on.games_only);
+        let s = serde_json::to_value(ClipsState::default()).unwrap();
+        assert_eq!((s["waiting"].as_bool(), s["game"].is_null()), (Some(false), true));
     }
 }
