@@ -14,6 +14,7 @@ pub mod tools;
 pub mod graph;
 pub mod mic;
 pub mod settings;
+pub mod smart;
 pub mod sonar;
 
 #[cfg(test)]
