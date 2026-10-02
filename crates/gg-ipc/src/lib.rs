@@ -55,15 +55,24 @@ pub struct BatteryState {
     pub charging: bool,
 }
 
-/// Mouse settings, as written by gglinux.
+/// The DPI stages written to the mouse, and which one is active.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseDpi {
+    pub stages: Vec<DpiStage>,
+    /// 0-based index into `stages`.
+    pub active: usize,
+}
+
+/// Mouse settings, as written by gglinux.
+///
+/// Each part is `None` until it has been written. The mouse cannot be read back,
+/// so a part never written is unknown, not its factory default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseSettings {
-    pub dpi_stages: Vec<DpiStage>,
-    /// 0-based index into `dpi_stages`.
-    pub active_stage: usize,
-    pub polling_hz: u16,
+    pub dpi: Option<MouseDpi>,
+    pub polling_hz: Option<u16>,
     /// One action name per physical button, in button order.
-    pub buttons: Vec<String>,
+    pub buttons: Option<Vec<String>>,
 }
 
 /// What the daemon knows about the mouse.
@@ -983,6 +992,13 @@ mod tests {
         let json = serde_json::to_string(&ResponseData::Mouse { state }).unwrap();
         assert!(json.contains(r#""applied":null"#), "{json}");
         assert!(json.contains(r#""level":12"#), "{json}");
+    }
+
+    #[test]
+    fn mouse_settings_report_each_unwritten_part_as_null() {
+        let applied = MouseSettings { polling_hz: Some(500), ..Default::default() };
+        let json = serde_json::to_string(&applied).unwrap();
+        assert_eq!(json, r#"{"dpi":null,"polling_hz":500,"buttons":null}"#);
     }
 
     #[test]

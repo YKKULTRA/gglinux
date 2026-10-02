@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use gg_device_mouse::{ButtonAction, Mouse, PollingRate, BUTTON_COUNT};
-use gg_ipc::{BatteryState, DpiStage, Event, MouseSettings, MouseState};
+use gg_ipc::{BatteryState, DpiStage, Event, MouseDpi, MouseSettings, MouseState};
 use hidapi::HidApi;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, warn};
@@ -167,9 +167,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 Ok(())
             });
             if result.is_ok() {
-                let settings = state.applied.get_or_insert_with(default_settings);
-                settings.dpi_stages = stages;
-                settings.active_stage = active;
+                written(&mut state.applied).dpi = Some(MouseDpi { stages, active });
             }
             let _ = reply.send(result);
         }
@@ -187,7 +185,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                     })
                 });
             if result.is_ok() {
-                state.applied.get_or_insert_with(default_settings).polling_hz = hz;
+                written(&mut state.applied).polling_hz = Some(hz);
             }
             let _ = reply.send(result);
         }
@@ -207,7 +205,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 })
             });
             if result.is_ok() {
-                state.applied.get_or_insert_with(default_settings).buttons = actions;
+                written(&mut state.applied).buttons = Some(actions);
             }
             let _ = reply.send(result);
         }
@@ -294,15 +292,32 @@ fn parse_actions(actions: &[String]) -> Result<[ButtonAction; BUTTON_COUNT], Str
     Ok(parsed)
 }
 
-/// Placeholder used when recording the first setting we apply.
+/// The record of what has been written, started empty by the first write.
 ///
-/// The fields describe the mouse's factory defaults, but only the field actually
-/// written is meaningful until its own setter has run — see [`MouseState::applied`].
-fn default_settings() -> MouseSettings {
-    MouseSettings {
-        dpi_stages: Vec::new(),
-        active_stage: 0,
-        polling_hz: 1000,
-        buttons: Vec::new(),
+/// Each setter fills in only its own part. The rest stay `None` until their own
+/// setter runs, since the mouse cannot say what they are — see [`MouseState::applied`].
+fn written(applied: &mut Option<MouseSettings>) -> &mut MouseSettings {
+    applied.get_or_insert_with(MouseSettings::default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_first_write_reports_only_the_part_it_wrote() {
+        // As SetPolling records it on the first write of a session.
+        let mut applied = None;
+        written(&mut applied).polling_hz = Some(500);
+        let json = serde_json::to_value(&applied).unwrap();
+        assert_eq!(json["polling_hz"], 500, "{json}");
+        let claimed: Vec<&String> = json
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(part, value)| *part != "polling_hz" && !value.is_null())
+            .map(|(part, _)| part)
+            .collect();
+        assert!(claimed.is_empty(), "reported as applied but never written: {claimed:?} in {json}");
     }
 }

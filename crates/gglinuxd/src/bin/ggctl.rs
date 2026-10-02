@@ -10,7 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use gg_ipc::{DpiStage, MouseSettings, Request, RequestFrame, ResponseData, ServerMessage};
+use gg_ipc::{DpiStage, MouseDpi, Request, RequestFrame, ResponseData, ServerMessage};
 
 /// What `ggctl --help` prints.
 const USAGE: &str = "\
@@ -51,13 +51,15 @@ fn main() -> Result<()> {
             );
             match state.applied {
                 Some(s) => {
-                    if !s.dpi_stages.is_empty() {
-                        println!("dpi:       {}", dpi_summary(&s));
+                    if let Some(dpi) = &s.dpi {
+                        println!("dpi:       {}", dpi_summary(dpi));
                     }
-                    if !s.buttons.is_empty() {
-                        println!("buttons:   {}", s.buttons.join(","));
+                    if let Some(buttons) = &s.buttons {
+                        println!("buttons:   {}", buttons.join(","));
                     }
-                    println!("polling:   {} Hz", s.polling_hz);
+                    if let Some(hz) = s.polling_hz {
+                        println!("polling:   {hz} Hz");
+                    }
                 }
                 // The mouse protocol is write-only, so an unwritten setting is
                 // genuinely unknown rather than assumed to be the default.
@@ -229,13 +231,13 @@ fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 ///
 /// The stage is numbered from 0, as `--select` takes it, so the number shown here
 /// can be passed straight back.
-fn dpi_summary(s: &MouseSettings) -> String {
-    let stages: Vec<String> = s
-        .dpi_stages
+fn dpi_summary(dpi: &MouseDpi) -> String {
+    let stages: Vec<String> = dpi
+        .stages
         .iter()
         .map(|d| if d.x == d.y { d.x.to_string() } else { format!("{}:{}", d.x, d.y) })
         .collect();
-    format!("{} (stage {} active, counting from 0)", stages.join(","), s.active_stage)
+    format!("{} (stage {} active, counting from 0)", stages.join(","), dpi.active)
 }
 
 /// Parse `800,1600` or `400:800,1600:1600` into DPI stages.
@@ -313,17 +315,15 @@ mod tests {
 
     #[test]
     fn the_active_stage_shows_as_the_number_select_takes() {
-        let applied = MouseSettings {
-            dpi_stages: [400, 800, 1600].map(|d| DpiStage { x: d, y: d }).to_vec(),
-            active_stage: 1,
-            polling_hz: 1000,
-            buttons: vec![],
+        let applied = MouseDpi {
+            stages: [400, 800, 1600].map(|d| DpiStage { x: d, y: d }).to_vec(),
+            active: 1,
         };
         let shown = dpi_summary(&applied);
         let n = shown.split("stage ").nth(1).and_then(|s| s.split(' ').next()).unwrap();
         // Passing back the number `ggctl mouse` shows keeps that stage active.
         match sends(&format!("mouse dpi 400,800,1600 --select {n}")) {
-            Request::SetMouseDpi { active, .. } => assert_eq!(active, applied.active_stage, "{shown}"),
+            Request::SetMouseDpi { active, .. } => assert_eq!(active, applied.active, "{shown}"),
             other => panic!("{other:?}"),
         }
     }

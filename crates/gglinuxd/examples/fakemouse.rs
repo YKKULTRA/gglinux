@@ -29,7 +29,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
+    DeviceKind, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseDpi, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SmartVolume, SmartVolumeState,
     SonarState, StreamMix,
 };
@@ -196,19 +196,17 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
         Request::Ping => ResponseData::Pong,
         Request::GetMouseState => ResponseData::Mouse { state: mouse_state(&s) },
         Request::SetMouseDpi { stages, active, save } => {
-            let settings = s.applied.get_or_insert_with(defaults);
-            settings.dpi_stages = stages;
-            settings.active_stage = active;
+            s.applied.get_or_insert_with(MouseSettings::default).dpi = Some(MouseDpi { stages, active });
             note_save(save);
             ResponseData::Success
         }
         Request::SetMousePolling { hz, save } => {
-            s.applied.get_or_insert_with(defaults).polling_hz = hz;
+            s.applied.get_or_insert_with(MouseSettings::default).polling_hz = Some(hz);
             note_save(save);
             ResponseData::Success
         }
         Request::SetMouseButtons { actions, save } => {
-            s.applied.get_or_insert_with(defaults).buttons = actions;
+            s.applied.get_or_insert_with(MouseSettings::default).buttons = Some(actions);
             note_save(save);
             ResponseData::Success
         }
@@ -479,19 +477,6 @@ fn fake_apply(c: &mut HeadsetControls, change: HeadsetChange) {
             c.eq_bands = Some(b);
             c.eq_preset = Some(4);
         }
-    }
-}
-
-/// What the daemon would report before anything has been written to it.
-fn defaults() -> MouseSettings {
-    MouseSettings {
-        dpi_stages: vec![DpiStage { x: 800, y: 800 }, DpiStage { x: 1600, y: 1600 }],
-        active_stage: 0,
-        polling_hz: 1000,
-        buttons: ["button1", "button2", "button3", "button4", "button5", "dpi"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
     }
 }
 

@@ -68,15 +68,17 @@
 
   // Seed the form from whatever the daemon has already applied, once. After that
   // the form is the user's working copy and must not be overwritten underneath
-  // them by an unrelated refresh.
+  // them by an unrelated refresh. A part not written yet keeps the form's own.
   $effect(() => {
     const a = applied;
     if (seeded || !a) return;
     seeded = true;
-    stages = a.dpi_stages.map((s) => s.x);
-    active = a.active_stage;
-    polling = a.polling_hz;
-    buttons = [...a.buttons];
+    if (a.dpi) {
+      stages = a.dpi.stages.map((s) => s.x);
+      active = a.dpi.active;
+    }
+    if (a.polling_hz !== null) polling = a.polling_hz;
+    if (a.buttons) buttons = [...a.buttons];
   });
 
   // Depends on `connected` so a daemon restart refetches rather than leaving the
@@ -135,9 +137,15 @@
   const applyButtons = () => run("buttons", () => daemon.setMouseButtons(buttons, persist));
   const saveOnboard = () => run("save", () => daemon.saveMouse());
 
+  /** Only the parts written: the others are unknown, so they aren't shown. */
   const summarise = (a: MouseSettings) =>
-    `${a.dpi_stages.map((s) => s.x).join(" / ")} dpi · stage ${a.active_stage + 1} · ` +
-    `${a.polling_hz} Hz`;
+    [
+      a.dpi && `${a.dpi.stages.map((s) => s.x).join(" / ")} dpi · stage ${a.dpi.active + 1}`,
+      a.polling_hz !== null && `${a.polling_hz} Hz`,
+      a.buttons && "button layout",
+    ]
+      .filter(Boolean)
+      .join(" · ");
 </script>
 
 <article class="panel">

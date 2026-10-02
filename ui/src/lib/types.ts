@@ -34,13 +34,19 @@ export interface BatteryState {
   charging: boolean;
 }
 
+export interface MouseDpi {
+  stages: DpiStage[];
+  /** 0-based index into `stages`. */
+  active: number;
+}
+
+/** Each part is `null` until this daemon has written it: the mouse can't be read
+ *  back, so a part never written is unknown, not its factory default. */
 export interface MouseSettings {
-  dpi_stages: DpiStage[];
-  /** 0-based index into `dpi_stages`. */
-  active_stage: number;
-  polling_hz: number;
+  dpi: MouseDpi | null;
+  polling_hz: number | null;
   /** One action name per physical button, in button order. */
-  buttons: string[];
+  buttons: string[] | null;
 }
 
 export interface MouseState {
