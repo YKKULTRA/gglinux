@@ -19,8 +19,14 @@ pub fn names(comm: &str, cmdline: &[u8]) -> Vec<String> {
     if let Some(arg0) = args.next().filter(|a| !a.is_empty()) {
         // Chromium, Electron and node rewrite their title as the whole command
         // line in one string; the program is what comes before its first option.
+        // A dash word with a path separator before any `=` carries on the path
+        // ("Odd -Name\odd.exe"), so it isn't an option.
         let rewritten = args.all(|a| a.is_empty());
-        let option = arg0.windows(3).position(|w| w[0] == b' ' && w[1] == b'-' && w[2] != b' ');
+        let is_option = |word: &[u8]| {
+            word.iter().take_while(|&&b| b != b' ' && b != b'=').all(|&b| b != b'/' && b != b'\\')
+        };
+        let option = (0..arg0.len().saturating_sub(2))
+            .find(|&i| arg0[i] == b' ' && arg0[i + 1] == b'-' && arg0[i + 2] != b' ' && is_option(&arg0[i + 1..]));
         let arg0 = match option {
             Some(i) if rewritten => &arg0[..i],
             _ => arg0,
@@ -81,6 +87,14 @@ mod tests {
         // A path with spaces, dashes or real arguments is the program as it is.
         assert_eq!(names("wine64-preload\n", b"C:\\Games\\Star Wars - KOTOR\\swkotor.exe\0"), owned(&["wine64-preload", "swkotor.exe"]));
         assert_eq!(names("wine64-preload\n", b"C:\\Games\\Odd -Name\\odd.exe\0-windowed\0"), owned(&["wine64-preload", "odd.exe"]));
+    }
+
+    #[test]
+    fn a_dash_that_carries_on_the_path_is_not_an_option() {
+        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(names("wine64-preload\n", b"C:\\Games\\Odd -Name\\odd.exe\0"), owned(&["wine64-preload", "odd.exe"]));
+        assert_eq!(names("GameThread\n", b"/home/u/Games/My -Game/bin/game\0"), owned(&["GameThread", "game"]));
+        assert_eq!(names("game\n", b"/opt/My -Game/game --fullscreen -cfg=/tmp/x.cfg\0\0"), owned(&["game"]));
     }
 
     #[test]

@@ -47,7 +47,8 @@ owner's.
 - Scans `/proc/<pid>` entries owned by the owner's uid.
 - A process's names are its `comm` and the basename of `argv[0]`, splitting on both `/` and `\`,
   so Proton's `Z:\…\RDR2.exe` gives `RDR2.exe`. A title rewritten as the whole command line in
-  one string (Chromium, Electron, node) is cut before its first option, so a renderer is `chrome`.
+  one string (Chromium, Electron, node) is cut before its first option, so a renderer is `chrome`;
+  a dash word with a path separator before any `=` (`Odd -Name\odd.exe`) carries on the path.
 - Matching is case-insensitive. The first rule, in list order, whose process is running is
   *picked*.
 
