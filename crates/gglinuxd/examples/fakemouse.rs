@@ -27,9 +27,10 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use gg_device_keyboard::layout::ANSI_TKL;
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseDpi, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
+    DeviceKind, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyInfo, KeyboardState, Lighting, MouseDpi, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SmartVolume, SmartVolumeState,
     SonarState, StreamMix,
 };
@@ -46,7 +47,7 @@ struct Fake {
     controls: HeadsetControls,
     /// Sonar as last changed by the client.
     sonar: SonarState,
-    /// Keyboard lighting as last set; no layout, since nothing draws it here.
+    /// The keyboard, with lighting as last set.
     keyboard: KeyboardState,
     /// GameSense as the client last set it.
     gamesense: GameSenseState,
@@ -95,7 +96,7 @@ fn main() -> Result<()> {
         screen: ScreenSettings::default(),
         controls: HeadsetControls::default(),
         sonar: fake_sonar(),
-        keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default(), reactive: ReactiveStatus::Off },
+        keyboard: fake_keyboard(),
         gamesense: GameSenseState::default(),
         profiles: ProfilesState::default(),
         clips: ClipsState {
@@ -449,6 +450,19 @@ fn fake_sonar() -> SonarState {
     }
 }
 
+/// The Apex as the daemon reports it, lighting off.
+fn fake_keyboard() -> KeyboardState {
+    KeyboardState {
+        connected: true,
+        layout: ANSI_TKL
+            .iter()
+            .map(|&(code, label, x, y, w)| KeyInfo { code, label: label.to_owned(), x, y, w })
+            .collect(),
+        lighting: Lighting::default(),
+        reactive: ReactiveStatus::Off,
+    }
+}
+
 /// Flat bands shaped like the daemon's: a low shelf, peaks, a high shelf.
 fn fake_bands(n: usize) -> Vec<EqBand> {
     (0..n)
@@ -650,5 +664,13 @@ mod tests {
 
         // A request that carries nothing is still just its name.
         assert_eq!(describe(&Request::SaveClip), "save_clip");
+    }
+
+    #[test]
+    fn the_fake_keyboard_has_every_key_the_daemon_sends_for_drawing() {
+        // The Keyboard panel draws, paints and picks the mic-mute key from this.
+        let layout = fake_keyboard().layout;
+        assert_eq!(layout.len(), ANSI_TKL.len());
+        assert!(layout.iter().any(|k| k.label == "Esc"), "{layout:?}");
     }
 }
