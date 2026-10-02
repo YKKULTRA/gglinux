@@ -117,9 +117,19 @@ fn parse(args: &[String]) -> Result<Action> {
     }))
 }
 
-/// The arguments that aren't `--flags`.
+/// The arguments that aren't `--flags`, or the value that follows `--select`.
 fn positional(args: &[String]) -> Vec<&str> {
-    args.iter().map(String::as_str).filter(|a| !a.starts_with("--")).collect()
+    let mut words = Vec::new();
+    let mut args = args.iter().map(String::as_str);
+    while let Some(a) = args.next() {
+        if a == "--select" {
+            // Its number, which would otherwise be taken for the DPI list.
+            args.next();
+        } else if !a.starts_with("--") {
+            words.push(a);
+        }
+    }
+    words
 }
 
 fn mouse_request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
@@ -256,6 +266,19 @@ mod tests {
         match sends("profile apply Late Night") {
             Request::ApplyProfile { name } => assert_eq!(name, "Late Night"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_select_value_is_not_read_as_the_dpi_list() {
+        for line in ["mouse dpi --select 1 800,1600 --save", "mouse dpi 800,1600 --select 1 --save"] {
+            match sends(line) {
+                Request::SetMouseDpi { stages, active, save } => {
+                    assert_eq!(stages, [DpiStage { x: 800, y: 800 }, DpiStage { x: 1600, y: 1600 }], "{line}");
+                    assert_eq!((active, save), (1, true), "{line}");
+                }
+                other => panic!("{line}: {other:?}"),
+            }
         }
     }
 
