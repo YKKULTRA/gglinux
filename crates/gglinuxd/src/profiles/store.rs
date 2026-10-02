@@ -15,6 +15,10 @@ pub struct Store {
     pub profiles: Vec<Profile>,
     #[serde(default)]
     pub rules: Vec<GameRule>,
+    /// The owner's own lighting while a game rule's profile is on, put back when
+    /// the game ends. Saved, since the profile is saved as the lighting.
+    #[serde(default)]
+    pub before: Option<Lighting>,
 }
 
 fn clean(name: &str, what: &str) -> Result<String, String> {

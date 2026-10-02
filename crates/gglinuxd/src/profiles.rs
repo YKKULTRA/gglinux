@@ -63,9 +63,8 @@ pub struct Controller<P> {
     path: PathBuf,
     port: P,
     event_tx: broadcast::Sender<Event>,
-    /// The rule applied now, and the lighting to go back to.
+    /// The rule applied now; the lighting to go back to is in the store.
     active: Option<GameRule>,
-    before: Option<Lighting>,
     /// The game from the rules that's running now, for games-only clips.
     game_tx: watch::Sender<Option<String>>,
     published: Option<ProfilesState>,
@@ -79,7 +78,7 @@ impl<P: LightingPort> Controller<P> {
         event_tx: broadcast::Sender<Event>,
         game_tx: watch::Sender<Option<String>>,
     ) -> Self {
-        Controller { store, path, port, event_tx, active: None, before: None, game_tx, published: None }
+        Controller { store, path, port, event_tx, active: None, game_tx, published: None }
     }
 
     /// Apply or undo game rules for what's running (lower-cased names).
@@ -94,14 +93,22 @@ impl<P: LightingPort> Controller<P> {
             *now = game;
             true
         });
-        match decide(self.active.as_ref(), picked.as_ref()) {
+        let action = match decide(self.active.as_ref(), picked.as_ref()) {
+            // A game's lighting left on by a daemon that stopped mid-game.
+            Action::Stay if self.active.is_none() && self.store.before.is_some() => Action::Restore,
+            action => action,
+        };
+        match action {
             Action::Stay => {}
             Action::Apply(rule) => {
-                if self.active.is_none() {
+                // Not taken again after a restart mid-game, when the lighting is
+                // the game's; saved before the profile is saved over it.
+                if self.store.before.is_none() {
                     match self.port.get().await {
-                        Ok(l) => self.before = Some(l),
+                        Ok(l) => self.store.before = Some(l),
                         Err(e) => return warn!(error = %e, "could not read the lighting before a game rule"),
                     }
+                    store::save(&self.path, &self.store);
                 }
                 let lighting = self.store.profile(&rule.profile).map(|p| p.lighting.clone());
                 if let Some(lighting) = lighting {
@@ -113,10 +120,11 @@ impl<P: LightingPort> Controller<P> {
                 }
             }
             Action::Restore => {
-                if let Some(l) = self.before.take() {
+                if let Some(l) = self.store.before.take() {
                     if let Err(e) = self.port.set(l).await {
                         warn!(error = %e, "could not restore the lighting after a game");
                     }
+                    store::save(&self.path, &self.store);
                 }
                 info!("game rule ended; lighting restored");
                 self.active = None;
@@ -206,7 +214,7 @@ pub fn spawn(
                     None => break,
                 },
                 _ = tick.tick() => {
-                    if c.store.rules.is_empty() && c.active.is_none() && c.game_tx.borrow().is_none() {
+                    if c.store.rules.is_empty() && c.active.is_none() && c.store.before.is_none() && c.game_tx.borrow().is_none() {
                         continue; // nothing to watch for
                     }
                     let names = tokio::task::spawn_blocking(|| procs::running(std::path::Path::new("/proc"), unsafe { libc::getuid() }))
@@ -245,7 +253,16 @@ mod tests {
         Lighting { enabled: true, effect: Effect::Wave { period_s: p }, ..Lighting::default() }
     }
 
-    fn controller() -> (Controller<FakePort>, Arc<Mutex<Lighting>>) {
+    /// The store's file, removed when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn controller() -> (Controller<FakePort>, Arc<Mutex<Lighting>>, Scratch) {
         let now = Arc::new(Mutex::new(look(1.0))); // the owner's own lighting
         let mut store = Store::default();
         store.save_profile("A", look(2.0)).unwrap();
@@ -256,7 +273,7 @@ mod tests {
         ]).unwrap();
         let path = std::env::temp_dir().join(format!("gglinux-ctl-{}-{:?}.json", std::process::id(), std::thread::current().id()));
         let (event_tx, _) = broadcast::channel(8);
-        (Controller::new(store, path, FakePort(Arc::clone(&now)), event_tx, watch::channel(None).0), now)
+        (Controller::new(store, path.clone(), FakePort(Arc::clone(&now)), event_tx, watch::channel(None).0), now, Scratch(path))
     }
 
     fn running(names: &[&str]) -> HashSet<String> {
@@ -277,7 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_game_starting_applies_its_profile_and_ending_restores_the_lighting() {
-        let (mut c, now) = controller();
+        let (mut c, now, _file) = controller();
         c.follow(&running(&["game-a"])).await;
         assert_eq!(*now.lock().unwrap(), look(2.0));
         assert_eq!(c.active.as_ref().map(|r| r.profile.as_str()), Some("A"));
@@ -288,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn switching_games_keeps_the_original_to_restore() {
-        let (mut c, now) = controller();
+        let (mut c, now, _file) = controller();
         c.follow(&running(&["game-a"])).await;
         c.follow(&running(&["game-b"])).await;
         assert_eq!(*now.lock().unwrap(), look(3.0));
@@ -298,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_gaps_never_lose_the_original() {
-        let (mut c, now) = controller();
+        let (mut c, now, _file) = controller();
         c.follow(&running(&["game-a"])).await;
         c.follow(&running(&[])).await; // the launcher exits…
         c.follow(&running(&["game-a"])).await; // …and the game starts
@@ -307,8 +324,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_restart_during_a_game_never_loses_the_original() {
+        let (mut c, now, _file) = controller();
+        store::save(&c.path, &c.store); // the profiles and rules, as saved
+        c.follow(&running(&["game-a"])).await;
+        // The daemon stops mid-game; the keyboard keeps A's lighting.
+        let restart = |c: &Controller<FakePort>| {
+            Controller::new(store::load(&c.path), c.path.clone(), FakePort(Arc::clone(&now)), broadcast::channel(8).0, watch::channel(None).0)
+        };
+        let mut c = restart(&c);
+        c.follow(&running(&["game-a"])).await;
+        assert_eq!(*now.lock().unwrap(), look(2.0));
+        c.follow(&running(&[])).await;
+        assert_eq!(*now.lock().unwrap(), look(1.0), "not A's lighting");
+
+        c.follow(&running(&["game-a"])).await;
+        // And when the game ends while the daemon is stopped.
+        let mut c = restart(&c);
+        c.follow(&running(&[])).await;
+        assert_eq!(*now.lock().unwrap(), look(1.0));
+    }
+
+    #[tokio::test]
     async fn a_manual_apply_during_a_game_is_undone_when_the_game_ends() {
-        let (mut c, now) = controller();
+        let (mut c, now, _file) = controller();
         c.follow(&running(&["game-a"])).await;
         c.apply("B").await.unwrap();
         assert_eq!(*now.lock().unwrap(), look(3.0));
@@ -319,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_running_game_is_shared_even_without_a_keyboard() {
-        let (with_keyboard, _now) = controller();
+        let (with_keyboard, _now, _file) = controller();
         let (event_tx, _) = broadcast::channel(8);
         let (game_tx, game) = watch::channel(None);
         let mut c = Controller::new(with_keyboard.store, with_keyboard.path, NoKeyboard, event_tx, game_tx);
@@ -332,10 +371,9 @@ mod tests {
 
     #[tokio::test]
     async fn saving_takes_the_current_lighting() {
-        let (mut c, now) = controller();
+        let (mut c, now, _file) = controller();
         *now.lock().unwrap() = look(9.0);
         c.save_current("Nine").await.unwrap();
-        let _ = std::fs::remove_file(&c.path); // the only test that writes the store
         assert_eq!(c.store.profile("Nine").unwrap().lighting, look(9.0));
     }
 }
