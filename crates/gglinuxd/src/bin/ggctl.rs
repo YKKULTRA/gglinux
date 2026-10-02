@@ -1,19 +1,6 @@
 //! CLI client for gglinuxd. Installed as `ggctl`; from a checkout:
-//! `cargo run -p gglinuxd --bin ggctl`.
-//!
-//! ```text
-//! ggctl                                   # watch: device list, then live events
-//! ggctl mouse                             # battery + settings we have applied
-//! ggctl mouse dpi 800,1600 [--select N] [--save]   # N counts from 0
-//! ggctl mouse dpi 400:800,1600:1600       # per-axis X:Y
-//! ggctl mouse polling 1000 [--save]
-//! ggctl mouse buttons button1,button2,button3,button4,button5,dpi [--save]
-//! ggctl mouse save                        # commit whatever is applied to onboard memory
-//! ggctl clip save                         # save the instant replay (bind this to a key)
-//! ggctl profile list                      # saved lighting profiles
-//! ggctl profile apply <name>
-//! ggctl gamesense test|on|off
-//! ```
+//! `cargo run -p gglinuxd --bin ggctl`. The commands are in [`USAGE`], which
+//! `ggctl --help` prints.
 //!
 //! Prefer this over `gg-device-mouse`'s `mousectl` whenever the daemon is running:
 //! the daemon holds the device, and two writers on one hidraw node interleave badly.
@@ -25,21 +12,34 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{DpiStage, MouseSettings, Request, RequestFrame, ResponseData, ServerMessage};
 
+/// What `ggctl --help` prints.
+const USAGE: &str = "\
+ggctl                                   # watch: device list, then live events
+ggctl mouse                             # battery + settings we have applied
+ggctl mouse dpi 800,1600 [--select N] [--save]   # N counts from 0
+ggctl mouse dpi 400:800,1600:1600       # per-axis X:Y
+ggctl mouse polling 1000 [--save]
+ggctl mouse buttons button1,button2,button3,button4,button5,dpi [--save]
+ggctl mouse save                        # commit whatever is applied to onboard memory
+ggctl clip save                         # save the instant replay (bind this to a key)
+ggctl profile list                      # saved lighting profiles
+ggctl profile apply <name>
+ggctl gamesense test|on|off
+";
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Before connecting, so a typo fails the same whether or not the daemon runs.
-    let action = parse(&args)?;
-
-    let path = gg_ipc::socket_path();
-    let stream = UnixStream::connect(&path)
-        .with_context(|| format!("connecting to {} — is gglinuxd running?", path.display()))?;
-
-    let request = match action {
-        Action::Watch => return watch(stream),
+    let request = match parse(&args)? {
+        Action::Help => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        Action::Watch => return watch(connect()?),
         Action::Send(request) => request,
     };
 
-    match send(stream, request)? {
+    match send(connect()?, request)? {
         ResponseData::Mouse { state } => {
             println!(
                 "connected: {}\nbattery:   {}",
@@ -73,7 +73,7 @@ fn main() -> Result<()> {
             println!("ok");
             // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.
             let save = args.iter().any(|a| a == "--save");
-            if !save && matches!(positional(&args).as_slice(), ["mouse", command, ..] if *command != "save") {
+            if !save && matches!(positional(&args)?.as_slice(), ["mouse", command, ..] if *command != "save") {
                 println!("note: not saved — pass --save to keep this across a power cycle");
             }
         }
@@ -87,11 +87,16 @@ enum Action {
     /// Stream everything the daemon sends until it goes quiet.
     Watch,
     Send(Request),
+    /// Print the commands.
+    Help,
 }
 
 fn parse(args: &[String]) -> Result<Action> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return Ok(Action::Help);
+    }
     let save = args.iter().any(|a| a == "--save");
-    Ok(Action::Send(match positional(args).split_first() {
+    Ok(Action::Send(match positional(args)?.split_first() {
         None => return Ok(Action::Watch),
         Some((&"mouse", rest)) => mouse_request(rest, args, save)?,
         Some((&"clip", ["save"])) => Request::SaveClip,
@@ -113,52 +118,64 @@ fn parse(args: &[String]) -> Result<Action> {
 }
 
 /// The arguments that aren't `--flags`, or the value that follows `--select`.
-fn positional(args: &[String]) -> Vec<&str> {
+///
+/// A flag we don't know is an error rather than skipped, since the mouse can't be
+/// read back: a typo like `--sava` would otherwise write something unsaved.
+fn positional(args: &[String]) -> Result<Vec<&str>> {
     let mut words = Vec::new();
     let mut args = args.iter().map(String::as_str);
     while let Some(a) = args.next() {
-        if a == "--select" {
+        match a {
             // Its number, which would otherwise be taken for the DPI list.
-            args.next();
-        } else if !a.starts_with("--") {
-            words.push(a);
+            "--select" => {
+                args.next().context("--select expects a number")?;
+            }
+            "--save" => {}
+            a if a.starts_with("--select=") => {}
+            a if a.starts_with("--") => bail!("unknown option '{a}' (try: --save, --select N, --help)"),
+            a => words.push(a),
         }
     }
-    words
+    Ok(words)
 }
 
+/// Each mouse command takes exactly one value, so `dpi 800 1600` (a space where
+/// the comma belongs) is refused rather than sent as the single stage 800.
 fn mouse_request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
     Ok(match rest.split_first() {
         None => Request::GetMouseState,
-        Some((&"dpi", tail)) => Request::SetMouseDpi {
-            stages: parse_stages(tail.first().context("usage: ggctl mouse dpi 800,1600")?)?,
+        Some((&"dpi", [spec])) => Request::SetMouseDpi {
+            stages: parse_stages(spec)?,
             active: flag_value(args, "--select")
                 .map(|v| v.parse::<usize>().context("--select expects a number"))
                 .transpose()?
                 .unwrap_or(0),
             save,
         },
-        Some((&"polling", tail)) => Request::SetMousePolling {
-            hz: tail
-                .first()
-                .context("usage: ggctl mouse polling 1000")?
-                .parse()
-                .context("polling rate must be a number")?,
+        Some((&"dpi", _)) => bail!("usage: ggctl mouse dpi 800,1600 [--select N] [--save]"),
+        Some((&"polling", [hz])) => Request::SetMousePolling {
+            hz: hz.parse().context("polling rate must be a number")?,
             save,
         },
-        Some((&"buttons", tail)) => Request::SetMouseButtons {
-            actions: tail
-                .first()
-                .context("usage: ggctl mouse buttons button1,...,dpi")?
+        Some((&"polling", _)) => bail!("usage: ggctl mouse polling 1000 [--save]"),
+        Some((&"buttons", [actions])) => Request::SetMouseButtons {
+            actions: actions
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
             save,
         },
-        Some((&"save", _)) => Request::SaveMouse,
+        Some((&"buttons", _)) => bail!("usage: ggctl mouse buttons button1,...,dpi [--save]"),
+        Some((&"save", [])) => Request::SaveMouse,
+        Some((&"save", _)) => bail!("usage: ggctl mouse save"),
         Some((other, _)) => bail!("unknown mouse command '{other}' (try: dpi, polling, buttons, save)"),
     })
+}
+
+fn connect() -> Result<UnixStream> {
+    let path = gg_ipc::socket_path();
+    UnixStream::connect(&path).with_context(|| format!("connecting to {} — is gglinuxd running?", path.display()))
 }
 
 /// Send one request and return its response, ignoring events that arrive first.
@@ -200,9 +217,12 @@ fn watch(stream: UnixStream) -> Result<()> {
     Ok(())
 }
 
+/// The value given as `--flag N` or `--flag=N`.
 fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    let i = args.iter().position(|a| a == flag)?;
-    args.get(i + 1).map(String::as_str)
+    args.iter().enumerate().find_map(|(i, a)| match a.strip_prefix(flag)? {
+        "" => args.get(i + 1).map(String::as_str),
+        rest => rest.strip_prefix('='),
+    })
 }
 
 /// The applied DPI stages, and which one is active.
@@ -250,6 +270,7 @@ mod tests {
         match parse(&args(line)).unwrap() {
             Action::Send(r) => r,
             Action::Watch => panic!("{line} parsed as watch"),
+            Action::Help => panic!("{line} parsed as help"),
         }
     }
 
@@ -311,6 +332,38 @@ mod tests {
     fn mistakes_are_errors() {
         for bad in ["clip", "clip delete", "profile", "profile apply", "gamesense maybe", "frobnicate"] {
             assert!(parse(&args(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_mouse_command_with_a_stray_word_or_flag_writes_nothing() {
+        for bad in [
+            // A space where the comma belongs would otherwise send just the first stage.
+            "mouse dpi 800 1600 --save",
+            "mouse dpi",
+            "mouse dpi 800,1600 --sava",
+            "mouse dpi 800,1600 --select",
+            "mouse polling 1000 500",
+            "mouse buttons button1, button2",
+            "mouse save now",
+            "--version",
+        ] {
+            assert!(parse(&args(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn select_takes_the_equals_form_too() {
+        match sends("mouse dpi 400,800 --select=1") {
+            Request::SetMouseDpi { active, .. } => assert_eq!(active, 1),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_is_asked_for_rather_than_watching() {
+        for line in ["--help", "-h", "mouse dpi 800,1600 --save --help"] {
+            assert!(matches!(parse(&args(line)), Ok(Action::Help)), "{line}");
         }
     }
 }
