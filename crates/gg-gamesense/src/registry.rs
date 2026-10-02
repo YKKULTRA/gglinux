@@ -511,6 +511,15 @@ mod tests {
     }
 
     #[test]
+    fn a_bitmap_handler_does_not_fail_the_rest_of_its_bind() {
+        let mut r = Registry::default();
+        let handlers = json!([{ "device-type": "rgb-per-key-zones", "mode": "bitmap" }, fkeys_bar()[0].clone()]);
+        r.bind_event(bind("G", "HEALTH", handlers)).unwrap();
+        send(&mut r, "G", "HEALTH", 100.0, 0.0).unwrap();
+        assert_eq!(r.paint(0.5).unwrap().len(), 12, "the F-key bar still paints");
+    }
+
+    #[test]
     fn saved_games_restore_with_their_bindings_but_not_their_values() {
         let mut r = with_bar();
         r.game_metadata(serde_json::from_value(json!({ "game": "G", "game_display_name": "Game",

@@ -95,7 +95,8 @@ pub struct RemoveEvent {
 pub enum Target {
     /// HID codes on this keyboard, in zone order.
     Keys(Vec<u8>),
-    /// A device this machine can't show: a screen, tactile, mouse, headset, zoned RGB.
+    /// What this machine can't show: a screen, tactile, mouse, headset, zoned
+    /// RGB, or a keyboard bitmap.
     Unsupported,
 }
 
@@ -147,16 +148,18 @@ pub struct Handler {
 const KEY_DEVICES: [&str; 2] = ["keyboard", "rgb-per-key-zones"];
 
 impl Handler {
-    /// Parse one handler. Handlers for devices this machine can't show become
-    /// [`Target::Unsupported`] without further checks; a malformed key handler
-    /// is an error, so a game's bug is reported rather than silently dark.
+    /// Parse one handler. Handlers for devices this machine can't show, and the
+    /// SDK's `bitmap` and `partial-bitmap` modes, become [`Target::Unsupported`]
+    /// without further checks; a malformed key handler is an error, so a game's
+    /// bug is reported rather than silently dark.
     pub fn parse(v: &Value) -> Result<Handler, String> {
         let o = v.as_object().ok_or("a handler must be an object")?;
         let device = o
             .get("device-type")
             .and_then(Value::as_str)
             .ok_or("a handler needs a device-type")?;
-        if !KEY_DEVICES.contains(&device) {
+        let mode = o.get("mode").and_then(Value::as_str).unwrap_or("color");
+        if !KEY_DEVICES.contains(&device) || matches!(mode, "bitmap" | "partial-bitmap") {
             return Ok(Handler { target: Target::Unsupported, mode: Mode::Color, color: None, rate: None, context_frame_key: None });
         }
         let target = match (o.get("custom-zone-keys"), o.get("zone").and_then(Value::as_str)) {
@@ -164,7 +167,7 @@ impl Handler {
             (None, Some(zone)) => Target::Keys(zones::named(zone)),
             (None, None) => return Err("a handler needs a zone or custom-zone-keys".into()),
         };
-        let mode = match o.get("mode").and_then(Value::as_str).unwrap_or("color") {
+        let mode = match mode {
             "color" => Mode::Color,
             "percent" => Mode::Percent,
             "count" => Mode::Count,
@@ -305,6 +308,16 @@ mod tests {
             json!({ "device-type": "tactile", "zone": "one", "mode": "vibrate", "pattern": [] }),
             json!({ "device-type": "mouse", "zone": "wheel", "color": { "red": 1, "green": 2, "blue": 3 } }),
             json!({ "device-type": "rgb-2-zone", "zone": "two", "color": { "red": 1, "green": 2, "blue": 3 } }),
+        ] {
+            assert_eq!(Handler::parse(&v).unwrap().target, Target::Unsupported, "{v}");
+        }
+    }
+
+    #[test]
+    fn the_sdk_bitmap_modes_are_kept_as_unsupported() {
+        for v in [
+            json!({ "device-type": "rgb-per-key-zones", "mode": "bitmap" }),
+            json!({ "device-type": "rgb-per-key-zones", "mode": "partial-bitmap", "excluded-events": ["HEALTH"] }),
         ] {
             assert_eq!(Handler::parse(&v).unwrap().target, Target::Unsupported, "{v}");
         }
