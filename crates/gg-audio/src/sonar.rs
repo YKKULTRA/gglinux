@@ -418,6 +418,11 @@ impl<T: PwTools> Sonar<T> {
         std::fs::write(&self.dropin_path, text)
             .with_context(|| format!("writing {}", self.dropin_path.display()))?;
         info!(enabled, "streamer mode changed; restarting PipeWire");
+        // The channels come back with the drop-in's defaults: push it all again,
+        // even if a step below fails and returns early — the next tick does it then.
+        self.levels_applied = false;
+        self.stream_levels_applied = false;
+        self.routed.clear();
         self.tools.run(&tools::restart_pipewire())?;
         let ready = |g: &Graph| channels_up(g) && (!enabled || g.node(config::STREAM_SINK).is_some());
         if !self.wait_until(ready) {
@@ -428,10 +433,7 @@ impl<T: PwTools> Sonar<T> {
             }
         }
         self.take_defaults()?;
-        self.levels_applied = false;
-        self.stream_levels_applied = false;
         self.keep_levels();
-        self.routed.clear();
         self.route();
         Ok(())
     }
@@ -854,6 +856,8 @@ mod tests {
         refuses_stage: RefCell<bool>,
         /// Off holds the stream mix back while the channels are up.
         stream_comes_up: RefCell<bool>,
+        /// Commands starting with these words fail, after doing what they do.
+        fails: RefCell<&'static [&'static str]>,
         runs: RefCell<Vec<Vec<String>>>,
     }
 
@@ -869,6 +873,7 @@ mod tests {
                 smart_volume: RefCell::new(true),
                 refuses_stage: RefCell::new(false),
                 stream_comes_up: RefCell::new(true),
+                fails: RefCell::new(&[]),
                 runs: RefCell::new(Vec::new()),
             }
         }
@@ -934,6 +939,10 @@ mod tests {
                 *self.up.borrow_mut() = self.channels_come_up && self.dropin.exists() && !refused;
             }
             self.runs.borrow_mut().push(argv.to_vec());
+            let fails = *self.fails.borrow();
+            if !fails.is_empty() && argv.len() >= fails.len() && argv.iter().zip(fails).all(|(a, f)| a == f) {
+                bail!("`{}` failed", argv.join(" "));
+            }
             Ok(())
         }
 
@@ -1422,6 +1431,24 @@ mod tests {
         sonar.tick();
         assert!(fake.ran(&["wpctl", "set-volume", "25", "1.000"]), "the master level");
         assert!(!fake.ran(&["wpctl", "set-volume", "21", "0.400"]), "the channels are not pushed again");
+    }
+
+    #[test]
+    fn a_streamer_switch_that_fails_after_the_restart_still_gets_the_levels_back() {
+        let (_dir, settings_path, dropin) = paths("streamer-fails");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_chatmix(0.5).unwrap();
+        // PipeWire restarts with the new drop-in, then the defaults can't be set.
+        *fake.fails.borrow_mut() = &["wpctl", "set-default"];
+        assert!(sonar.set_streamer(true).is_err());
+        *fake.fails.borrow_mut() = &[];
+        fake.runs.borrow_mut().clear();
+        sonar.tick();
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
+        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "the apps routed again");
     }
 
     #[test]
