@@ -195,11 +195,12 @@ mod tests {
     #[test]
     fn plugins_are_found_by_file() {
         let dir = crate::testing::scratch("ladspa");
-        assert!(!plugins_present_in(std::slice::from_ref(&dir)));
+        let dirs = [dir.to_path_buf()];
+        assert!(!plugins_present_in(&dirs));
         std::fs::write(dir.join("librnnoise_ladspa.so"), b"").unwrap();
-        assert!(!plugins_present_in(std::slice::from_ref(&dir)), "both are needed");
+        assert!(!plugins_present_in(&dirs), "both are needed");
         std::fs::write(dir.join("sc4m_1916.so"), b"").unwrap();
-        assert!(plugins_present_in(&[dir]));
+        assert!(plugins_present_in(&dirs));
     }
 
     #[test]

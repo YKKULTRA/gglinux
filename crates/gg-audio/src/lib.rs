@@ -71,13 +71,30 @@ pub(crate) mod testing {
         Value::Array(objects).to_string()
     }
 
-    /// An empty directory unique to one test.
-    pub fn scratch(name: &str) -> std::path::PathBuf {
+    /// An empty directory unique to one test, removed with everything in it
+    /// when this goes out of scope.
+    pub struct Scratch(std::path::PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir()
             .join("gg-audio-tests")
             .join(format!("{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 }

@@ -128,7 +128,8 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let path = scratch("settings-rt").join("gglinux").join("sonar.json");
+        let dir = scratch("settings-rt");
+        let path = dir.join("gglinux").join("sonar.json");
         let mut rules = Rules::default();
         rules.set("firefox", Channel::Aux);
         let s = Settings {
@@ -150,14 +151,16 @@ mod tests {
 
     #[test]
     fn corrupt_settings_fall_back_to_defaults() {
-        let path = scratch("settings-corrupt").join("sonar.json");
+        let dir = scratch("settings-corrupt");
+        let path = dir.join("sonar.json");
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(load(&path), Settings::default());
     }
 
     #[test]
     fn settings_from_before_smart_volume_still_load() {
-        let path = scratch("settings-old").join("sonar.json");
+        let dir = scratch("settings-old");
+        let path = dir.join("sonar.json");
         std::fs::write(&path, r#"{"enabled":true,"output":"alsa_output.x","chatmix":0.5}"#).unwrap();
         let s = load(&path);
         assert!(s.enabled && s.smart_volume.is_empty());

@@ -335,6 +335,7 @@ mod tests {
         let (mut c, now) = controller();
         *now.lock().unwrap() = look(9.0);
         c.save_current("Nine").await.unwrap();
+        let _ = std::fs::remove_file(&c.path); // the only test that writes the store
         assert_eq!(c.store.profile("Nine").unwrap().lighting, look(9.0));
     }
 }

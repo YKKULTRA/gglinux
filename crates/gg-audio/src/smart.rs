@@ -130,8 +130,9 @@ mod tests {
     #[test]
     fn the_compressor_is_found_by_file() {
         let dir = crate::testing::scratch("smart-ladspa");
-        assert!(!compressor_present_in(std::slice::from_ref(&dir)));
+        let dirs = [dir.to_path_buf()];
+        assert!(!compressor_present_in(&dirs));
         std::fs::write(dir.join("sc4m_1916.so"), b"").unwrap();
-        assert!(compressor_present_in(&[dir]));
+        assert!(compressor_present_in(&dirs));
     }
 }

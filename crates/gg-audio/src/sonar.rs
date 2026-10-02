@@ -830,7 +830,7 @@ impl<T: PwTools> Sonar<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{dump_with_source, scratch};
+    use crate::testing::{dump_with_source, scratch, Scratch};
     use gg_ipc::{HeadphoneEq, MicSettings, SmartLevel};
     use std::cell::RefCell;
 
@@ -948,16 +948,18 @@ mod tests {
         }
     }
 
-    fn paths(name: &str) -> (PathBuf, PathBuf) {
+    /// One test's settings and drop-in paths, in a directory removed when the guard goes.
+    fn paths(name: &str) -> (Scratch, PathBuf, PathBuf) {
         let dir = scratch(name);
-        (dir.join("sonar.json"), dir.join("pipewire.conf.d").join(config::FILE_NAME))
+        let (settings, dropin) = (dir.join("sonar.json"), dir.join("pipewire.conf.d").join(config::FILE_NAME));
+        (dir, settings, dropin)
     }
 
     const APPS: &[(u32, &str)] = &[(40, "Discord"), (41, "firefox"), (42, "game.bin")];
 
     #[test]
     fn enable_writes_the_dropin_restarts_and_makes_game_default() {
-        let (settings_path, dropin) = paths("enable");
+        let (_dir, settings_path, dropin) = paths("enable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
@@ -978,7 +980,7 @@ mod tests {
 
     #[test]
     fn enable_rolls_back_when_the_channels_never_appear() {
-        let (settings_path, dropin) = paths("rollback");
+        let (_dir, settings_path, dropin) = paths("rollback");
         let mut fake = Fake::new(dropin.clone(), APPS);
         fake.channels_come_up = false;
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
@@ -991,7 +993,7 @@ mod tests {
 
     #[test]
     fn streams_are_routed_once() {
-        let (settings_path, dropin) = paths("once");
+        let (_dir, settings_path, dropin) = paths("once");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1006,7 +1008,7 @@ mod tests {
 
     #[test]
     fn outlets_are_never_routed() {
-        let (settings_path, dropin) = paths("outlets");
+        let (_dir, settings_path, dropin) = paths("outlets");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1021,7 +1023,7 @@ mod tests {
 
     #[test]
     fn changing_an_apps_channel_moves_it_now_and_is_remembered() {
-        let (settings_path, dropin) = paths("move");
+        let (_dir, settings_path, dropin) = paths("move");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1032,7 +1034,7 @@ mod tests {
 
     #[test]
     fn chatmix_turns_down_the_other_side() {
-        let (settings_path, dropin) = paths("chatmix");
+        let (_dir, settings_path, dropin) = paths("chatmix");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1043,7 +1045,7 @@ mod tests {
 
     #[test]
     fn volume_is_saved_and_applied_to_the_channel_sink() {
-        let (settings_path, dropin) = paths("volume");
+        let (_dir, settings_path, dropin) = paths("volume");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1054,7 +1056,7 @@ mod tests {
 
     #[test]
     fn output_change_retargets_outlets_without_a_restart() {
-        let (settings_path, dropin) = paths("output");
+        let (_dir, settings_path, dropin) = paths("output");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
@@ -1070,7 +1072,7 @@ mod tests {
 
     #[test]
     fn disable_removes_the_dropin_and_restores_the_default() {
-        let (settings_path, dropin) = paths("disable");
+        let (_dir, settings_path, dropin) = paths("disable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
@@ -1083,7 +1085,7 @@ mod tests {
 
     #[test]
     fn a_removed_dropin_means_sonar_is_off() {
-        let (settings_path, dropin) = paths("removed");
+        let (_dir, settings_path, dropin) = paths("removed");
         let saved = Settings { enabled: true, ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
@@ -1095,7 +1097,7 @@ mod tests {
 
     #[test]
     fn levels_are_restored_when_the_channels_come_back() {
-        let (settings_path, dropin) = paths("comeback");
+        let (_dir, settings_path, dropin) = paths("comeback");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1114,7 +1116,7 @@ mod tests {
 
     #[test]
     fn state_lists_outputs_channels_and_apps() {
-        let (settings_path, dropin) = paths("state");
+        let (_dir, settings_path, dropin) = paths("state");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1135,7 +1137,7 @@ mod tests {
 
     #[test]
     fn enable_sets_every_channels_chain() {
-        let (settings_path, dropin) = paths("eq-enable");
+        let (_dir, settings_path, dropin) = paths("eq-enable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1147,7 +1149,7 @@ mod tests {
 
     #[test]
     fn channel_eq_is_validated_saved_and_set_live() {
-        let (settings_path, dropin) = paths("eq-channel");
+        let (_dir, settings_path, dropin) = paths("eq-channel");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1166,7 +1168,7 @@ mod tests {
 
     #[test]
     fn headphone_eq_reaches_every_channel() {
-        let (settings_path, dropin) = paths("eq-headphone");
+        let (_dir, settings_path, dropin) = paths("eq-headphone");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1178,7 +1180,7 @@ mod tests {
 
     #[test]
     fn autoeq_import_names_the_correction() {
-        let (settings_path, dropin) = paths("eq-import");
+        let (_dir, settings_path, dropin) = paths("eq-import");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1193,7 +1195,7 @@ mod tests {
 
     #[test]
     fn an_outdated_dropin_is_rewritten_with_one_restart() {
-        let (settings_path, dropin) = paths("upgrade");
+        let (_dir, settings_path, dropin) = paths("upgrade");
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1207,7 +1209,7 @@ mod tests {
 
     #[test]
     fn a_current_dropin_is_left_alone() {
-        let (settings_path, dropin) = paths("current");
+        let (_dir, settings_path, dropin) = paths("current");
         let saved = Settings {
             enabled: true,
             output: Some(BT.into()),
@@ -1225,7 +1227,7 @@ mod tests {
 
     #[test]
     fn enable_installs_the_mic_and_makes_it_the_default_input() {
-        let (settings_path, dropin) = paths("mic-enable");
+        let (_dir, settings_path, dropin) = paths("mic-enable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
@@ -1242,7 +1244,7 @@ mod tests {
 
     #[test]
     fn without_mic_plugins_the_channels_still_work() {
-        let (settings_path, dropin) = paths("mic-none");
+        let (_dir, settings_path, dropin) = paths("mic-none");
         let mut fake = Fake::new(dropin.clone(), APPS);
         fake.mic_plugins = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
@@ -1255,7 +1257,7 @@ mod tests {
 
     #[test]
     fn channels_up_without_the_mic_keeps_sonar_on() {
-        let (settings_path, dropin) = paths("mic-failed");
+        let (_dir, settings_path, dropin) = paths("mic-failed");
         let mut fake = Fake::new(dropin.clone(), APPS);
         fake.mic_comes_up = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
@@ -1267,7 +1269,7 @@ mod tests {
 
     #[test]
     fn mic_settings_are_validated_saved_and_set_live() {
-        let (settings_path, dropin) = paths("mic-settings");
+        let (_dir, settings_path, dropin) = paths("mic-settings");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1283,7 +1285,7 @@ mod tests {
 
     #[test]
     fn mic_volume_goes_to_the_virtual_source() {
-        let (settings_path, dropin) = paths("mic-volume");
+        let (_dir, settings_path, dropin) = paths("mic-volume");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1293,7 +1295,7 @@ mod tests {
 
     #[test]
     fn disable_restores_the_default_input() {
-        let (settings_path, dropin) = paths("mic-disable");
+        let (_dir, settings_path, dropin) = paths("mic-disable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1303,7 +1305,7 @@ mod tests {
 
     #[test]
     fn plugins_installed_later_add_the_mic_on_startup() {
-        let (settings_path, dropin) = paths("mic-later");
+        let (_dir, settings_path, dropin) = paths("mic-later");
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1317,7 +1319,7 @@ mod tests {
 
     #[test]
     fn streamer_while_sonar_is_off_only_saves() {
-        let (settings_path, dropin) = paths("streamer-off");
+        let (_dir, settings_path, dropin) = paths("streamer-off");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.set_streamer(true).unwrap();
@@ -1329,7 +1331,7 @@ mod tests {
 
     #[test]
     fn streamer_on_with_sonar_on_rewrites_restarts_and_sets_levels() {
-        let (settings_path, dropin) = paths("streamer-on");
+        let (_dir, settings_path, dropin) = paths("streamer-on");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
@@ -1349,7 +1351,7 @@ mod tests {
 
     #[test]
     fn stream_volumes_go_to_the_feed_nodes() {
-        let (settings_path, dropin) = paths("stream-volumes");
+        let (_dir, settings_path, dropin) = paths("stream-volumes");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1363,7 +1365,7 @@ mod tests {
 
     #[test]
     fn routing_ignores_the_stream_feeds() {
-        let (settings_path, dropin) = paths("stream-routing");
+        let (_dir, settings_path, dropin) = paths("stream-routing");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1379,7 +1381,7 @@ mod tests {
 
     #[test]
     fn stream_levels_come_back_after_a_restart() {
-        let (settings_path, dropin) = paths("stream-restart");
+        let (_dir, settings_path, dropin) = paths("stream-restart");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1399,7 +1401,7 @@ mod tests {
 
     #[test]
     fn a_missing_stream_mix_leaves_the_channels_their_levels() {
-        let (settings_path, dropin) = paths("stream-missing");
+        let (_dir, settings_path, dropin) = paths("stream-missing");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1424,7 +1426,7 @@ mod tests {
 
     #[test]
     fn enable_sets_every_channels_smart_volume() {
-        let (settings_path, dropin) = paths("smart-enable");
+        let (_dir, settings_path, dropin) = paths("smart-enable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
@@ -1437,7 +1439,7 @@ mod tests {
 
     #[test]
     fn smart_volume_switches_live_without_a_restart() {
-        let (settings_path, dropin) = paths("smart-live");
+        let (_dir, settings_path, dropin) = paths("smart-live");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1457,7 +1459,7 @@ mod tests {
 
     #[test]
     fn without_the_compressor_the_channels_are_as_before() {
-        let (settings_path, dropin) = paths("smart-none");
+        let (_dir, settings_path, dropin) = paths("smart-none");
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.smart_volume.borrow_mut() = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
@@ -1476,7 +1478,7 @@ mod tests {
 
     #[test]
     fn a_compressor_that_disappears_takes_the_stage_out_on_startup() {
-        let (settings_path, dropin) = paths("smart-gone");
+        let (_dir, settings_path, dropin) = paths("smart-gone");
         let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1490,7 +1492,7 @@ mod tests {
 
     #[test]
     fn a_compressor_that_appears_adds_the_stage_on_startup() {
-        let (settings_path, dropin) = paths("smart-new");
+        let (_dir, settings_path, dropin) = paths("smart-new");
         let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1504,7 +1506,7 @@ mod tests {
 
     #[test]
     fn a_refused_stage_is_taken_out_when_sonar_turns_on() {
-        let (settings_path, dropin) = paths("smart-refused");
+        let (_dir, settings_path, dropin) = paths("smart-refused");
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.refuses_stage.borrow_mut() = true;
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
@@ -1523,7 +1525,7 @@ mod tests {
 
     #[test]
     fn a_refused_stage_is_taken_out_on_startup() {
-        let (settings_path, dropin) = paths("smart-refused-upgrade");
+        let (_dir, settings_path, dropin) = paths("smart-refused-upgrade");
         let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1542,7 +1544,7 @@ mod tests {
 
     #[test]
     fn a_stage_refused_at_login_is_taken_out_on_startup() {
-        let (settings_path, dropin) = paths("smart-refused-login");
+        let (_dir, settings_path, dropin) = paths("smart-refused-login");
         let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1558,7 +1560,7 @@ mod tests {
 
     #[test]
     fn a_stage_refused_after_a_streamer_restart_is_taken_out() {
-        let (settings_path, dropin) = paths("smart-refused-streamer");
+        let (_dir, settings_path, dropin) = paths("smart-refused-streamer");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
@@ -1571,7 +1573,7 @@ mod tests {
 
     #[test]
     fn a_compressor_removed_while_sonar_runs_leaves_the_dropin_at_once() {
-        let (settings_path, dropin) = paths("smart-removed");
+        let (_dir, settings_path, dropin) = paths("smart-removed");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
@@ -1590,7 +1592,7 @@ mod tests {
 
     #[test]
     fn a_compressor_installed_while_sonar_runs_waits_for_sonar_off_and_on() {
-        let (settings_path, dropin) = paths("smart-installed");
+        let (_dir, settings_path, dropin) = paths("smart-installed");
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.smart_volume.borrow_mut() = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
@@ -1617,7 +1619,7 @@ mod tests {
 
     #[test]
     fn a_compressor_removed_before_a_pipewire_restart_brings_the_channels_back() {
-        let (settings_path, dropin) = paths("smart-removed-restart");
+        let (_dir, settings_path, dropin) = paths("smart-removed-restart");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
