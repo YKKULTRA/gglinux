@@ -102,6 +102,9 @@ pub struct Controller {
     mixed: Option<String>,
     error: Option<String>,
     hotkey: Option<String>,
+    /// Why there's no hotkey. Apart from `error`, which every start clears:
+    /// the hotkey is bound once, not with each recorder.
+    hotkey_error: Option<String>,
     hotkey_task: Option<tokio::task::JoinHandle<()>>,
     /// Only the daemon binds the portal hotkey; tests never touch the desktop.
     hotkey_allowed: bool,
@@ -126,7 +129,7 @@ impl Controller {
             settings, path, program, event_tx, internal_tx,
             running: None, generation: 0, delay: Duration::ZERO, retry_at: None,
             game: None, linger_until: None, mixed: None,
-            error: None, hotkey: None, hotkey_task: None, hotkey_allowed: false, published: None,
+            error: None, hotkey: None, hotkey_error: None, hotkey_task: None, hotkey_allowed: false, published: None,
         };
         (c, internal_rx)
     }
@@ -235,6 +238,7 @@ impl Controller {
             } else if let Some(t) = self.hotkey_task.take() {
                 t.abort();
                 self.hotkey = None;
+                self.hotkey_error = None;
             }
         }
         Ok(())
@@ -293,10 +297,13 @@ impl Controller {
             }
             Internal::Refresh => {}
             Internal::Hotkey(result) => match result {
-                Ok(trigger) => self.hotkey = Some(trigger),
+                Ok(trigger) => {
+                    self.hotkey = Some(trigger);
+                    self.hotkey_error = None;
+                }
                 Err(e) => {
                     self.hotkey = None;
-                    self.error = Some(format!("no hotkey ({e}); use the button or `ggctl clip save`"));
+                    self.hotkey_error = Some(format!("no hotkey ({e}); use the button or `ggctl clip save`"));
                 }
             },
             Internal::SaveFromHotkey => {
@@ -327,6 +334,7 @@ impl Controller {
             clips: recorder::list(&dir),
             error: self.error.clone(),
             hotkey: self.hotkey.clone(),
+            hotkey_error: self.hotkey_error.clone(),
             game: self.game.clone(),
             waiting: self.settings.enabled && self.settings.games_only && self.running.is_none() && self.game.is_none(),
         }
@@ -675,6 +683,27 @@ mod tests {
         let log = std::fs::read_to_string(d.join("log")).unwrap();
         assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 1, "one recorder throughout:\n{log}");
         assert!(!log.lines().any(|l| l == "int"), "{log}");
+        c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_hotkey_is_still_reported_when_the_next_game_starts() {
+        let d = scratch("hotkey");
+        let (mut c, _internal) = games_only(&d, stand_in(&d, false));
+        c.set_game(Some("game-a".into())).await;
+        start(&mut c).await;
+        c.on_internal(Internal::Hotkey(Err("the portal refused".into()))).await;
+        let note = c.state().hotkey_error;
+        assert!(note.as_deref().is_some_and(|n| n.contains("the portal refused")), "{note:?}");
+        // The game ends and another starts: a new recorder, and no new binding.
+        c.set_game(None).await;
+        c.linger_over().await;
+        c.set_game(Some("game-b".into())).await;
+        start(&mut c).await;
+        let s = c.state();
+        assert!(s.recording);
+        assert_eq!((s.hotkey, s.hotkey_error), (None, note));
         c.stop().await;
         std::fs::remove_dir_all(d).unwrap();
     }

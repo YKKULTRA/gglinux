@@ -76,11 +76,12 @@ From PROTOCOLS.md §5, plus the gpu-screen-recorder docs:
   `save-clip` ("Save the last clip"), preferred trigger `ALT+S`.
 - Each activation saves. The trigger KDE reports is shown in the UI.
 - Failures (no portal, the owner declined) are logged once and shown as "no hotkey; use the button
-  or `ggctl clip save`".
+  or `ggctl clip save`", in place of the hotkey (`hotkey_error`: apart from `error`, which each
+  recorder start clears).
 
 **IPC:**
 - `ClipInfo { name, bytes, modified }`;
-- `ClipsState { available, enabled, recording, settings, dir, clips, error: Option<String>, hotkey: Option<String> }`;
+- `ClipsState { available, enabled, recording, settings, dir, clips, error: Option<String>, hotkey: Option<String>, hotkey_error: Option<String> }`;
 - requests: `get_clips_state`, `set_clips_settings { settings }`, `save_clip`,
   `delete_clip { name }`;
 - event: `clips_changed { state }`.

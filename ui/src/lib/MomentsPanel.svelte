@@ -96,7 +96,13 @@
       </div>
       <div class="row">
         <button class="primary" disabled={busy || !st.recording} onclick={() => run(() => daemon.saveClip())}>Save clip</button>
-        <span class="meta">{st.hotkey ? `Hotkey: ${st.hotkey}` : "No hotkey yet: KDE asks to confirm Alt+S when clips start."}</span>
+        {#if st.hotkey}
+          <span class="meta">Hotkey: {st.hotkey}</span>
+        {:else if st.hotkey_error}
+          <span class="meta warn">{st.hotkey_error}</span>
+        {:else}
+          <span class="meta">No hotkey yet: KDE asks to confirm Alt+S when clips start.</span>
+        {/if}
       </div>
       {#if st.error}<p class="meta warn">{st.error}</p>{/if}
     </section>

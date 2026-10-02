@@ -343,6 +343,8 @@ export interface ClipsState {
   error: string | null;
   /** The hotkey KDE bound, if any. */
   hotkey: string | null;
+  /** Why there's no hotkey, once binding it has failed. */
+  hotkey_error: string | null;
   /** The game from the rules that's running now. */
   game: string | null;
   /** On and games-only, with no game from the rules running. */

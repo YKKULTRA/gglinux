@@ -45,6 +45,9 @@ async fn bind(internal: &mpsc::UnboundedSender<Internal>) -> ashpd::Result<()> {
             let _ = internal.send(Internal::SaveFromHotkey);
         }
     }
+    // Nothing listens for the key any more: say so, rather than show it as bound.
+    warn!("the clip hotkey's portal connection closed");
+    let _ = internal.send(Internal::Hotkey(Err("the portal connection closed".into())));
     Ok(())
 }
 

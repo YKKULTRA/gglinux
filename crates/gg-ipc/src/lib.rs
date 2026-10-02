@@ -710,6 +710,8 @@ pub struct ClipsState {
     pub error: Option<String>,
     /// The hotkey KDE bound, if any.
     pub hotkey: Option<String>,
+    /// Why there's no hotkey, once binding it has failed.
+    pub hotkey_error: Option<String>,
     /// The game from the rules that's running now, if any.
     pub game: Option<String>,
     /// On and games-only, with no game from the rules running: the recorder waits.
