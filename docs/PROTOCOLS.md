@@ -188,8 +188,9 @@ Report descriptors read from sysfs on `1038:1642` (no keystrokes were read):
   bits `E0–E7`); LED output report.
 
 Both use HID keyboard usage codes, the numbering of the lighting table, so a press maps straight
-to its LED. gglinux opens these read-only, and only with the optional
-`61-gglinux-reactive.rules` installed; the default udev rule leaves them root-only.
+to its LED — all but Menu, which types Application `0x65` (the HID usage; not yet captured on this
+unit): the table has no `0x65` and lights Menu as `0xE7`. gglinux opens these read-only, and only
+with the optional `61-gglinux-reactive.rules` installed; the default udev rule leaves them root-only.
 
 ### 3b. OLED — **90% there** (apex-tux) — 128×40 monochrome, header byte `0x61`
 apex-tux covers the Gen3 *family* but **not `0x1642` specifically** (it lists `0x1640` full-size,

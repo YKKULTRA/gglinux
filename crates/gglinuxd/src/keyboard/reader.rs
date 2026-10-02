@@ -140,8 +140,8 @@ fn run(files: &[(File, Kind)], stop: &AtomicBool, tx: &Sender<Command>) -> bool 
                 };
                 let Some(now) = now else { continue }; // rollover error or odd length: no change
                 let at = Instant::now();
-                for code in keys::pressed(last[i], now) {
-                    if tx.send(Command::Pressed { code, at }).is_err() {
+                for usage in keys::pressed(last[i], now) {
+                    if tx.send(Command::Pressed { code: keys::led(usage), at }).is_err() {
                         return true; // the worker is gone; nobody to tell
                     }
                 }
@@ -157,6 +157,7 @@ fn run(files: &[(File, Kind)], stop: &AtomicBool, tx: &Sender<Command>) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gg_device_keyboard::layout::ANSI_TKL;
     use std::io::Write;
     use std::os::fd::FromRawFd;
     use std::os::unix::fs::PermissionsExt;
@@ -212,6 +213,16 @@ mod tests {
         report[0x2C / 8] |= 1 << (0x2C % 8); // Space
         kb2.write_all(&report).unwrap();
         assert_eq!(code(next(&rx)), 0x2C);
+    }
+
+    #[test]
+    fn the_menu_key_presses_the_key_the_layout_calls_menu() {
+        let (ours, mut kb) = packet_pair();
+        let (tx, rx) = mpsc::channel();
+        let _reader = Reader::spawn(vec![(ours, Kind::Boot)], tx);
+        kb.write_all(&[0, 0, 0x65, 0, 0, 0, 0, 0]).unwrap(); // Menu types Application, 0x65
+        let menu = ANSI_TKL.iter().find(|k| k.1 == "Menu").unwrap().0;
+        assert_eq!(code(next(&rx)), menu, "a press the lighting can find");
     }
 
     #[test]

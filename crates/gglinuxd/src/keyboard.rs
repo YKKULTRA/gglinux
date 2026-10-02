@@ -53,7 +53,8 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 pub enum Command {
     GetState(Reply<KeyboardState>),
     SetLighting { lighting: Lighting, reply: Reply<()> },
-    /// A key went down on the Apex, as the reader saw it. Never logged.
+    /// A key went down on the Apex, as the reader saw it: the code of its LED.
+    /// Never logged.
     Pressed { code: u8, at: Instant },
     /// The reader ended by itself (keyboard gone, read error); it retries later.
     ReaderStopped,

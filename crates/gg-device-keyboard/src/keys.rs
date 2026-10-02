@@ -3,7 +3,8 @@
 //! Interface 0 sends the 8-byte boot report (a modifier bitmask, a reserved
 //! byte, six key slots); interface 2 sends a 32-byte N-key-rollover bitmap,
 //! one bit per usage. Both use HID keyboard usage codes — the numbering of
-//! [`crate::proto::KEYS`] and [`crate::layout::ANSI_TKL`].
+//! [`crate::proto::KEYS`] and [`crate::layout::ANSI_TKL`], all but Menu's:
+//! [`led`] gives the LED a usage lights.
 //!
 //! Which keys someone types is private: nothing here logs, and `Debug` on a
 //! [`KeySet`] prints only how many keys it holds.
@@ -80,9 +81,22 @@ pub fn pressed(prev: KeySet, now: KeySet) -> impl Iterator<Item = u8> {
     KeySet(std::array::from_fn(|i| now.0[i] & !prev.0[i])).iter()
 }
 
+/// HID usage `Keyboard Application`: what a Menu key types.
+const APPLICATION: u8 = 0x65;
+/// The Menu key's LED. The lighting table has no Application slot; Menu sits
+/// where Right GUI would, and is lit by its code.
+const MENU_LED: u8 = 0xE7;
+
+/// The HID code of the LED on the key that typed `usage`: the same code for
+/// every key but Menu.
+pub fn led(usage: u8) -> u8 {
+    if usage == APPLICATION { MENU_LED } else { usage }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::ANSI_TKL;
 
     fn codes(set: KeySet) -> Vec<u8> {
         set.iter().collect()
@@ -124,6 +138,20 @@ mod tests {
         assert_eq!(pressed(set(&[]), set(&[0x04])).collect::<Vec<_>>(), vec![0x04]);
         assert_eq!(pressed(set(&[0x04]), set(&[0x04, 0x05])).collect::<Vec<_>>(), vec![0x05], "a held key does not fire again");
         assert_eq!(pressed(set(&[0x04, 0x05]), set(&[0x05])).count(), 0, "releases are not presses");
+    }
+
+    #[test]
+    fn every_key_a_us_tkl_types_lights_a_drawn_key() {
+        let typed = (0x04..=0x52u8)
+            .filter(|&u| u != 0x32) // Non-US #: ISO boards only
+            .chain([APPLICATION]) // Menu
+            .chain(0xE0..=0xE6); // the modifiers; there's no Right GUI, and Fn types nothing
+        for usage in typed {
+            let led = led(usage);
+            assert!(ANSI_TKL.iter().any(|k| k.0 == led), "usage {usage:#04x} lights nothing");
+        }
+        let menu = ANSI_TKL.iter().find(|k| k.1 == "Menu").unwrap().0;
+        assert_eq!(led(APPLICATION), menu, "the key the layout calls Menu");
     }
 
     #[test]
