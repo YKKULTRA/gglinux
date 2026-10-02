@@ -39,8 +39,9 @@ pub struct Sonar<T: PwTools> {
     settings_path: PathBuf,
     dropin_path: PathBuf,
     graph: Graph,
-    /// Where each app stream (by node id) was last sent, so each is routed once.
-    routed: HashMap<u32, Channel>,
+    /// Where each app stream (by node id and serial, since PipeWire reuses
+    /// ids) was last sent, so each is routed once.
+    routed: HashMap<(u32, Option<u64>), Channel>,
     available: bool,
     /// Whether saved volumes and ChatMix have been pushed to the channels
     /// PipeWire has now. Cleared when they vanish or PipeWire's cookie
@@ -731,19 +732,19 @@ impl<T: PwTools> Sonar<T> {
 
     /// Send every app stream whose channel changed (or is new) to its channel.
     fn route(&mut self) {
-        let present: Vec<u32> = self.graph.app_streams().map(|s| s.id).collect();
-        self.routed.retain(|id, _| present.contains(id));
-        let moves: Vec<(u32, Channel)> = self
+        let present: Vec<(u32, Option<u64>)> = self.graph.app_streams().map(|s| (s.id, s.serial)).collect();
+        self.routed.retain(|stream, _| present.contains(stream));
+        let moves: Vec<((u32, Option<u64>), Channel)> = self
             .graph
             .app_streams()
-            .map(|s| (s.id, self.settings.rules.channel_for(s.route_key().as_deref())))
-            .filter(|(id, channel)| self.routed.get(id) != Some(channel))
+            .map(|s| ((s.id, s.serial), self.settings.rules.channel_for(s.route_key().as_deref())))
+            .filter(|(stream, channel)| self.routed.get(stream) != Some(channel))
             .collect();
-        for (id, channel) in moves {
+        for ((id, serial), channel) in moves {
             match self.tools.run(&tools::set_target(id, &config::sink_name(channel))) {
                 Ok(()) => {
                     debug!(id, ?channel, "routed app stream");
-                    self.routed.insert(id, channel);
+                    self.routed.insert((id, serial), channel);
                 }
                 Err(e) => warn!(id, error = %format!("{e:#}"), "could not route app stream"),
             }
@@ -912,6 +913,8 @@ mod tests {
         cookie: RefCell<u64>,
         /// Volumes set since PipeWire started, by node id; the rest are full.
         volumes: RefCell<HashMap<u32, f32>>,
+        /// `object.serial` by node id, where it isn't the id.
+        serials: RefCell<HashMap<u32, u64>>,
         runs: RefCell<Vec<Vec<String>>>,
     }
 
@@ -930,6 +933,7 @@ mod tests {
                 fails: RefCell::new(&[]),
                 cookie: RefCell::new(1),
                 volumes: RefCell::new(HashMap::new()),
+                serials: RefCell::new(HashMap::new()),
                 runs: RefCell::new(Vec::new()),
             }
         }
@@ -988,9 +992,11 @@ mod tests {
             let Value::Array(mut objects) = serde_json::from_str(&dump_with_source(&nodes, BT, Some(MIC)))? else {
                 unreachable!()
             };
-            for object in &mut objects {
-                let volume = object["id"].as_u64().and_then(|id| self.volumes.borrow().get(&(id as u32)).copied());
-                if let Some(v) = volume {
+            for object in objects.iter_mut().filter(|o| o["type"] == "PipeWire:Interface:Node") {
+                let id = object["id"].as_u64().unwrap() as u32;
+                let serial = self.serials.borrow().get(&id).copied().unwrap_or(u64::from(id));
+                object["info"]["props"]["object.serial"] = json!(serial);
+                if let Some(&v) = self.volumes.borrow().get(&id) {
                     let linear = f64::from(v).powi(3);
                     object["info"]["params"]["Props"][0]["channelVolumes"] = json!([linear, linear]);
                 }
@@ -1086,6 +1092,22 @@ mod tests {
         sonar.tick();
         assert_eq!(fake.count("pw-metadata"), before + 1);
         assert!(fake.ran(&["pw-metadata", "43", "target.object", "gglinux_media"]));
+    }
+
+    #[test]
+    fn a_new_stream_under_a_reused_id_is_routed() {
+        let (_dir, settings_path, dropin) = paths("reused-id");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.tick();
+        fake.runs.borrow_mut().clear();
+        // Within one tick Firefox's stream closes and mpv's opens, and PipeWire hands it the same id.
+        fake.streams.borrow_mut().retain(|&(id, _)| id != 41);
+        fake.streams.borrow_mut().push((41, "mpv"));
+        fake.serials.borrow_mut().insert(41, 5152);
+        sonar.tick();
+        assert!(fake.ran(&["pw-metadata", "41", "target.object", "gglinux_media"]));
     }
 
     #[test]

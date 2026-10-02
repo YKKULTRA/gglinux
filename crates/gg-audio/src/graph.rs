@@ -9,6 +9,9 @@ use crate::config;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub id: u32,
+    /// `object.serial`: unlike the id, which PipeWire hands out again as soon
+    /// as a node goes, never reused.
+    pub serial: Option<u64>,
     pub name: String,
     pub description: Option<String>,
     pub media_class: String,
@@ -93,6 +96,7 @@ fn parse_node(object: &Value) -> Option<Node> {
     let text = |key: &str| props[key].as_str().map(str::to_owned);
     Some(Node {
         id: u32::try_from(object["id"].as_u64()?).ok()?,
+        serial: props["object.serial"].as_u64(),
         name: text("node.name")?,
         description: text("node.description"),
         media_class: text("media.class").unwrap_or_default(),
