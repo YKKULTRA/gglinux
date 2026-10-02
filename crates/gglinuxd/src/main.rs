@@ -350,7 +350,12 @@ async fn dispatch(
         Request::SetStreamMaster { volume } => outcome(
             workers.sonar.send::<()>(|reply| SonarCommand::SetStreamMaster { volume, reply }).await,
         ),
-        Request::SetSmartVolume { .. } => ResponseData::Error { message: "Smart Volume isn't wired up yet".into() },
+        Request::SetSmartVolume { channel, settings } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetSmartVolume { channel, settings, reply })
+                .await,
+        ),
         Request::GetKeyboardState => match workers.keyboard.send(KeyboardCommand::GetState).await {
             Ok(state) => ResponseData::Keyboard { state },
             Err(message) => ResponseData::Error { message },
