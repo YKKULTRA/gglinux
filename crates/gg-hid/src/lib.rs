@@ -2,8 +2,9 @@
 //!
 //! [`scan`] returns the currently-connected logical devices. [`run_monitor`] blocks
 //! forever on a dedicated thread, calling back with a fresh snapshot (and a diff of
-//! add/remove [`Event`]s) whenever the device set changes — woken promptly by a udev
-//! monitor, with a periodic rescan as a safety net.
+//! add/remove [`Event`]s, plus the whole list when a device changed in place)
+//! whenever the device set changes — woken promptly by a udev monitor, with a
+//! periodic rescan as a safety net.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::io::AsRawFd;
@@ -97,7 +98,10 @@ pub fn scan(api: &HidApi) -> Vec<DeviceInfo> {
     devices
 }
 
-/// Compute add/remove events between two snapshots (matched by `id`).
+/// Compute add/remove events between two snapshots (matched by `id`), then the
+/// whole new list if a device that stayed changed in place — its interfaces
+/// still binding after it was first seen, or its hidraw nodes made anew —
+/// which no add or remove would tell.
 fn diff(old: &[DeviceInfo], new: &[DeviceInfo]) -> Vec<Event> {
     let old_ids: BTreeSet<&str> = old.iter().map(|d| d.id.as_str()).collect();
     let new_ids: BTreeSet<&str> = new.iter().map(|d| d.id.as_str()).collect();
@@ -111,6 +115,9 @@ fn diff(old: &[DeviceInfo], new: &[DeviceInfo]) -> Vec<Event> {
         if !new_ids.contains(d.id.as_str()) {
             events.push(Event::DeviceRemoved { id: d.id.clone() });
         }
+    }
+    if new.iter().any(|d| old.iter().any(|o| o.id == d.id && o != d)) {
+        events.push(Event::DevicesChanged { devices: new.to_vec() });
     }
     events
 }
@@ -261,7 +268,33 @@ mod tests {
             usage: 0x01,
             path: "/dev/hidraw3".into(),
         });
-        assert!(diff(&before, &[changed]).is_empty());
+        let events = diff(&before, &[changed]);
+        assert!(added(&events).is_empty() && removed(&events).is_empty(), "{events:?}");
+    }
+
+    /// A device that changed in place goes out as the whole list, even when
+    /// another device came in on the same rescan (a hub or KVM switch bringing
+    /// several at once): the add alone would leave the keyboard as it was
+    /// first seen, its interfaces still binding.
+    #[test]
+    fn a_device_that_changed_in_place_goes_out_as_the_whole_list() {
+        let before = vec![dev("1038:1642")];
+        let mut keyboard = dev("1038:1642");
+        keyboard.interfaces.push(InterfaceInfo {
+            interface_number: 1,
+            usage_page: 0xffc0,
+            usage: 0x01,
+            path: "/dev/hidraw4".into(),
+        });
+        let after = vec![keyboard, dev("1038:1872")];
+        let events = diff(&before, &after);
+        assert_eq!(added(&events), ["1038:1872"]);
+        assert!(removed(&events).is_empty());
+        let whole = events.iter().find_map(|e| match e {
+            Event::DevicesChanged { devices } => Some(devices),
+            _ => None,
+        });
+        assert_eq!(whole, Some(&after), "{events:?}");
     }
 
     #[test]
