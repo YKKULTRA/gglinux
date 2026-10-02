@@ -176,7 +176,7 @@ impl<T: PwTools> Sonar<T> {
         let output = self.choose_output().context("no output device for the channels to play into")?;
         let mic_input = self.choose_mic();
 
-        let text = config::dropin(&output, mic_input.as_deref(), self.settings.streamer)?;
+        let text = config::dropin(&output, mic_input.as_deref(), self.settings.streamer, false)?;
         if let Some(dir) = self.dropin_path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
@@ -470,7 +470,7 @@ impl<T: PwTools> Sonar<T> {
     /// The drop-in this version writes for the saved output and mic.
     fn expected_dropin(&self, output: &str) -> Result<String> {
         let mic = self.settings.mic_input.as_deref().filter(|_| self.tools.mic_plugins_present());
-        config::dropin(output, mic, self.settings.streamer)
+        config::dropin(output, mic, self.settings.streamer, false)
     }
 
     fn apply_mic(&self) -> Result<()> {
@@ -1011,7 +1011,7 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let sonar = Sonar::new(&fake, settings_path, dropin.clone());
         assert!(sonar.is_enabled());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false).unwrap());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
         assert_eq!(fake.count("systemctl"), 1);
     }
 
@@ -1026,7 +1026,7 @@ mod tests {
         };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
-        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false).unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, false).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let _sonar = Sonar::new(&fake, settings_path, dropin);
         assert_eq!(fake.count("systemctl"), 0);
@@ -1116,7 +1116,7 @@ mod tests {
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
-        std::fs::write(&dropin, config::dropin(BT, None, false).unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, None, false, false).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let _sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_mic"));
