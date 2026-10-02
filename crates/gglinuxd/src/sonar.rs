@@ -12,6 +12,8 @@ use gg_audio::tools::SystemTools;
 use gg_ipc::{Channel, EqBand, Event, HeadphoneEq, MicSettings, SmartVolume, SonarState};
 use tokio::sync::{broadcast, oneshot};
 
+use crate::keyboard;
+
 /// How often to look for new app streams while Sonar is on.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -54,18 +56,20 @@ impl Handle {
     }
 }
 
-pub fn spawn(event_tx: broadcast::Sender<Event>) -> Handle {
+pub fn spawn(event_tx: broadcast::Sender<Event>, keyboard: keyboard::Handle) -> Handle {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("gg-sonar".into())
-        .spawn(move || worker(rx, event_tx))
+        .spawn(move || worker(rx, event_tx, keyboard))
         .expect("spawn gg-sonar thread");
     Handle { tx }
 }
 
-fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
+fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>, keyboard: keyboard::Handle) {
     let mut sonar = Sonar::new(SystemTools, gg_audio::settings::path(), gg_audio::config::dropin_path());
     let mut published: Option<SonarState> = None;
+    // What the keyboard's visualizer was last told to listen to; it starts on the default output.
+    let mut heard: Option<String> = None;
     let mut last_tick = Instant::now();
     loop {
         match rx.recv_timeout(TICK) {
@@ -80,10 +84,22 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
         }
         let now = sonar.snapshot();
         if published.as_ref() != Some(&now) {
+            let output = mixed_output(now.enabled, &now.output);
+            if output != heard {
+                keyboard.listen_to(output.clone());
+                heard = output;
+            }
             published = Some(now.clone());
             let _ = event_tx.send(Event::SonarChanged { state: now });
         }
     }
+}
+
+/// Where everything playing mixes, for the keyboard's visualizer: with Sonar
+/// on, the output its channels play into, since the default output is then
+/// the Game channel alone; with it off, none — the default output has it all.
+fn mixed_output(enabled: bool, output: &Option<String>) -> Option<String> {
+    output.clone().filter(|_| enabled)
 }
 
 fn handle(command: Command, sonar: &mut Sonar<SystemTools>) {
@@ -138,5 +154,17 @@ fn handle(command: Command, sonar: &mut Sonar<SystemTools>) {
         Command::SetSmartVolume { channel, settings, reply } => {
             let _ = reply.send(sonar.set_smart_volume(channel, settings).map_err(text));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_visualizer_hears_sonars_output_only_while_sonar_is_on() {
+        let output = Some("alsa_output.usb-SteelSeries".to_owned());
+        assert_eq!(mixed_output(true, &output), output, "the default output is only the Game channel then");
+        assert_eq!(mixed_output(false, &output), None, "Sonar off: the default output has it all");
     }
 }

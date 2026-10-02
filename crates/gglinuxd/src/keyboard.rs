@@ -63,6 +63,9 @@ pub enum Command {
     AudioStopped,
     /// The default microphone was muted or unmuted.
     MicMuted(bool),
+    /// The visualizer should listen to this output (a `node.name`), or to the
+    /// default output when `None`. From Sonar; no reply.
+    ListenTo(Option<String>),
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
 }
@@ -78,6 +81,7 @@ impl std::fmt::Debug for Command {
             Command::Wake => "Wake",
             Command::AudioStopped => "AudioStopped",
             Command::MicMuted(_) => "MicMuted",
+            Command::ListenTo(_) => "ListenTo",
             Command::Shutdown(_) => "Shutdown",
         })
     }
@@ -102,6 +106,12 @@ impl Handle {
     /// Ask for a prompt frame; fire and forget.
     pub fn wake(&self) {
         let _ = self.tx.send(Command::Wake);
+    }
+
+    /// Point the visualizer at the output everything playing mixes into
+    /// (`None`: the default output); fire and forget.
+    pub fn listen_to(&self, output: Option<String>) {
+        let _ = self.tx.send(Command::ListenTo(output));
     }
 }
 
@@ -142,6 +152,8 @@ struct State {
     levels: Levels,
     capture: Option<Capture>,
     last_capture_attempt: Option<Instant>,
+    /// The output the capture listens to; `None` is the default output.
+    listen_to: Option<String>,
     mic_watch: Option<mic::Watch>,
     mic_muted: bool,
 }
@@ -176,6 +188,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
         levels: Arc::new(Mutex::new([0.0; BANDS])),
         capture: None,
         last_capture_attempt: None,
+        listen_to: None,
         mic_watch: None,
         mic_muted: false,
     };
@@ -292,7 +305,7 @@ fn sync_audio(state: &mut State) {
         return;
     }
     state.last_capture_attempt = Some(Instant::now());
-    match Capture::start(&audio::PW_RECORD, Arc::clone(&state.levels), state.tx.clone()) {
+    match Capture::start(&audio::pw_record(state.listen_to.as_deref()), Arc::clone(&state.levels), state.tx.clone()) {
         Ok(c) => {
             debug!("capturing audio for the visualizer");
             state.capture = Some(c);
@@ -393,6 +406,13 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
         Command::MicMuted(m) => {
             state.mic_muted = m;
             state.last_frame = None;
+        }
+        Command::ListenTo(output) => {
+            if output != state.listen_to {
+                state.listen_to = output;
+                state.capture = None; // the loop starts it again, listening there
+                state.last_capture_attempt = None;
+            }
         }
         Command::ReaderStopped => {
             state.reader = None;

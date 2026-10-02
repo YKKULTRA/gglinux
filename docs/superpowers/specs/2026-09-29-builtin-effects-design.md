@@ -39,6 +39,10 @@ with sensitivity in 0.25–4.0, validated. `animated` is true.
 - A thread runs the `pw-record` command above, reading 1024-sample hops (about 21 ms). It runs only
   while the Visualizer is the current effect and gglinux is drawing, and is killed and reaped
   otherwise, the same lifecycle as the key reader.
+- With Sonar on, the default output is the Game channel alone, so the capture adds
+  `--target <node.name>` for the output Sonar's channels play into, whose monitor carries every
+  channel. Sonar's worker tells the keyboard worker when that changes (Sonar turned on or off, or
+  another output chosen), and the capture restarts there.
 - It keeps a sliding 2048-sample window, applies a Hann window and runs an FFT (`rustfft`).
 - **Bands:** 18 log-spaced bands from 40 Hz to 16 kHz. Each band is the peak magnitude in its bins.
 - **Level:** `(dB + 60) / 60`, clamped to 0..1. Sensitivity multiplies it when drawing

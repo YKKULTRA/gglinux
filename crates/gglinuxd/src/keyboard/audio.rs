@@ -1,6 +1,7 @@
-//! Feeds the visualizer: records the default output's monitor with
-//! `pw-record` and keeps 18 band levels current. Audio is analysed in memory
-//! only; nothing is written anywhere.
+//! Feeds the visualizer: records an output's monitor with `pw-record` — the
+//! default output's, or with Sonar on the device its channels play into — and
+//! keeps 18 band levels current. Audio is analysed in memory only; nothing is
+//! written anywhere.
 
 use std::io::{self, Read};
 use std::process::{Child, Command as Process, Stdio};
@@ -12,11 +13,19 @@ use std::thread::JoinHandle;
 use super::spectrum::{Analyzer, BANDS, HOP};
 use super::Command;
 
-/// Mono 48 kHz f32 of what's playing, raw on stdout.
-pub const PW_RECORD: [&str; 13] = [
-    "pw-record", "--raw", "-P", "{ stream.capture.sink = true }", "--format", "f32", "--rate", "48000",
-    "--channels", "1", "--latency", "20ms", "-",
-];
+/// Mono 48 kHz f32 of what's playing, raw on stdout: the monitor of `output`
+/// (a `node.name`), or of the default output when there's none.
+pub fn pw_record(output: Option<&str>) -> Vec<&str> {
+    let mut argv = vec![
+        "pw-record", "--raw", "-P", "{ stream.capture.sink = true }", "--format", "f32", "--rate", "48000",
+        "--channels", "1", "--latency", "20ms",
+    ];
+    if let Some(name) = output {
+        argv.extend(["--target", name]);
+    }
+    argv.push("-");
+    argv
+}
 
 pub type Levels = Arc<Mutex<[f32; BANDS]>>;
 
@@ -91,6 +100,16 @@ mod tests {
         let got = *l.lock().unwrap();
         let loudest = (0..BANDS).max_by(|&a, &b| got[a].total_cmp(&got[b])).unwrap();
         assert_eq!(loudest, 9, "the tone was analysed: {got:?}");
+    }
+
+    #[test]
+    fn the_capture_listens_to_the_output_it_is_given_or_else_the_default() {
+        let default = pw_record(None);
+        assert!(!default.contains(&"--target"), "WirePlumber links the default output: {default:?}");
+        let sonar = pw_record(Some("alsa_output.usb-SteelSeries"));
+        assert!(sonar.windows(2).any(|w| w == ["--target", "alsa_output.usb-SteelSeries"]), "{sonar:?}");
+        assert!(sonar.contains(&"{ stream.capture.sink = true }"), "its monitor, not an input");
+        assert_eq!(sonar.last(), Some(&"-"), "samples still go to stdout");
     }
 
     #[test]

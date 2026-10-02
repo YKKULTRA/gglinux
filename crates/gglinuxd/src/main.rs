@@ -90,8 +90,9 @@ async fn main() -> Result<()> {
         gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
         profiles: profiles::spawn(event_tx.clone(), keyboard.clone(), game_tx),
         clips: clips::spawn(event_tx.clone(), game_rx),
+        // Sonar tells the keyboard's visualizer where everything playing mixes.
+        sonar: sonar::spawn(event_tx.clone(), keyboard.clone()),
         keyboard,
-        sonar: sonar::spawn(event_tx.clone()),
     };
 
     let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
