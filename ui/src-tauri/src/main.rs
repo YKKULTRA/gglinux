@@ -141,8 +141,7 @@ fn import_settings(text: String) -> Result<String, String> {
     if wrote.is_empty() {
         return Ok("The backup holds no settings, so nothing changed.".into());
     }
-    let restarted =
-        run_quietly(&["systemctl", "--user", "try-restart", "gglinuxd.service"]).is_ok();
+    let restarted = system::restart_daemon(&run_quietly);
     Ok(format!(
         "Restored {}. {}",
         wrote.join(", "),
