@@ -11,6 +11,7 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use gg_device_mouse::proto::nearest_dpi;
 use gg_device_mouse::{ButtonAction, Mouse, PollingRate, BUTTON_COUNT};
 use gg_ipc::{BatteryState, DpiStage, Event, MouseDpi, MouseSettings, MouseState};
 use hidapi::HidApi;
@@ -167,7 +168,10 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 Ok(())
             });
             if result.is_ok() {
-                written(&mut state.applied).dpi = Some(MouseDpi { stages, active });
+                written(&mut state.applied).dpi = Some(MouseDpi {
+                    stages: as_written(&stages),
+                    active,
+                });
             }
             let _ = reply.send(result);
         }
@@ -292,6 +296,15 @@ fn parse_actions(actions: &[String]) -> Result<[ButtonAction; BUTTON_COUNT], Str
     Ok(parsed)
 }
 
+/// The stages as the mouse runs them, which is what gets recorded: the write
+/// clamps and rounds each DPI to a sensor stage, whatever the client sent.
+fn as_written(stages: &[DpiStage]) -> Vec<DpiStage> {
+    stages
+        .iter()
+        .map(|s| DpiStage { x: nearest_dpi(s.x), y: nearest_dpi(s.y) })
+        .collect()
+}
+
 /// The record of what has been written, started empty by the first write.
 ///
 /// Each setter fills in only its own part. The rest stay `None` until their own
@@ -319,5 +332,16 @@ mod tests {
             .map(|(part, _)| part)
             .collect();
         assert!(claimed.is_empty(), "reported as applied but never written: {claimed:?} in {json}");
+    }
+
+    #[test]
+    fn the_dpi_recorded_is_the_dpi_the_mouse_runs() {
+        use gg_device_mouse::tables::{DPI_MAX, DPI_MIN};
+        // As `ggctl mouse dpi 1550,30000:40` sends it, unrounded and out of range.
+        let asked = [DpiStage { x: 1550, y: 1550 }, DpiStage { x: 30000, y: 40 }];
+        assert_eq!(
+            as_written(&asked),
+            [DpiStage { x: 1600, y: 1600 }, DpiStage { x: DPI_MAX, y: DPI_MIN }]
+        );
     }
 }
