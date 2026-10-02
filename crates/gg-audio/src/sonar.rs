@@ -622,10 +622,17 @@ impl<T: PwTools> Sonar<T> {
     /// restart PipeWire once so the channels get the current graph.
     fn upgrade_dropin(&mut self) {
         let Some(output) = self.settings.output.clone() else { return };
-        // Plugins installed since Sonar was turned on: give it a mic now.
+        // Plugins installed since Sonar was turned on: give it a mic now, and,
+        // as turning Sonar on does, make it the default input once it's there.
+        let mut new_mic = false;
         if self.settings.mic_input.is_none() {
             self.settings.mic_input = self.choose_mic();
             if self.settings.mic_input.is_some() {
+                new_mic = true;
+                if self.settings.previous_default_source.is_none() {
+                    self.settings.previous_default_source =
+                        self.graph.default_source.clone().filter(|n| !config::is_ours(n));
+                }
                 self.persist();
             }
         }
@@ -638,8 +645,22 @@ impl<T: PwTools> Sonar<T> {
             .map_err(anyhow::Error::from)
             .and_then(|()| self.tools.run(&tools::restart_pipewire()));
         match result {
+            Ok(()) if new_mic => self.take_mic_default(),
             Ok(()) => self.refresh(),
             Err(e) => warn!(error = %format!("{e:#}"), "could not update Sonar's drop-in"),
+        }
+    }
+
+    /// Make gglinux Mic the default input once PipeWire has it.
+    fn take_mic_default(&mut self) {
+        if !self.wait_until(|g| g.node(mic::SOURCE).is_some()) {
+            warn!("the Sonar mic did not appear; the default input stays as it was");
+            return;
+        }
+        if let Some(node) = self.graph.node(mic::SOURCE) {
+            if let Err(e) = self.tools.run(&tools::set_default(node.id)) {
+                warn!(error = %format!("{e:#}"), "could not make gglinux Mic the default input");
+            }
         }
     }
 
@@ -1571,6 +1592,23 @@ mod tests {
         assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_mic"));
         assert_eq!(fake.count("systemctl"), 1);
         assert_eq!(settings::load(&settings_path).mic_input.as_deref(), Some(MIC));
+    }
+
+    #[test]
+    fn a_mic_added_on_startup_becomes_the_default_input() {
+        let (_dir, settings_path, dropin) = paths("mic-later-default");
+        // Sonar was turned on without the plugins, by a gglinux that had no mic to remember inputs for.
+        let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, None, false, true).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.up.borrow_mut() = true; // PipeWire runs the drop-in without the mic
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        assert!(fake.ran(&["wpctl", "set-default", "24"]), "gglinux Mic becomes the default input");
+        assert_eq!(settings::load(&settings_path).previous_default_source.as_deref(), Some(MIC));
+        sonar.disable().unwrap();
+        assert!(fake.ran(&["wpctl", "set-default", "12"]), "the physical mic is given back with Sonar off");
     }
 
     #[test]
