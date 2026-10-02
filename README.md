@@ -4,11 +4,16 @@ An open-source **SteelSeries GG** replacement for Linux — device control (Engi
 (Sonar), game-event lighting (GameSense), and clip capture (Moments) — for the hardware SteelSeries
 never supported on Linux.
 
-**Status:** early. **M0 (skeleton)** is done — the daemon enumerates devices, tracks hotplug, and
-serves them over its socket. **M1 (mouse)** is built but **parked**: DPI stages, polling rate, button
-remap, onboard save and a battery poller for the Rival 3 Wireless Gen 2, driveable from the desktop
-UI or the `ggctl` CLI, but never confirmed against the physical mouse — that hardware is no longer in
-use here. See [PLAN.md](PLAN.md) for the roadmap.
+**Status:** early. Most features are built and tested against fakes but not yet seen working on
+real hardware. **Verified** on the owner's devices: the live device list, the Apex's per-key
+lighting (static colours, the wave effect and hand-back to onboard lighting), the headset's status,
+battery and base-station screen protection, and the mouse's battery. **Built, not yet tried live:**
+Sonar (channels, EQ, virtual mic, Smart Volume, streamer mode), the headset's controls, the other
+lighting effects and reactive lighting, GameSense with its audio visualizer and mic-mute light,
+clips, lighting profiles, settings backup, start at login and the Arch `PKGBUILD`. **Parked:** the
+mouse's DPI, polling, button and onboard-save settings, never confirmed on the Rival 3 Wireless
+Gen 2, which is no longer in use here. **Blocked:** the Apex OLED and actuation, which need a USB
+capture of GG on Windows. See [PLAN.md](PLAN.md) for the roadmap and the full feature checklist.
 
 ## Supported hardware (initial targets)
 
