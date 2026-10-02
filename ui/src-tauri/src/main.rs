@@ -194,6 +194,18 @@ fn set_connected(app: &AppHandle, bridge: &Bridge, connected: bool) {
     }
 }
 
+/// The D-Bus name the single-instance guard answers to (the plugin adds
+/// `.SingleInstance`). A debug build, as `npm run tauri dev` makes, gets one of
+/// its own: under the app's, it would hand its arguments to the installed copy
+/// sitting in the tray and quit without a word.
+fn instance_id(identifier: &str) -> String {
+    if cfg!(debug_assertions) {
+        format!("{identifier}.dev")
+    } else {
+        identifier.to_string()
+    }
+}
+
 /// Autostart launches gglinux with `--hidden`: stay in the tray until asked.
 fn hidden(args: &[String]) -> bool {
     args.iter().any(|a| a == "--hidden")
@@ -256,6 +268,8 @@ fn main() {
     disable_dmabuf_renderer_on_nvidia();
 
     let bridge = Arc::new(Bridge::default());
+    let context = tauri::generate_context!();
+    let instance = instance_id(&context.config().identifier);
 
     tauri::Builder::default()
         // Registered first, as the plugin asks. A second launch (the app menu
@@ -263,11 +277,16 @@ fn main() {
         // the running copy over D-Bus and exits, so there's only ever one tray
         // icon and one daemon connection. The running copy shows its window,
         // unless that launch was a --hidden one too.
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if !hidden(&args) {
-                show_main(app);
-            }
-        }))
+        .plugin(
+            tauri_plugin_single_instance::Builder::new()
+                .dbus_id(instance)
+                .callback(|app, args, _cwd| {
+                    if !hidden(&args) {
+                        show_main(app);
+                    }
+                })
+                .build(),
+        )
         .manage(Arc::clone(&bridge))
         .invoke_handler(tauri::generate_handler![
             daemon_status,
@@ -295,13 +314,21 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to start the gglinux UI");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{hidden, open_folder};
+    use super::{hidden, instance_id, open_folder};
+
+    #[test]
+    fn a_debug_build_does_not_hand_over_to_the_installed_copy() {
+        // The installed copy is a release build; `npm run tauri dev` makes a
+        // debug one, which must answer to a name of its own.
+        let id = "io.github.ykk.gglinux";
+        assert_eq!(instance_id(id) != id, cfg!(debug_assertions));
+    }
 
     #[test]
     fn only_hidden_launches_stay_in_the_tray() {

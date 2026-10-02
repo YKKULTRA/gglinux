@@ -165,6 +165,9 @@ loads the frontend from `devUrl` (`http://localhost:1420`), not from the embedde
 Vite running it comes up as a blank window: no error, no log line, and the tray and daemon socket all
 behave normally. Only a release build embeds the frontend.
 
+A dev build runs beside an installed gglinux rather than handing over to it, so while Start at login
+has the installed copy in the tray you'll see two tray icons.
+
 It needs a newer Rust toolchain than the daemon (≥1.88), `webkit2gtk-4.1` and an appindicator for
 the tray. On Arch:
 
