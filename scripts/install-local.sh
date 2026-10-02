@@ -55,6 +55,9 @@ echo "==> installing systemd --user unit"
 install -Dm644 "$repo/data/systemd/gglinuxd.service" \
   "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/gglinuxd.service"
 systemctl --user daemon-reload
+# A daemon already running keeps running the binary it started from, and `enable --now` below
+# leaves a running one alone, so restart it onto the new one. A stopped one stays stopped.
+systemctl --user try-restart gglinuxd
 
 if [[ $do_ui -eq 1 ]]; then
   if [[ $do_build -eq 1 ]]; then
