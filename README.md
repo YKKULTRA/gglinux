@@ -34,7 +34,7 @@ byte-level device protocol reference.
 
 ## Building
 
-The daemon needs only a Rust toolchain (≥1.85) and libudev:
+The daemon needs only a Rust toolchain (≥1.87) and libudev:
 
 ```sh
 cargo build --workspace --bins
@@ -160,7 +160,8 @@ loads the frontend from `devUrl` (`http://localhost:1420`), not from the embedde
 Vite running it comes up as a blank window: no error, no log line, and the tray and daemon socket all
 behave normally. Only a release build embeds the frontend.
 
-It needs `webkit2gtk-4.1` and an appindicator for the tray. On Arch:
+It needs a newer Rust toolchain than the daemon (≥1.88), `webkit2gtk-4.1` and an appindicator for
+the tray. On Arch:
 
 ```sh
 sudo pacman -S webkit2gtk-4.1 libayatana-appindicator

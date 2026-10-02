@@ -5,7 +5,7 @@ version = "0.0.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/ykk/gglinux"
-rust-version = "1.85"
+rust-version = "1.88"
 
 # Deliberately outside the root cargo workspace (see the root `exclude`): Tauri pulls
 # in a large, platform-specific dependency tree that would slow every daemon build.
