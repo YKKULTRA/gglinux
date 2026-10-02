@@ -167,7 +167,12 @@ fn serve(stream: UnixStream, state: Arc<Mutex<Fake>>) -> Result<()> {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("<< UNPARSEABLE {line}\n   {e}");
-                send(&writer, ServerMessage::response(0, error(format!("invalid request: {e}"))))?;
+                // On the request's own id when it has one, as the daemon answers.
+                let id = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id")?.as_u64())
+                    .unwrap_or(0);
+                send(&writer, ServerMessage::response(id, error(format!("invalid request: {e}"))))?;
                 continue;
             }
         };

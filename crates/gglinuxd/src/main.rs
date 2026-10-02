@@ -255,12 +255,11 @@ async fn dispatch(
     snapshot_rx: &watch::Receiver<Vec<DeviceInfo>>,
     workers: &Workers,
 ) -> ServerMessage {
-    let frame = match serde_json::from_str::<RequestFrame>(line) {
+    let frame = match parse_request(line) {
         Ok(frame) => frame,
-        // No id to correlate against, so reply on id 0 and let the client log it.
-        Err(e) => {
+        Err((id, e)) => {
             return ServerMessage::response(
-                0,
+                id,
                 ResponseData::Error {
                     message: format!("invalid request: {e}"),
                 },
@@ -457,6 +456,20 @@ async fn dispatch(
     ServerMessage::response(frame.id, result)
 }
 
+/// A request line as a frame, or why not and the id to answer that on.
+fn parse_request(line: &str) -> Result<RequestFrame, (u64, serde_json::Error)> {
+    serde_json::from_str::<RequestFrame>(line).map_err(|e| {
+        // The request's own id when it has one, so the client sees why instead
+        // of waiting out its timer (a method this daemon is too old for, say);
+        // else id 0, for the client to log.
+        let id = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v.get("id")?.as_u64())
+            .unwrap_or(0);
+        (id, e)
+    })
+}
+
 /// Collapse a command result into `Success` or `Error`.
 fn outcome(result: Result<(), String>) -> ResponseData {
     match result {
@@ -638,6 +651,25 @@ mod tests {
         })
         .await;
         assert_eq!(*started.lock().unwrap(), (1..=50).collect::<Vec<u64>>());
+    }
+
+    #[test]
+    fn a_request_the_daemon_cannot_read_is_refused_on_its_own_id() {
+        // A method from a newer UI than this daemon, which the UI is waiting on.
+        match parse_request(r#"{"id":7,"req":{"method":"set_something_new","params":{}}}"#) {
+            Err((id, e)) => {
+                assert_eq!(id, 7, "on the request's own id, so the client sees why");
+                assert!(e.to_string().contains("set_something_new"), "{e}");
+            }
+            Ok(frame) => panic!("parsed as {frame:?}"),
+        }
+        // With no id to be found there is nothing else to answer on.
+        for line in ["not json", r#"{"req":{"method":"ping"}}"#, r#"{"id":"7","req":{"method":"nope"}}"#] {
+            match parse_request(line) {
+                Err((0, _)) => {}
+                other => panic!("{line} answered as {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
