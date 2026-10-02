@@ -34,7 +34,7 @@ impl PwTools for SystemTools {
         if !out.status.success() {
             bail!("pw-dump failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
-        String::from_utf8(out.stdout).context("pw-dump printed non-UTF-8")
+        Ok(dump_text(&out.stdout))
     }
 
     fn run(&self, argv: &[String]) -> Result<()> {
@@ -48,6 +48,14 @@ impl PwTools for SystemTools {
         }
         Ok(())
     }
+}
+
+/// `pw-dump`'s output as text. PipeWire passes the property strings clients
+/// give it through byte for byte, so one app named in Latin-1 must not make
+/// the whole graph unreadable: its stray bytes become U+FFFD inside the string
+/// they're in, and the JSON stays valid.
+fn dump_text(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout).into_owned()
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -81,6 +89,18 @@ pub fn restart_pipewire() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_that_isnt_utf8_leaves_the_dump_readable() {
+        let mut stdout = br#"[{"id":57,"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"caf"#.to_vec();
+        stdout.push(0xE9); // é in Latin-1, as an ALSA client may name itself
+        stdout.extend_from_slice(
+            br#"","media.class":"Stream/Output/Audio"}}},{"id":58,"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"firefox","media.class":"Stream/Output/Audio"}}}]"#,
+        );
+        let graph = crate::graph::Graph::parse(&dump_text(&stdout)).unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+        assert!(graph.node("firefox").is_some(), "every other node is still read");
+    }
 
     #[test]
     fn commands_are_what_a_person_would_type() {
