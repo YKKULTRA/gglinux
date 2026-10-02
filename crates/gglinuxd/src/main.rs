@@ -128,18 +128,33 @@ fn spawn_hid_monitor(snapshot_tx: watch::Sender<Vec<DeviceInfo>>, event_tx: broa
     std::thread::Builder::new()
         .name("gg-hid".into())
         .spawn(move || {
-            let res = gg_hid::run_monitor(|snapshot, events| {
-                // `send` here is synchronous — safe to call from this OS thread.
-                let _ = snapshot_tx.send(snapshot);
-                for ev in events {
-                    let _ = event_tx.send(ev);
-                }
-            });
+            let res = gg_hid::run_monitor(|snapshot, events| publish(&snapshot_tx, &event_tx, snapshot, events));
             if let Err(e) = res {
                 error!(error = %e, "HID monitor stopped");
             }
         })
         .expect("spawn gg-hid thread");
+}
+
+/// Pass on what the HID monitor saw: the device list, for clients that connect
+/// from now on, and what changed, for those already connected.
+fn publish(
+    snapshot_tx: &watch::Sender<Vec<DeviceInfo>>,
+    event_tx: &broadcast::Sender<Event>,
+    snapshot: Vec<DeviceInfo>,
+    events: Vec<Event>,
+) {
+    // A change with no add or remove to tell it by goes out as the whole list:
+    // above all the first scan, which a client that connected before it was
+    // sent as empty.
+    let whole = events.is_empty().then(|| Event::DevicesChanged { devices: snapshot.clone() });
+    // `send` here is synchronous — safe to call from this OS thread. The list
+    // is updated first: a client subscribes before it reads the list, so one
+    // connecting meanwhile gets the new list or the event, never neither.
+    let _ = snapshot_tx.send(snapshot);
+    for ev in events.into_iter().chain(whole) {
+        let _ = event_tx.send(ev);
+    }
 }
 
 /// Accept connections until SIGINT/SIGTERM.
@@ -651,6 +666,39 @@ mod tests {
         })
         .await;
         assert_eq!(*started.lock().unwrap(), (1..=50).collect::<Vec<u64>>());
+    }
+
+    fn mouse() -> DeviceInfo {
+        DeviceInfo {
+            id: "1038:1872".into(),
+            kind: gg_ipc::DeviceKind::Mouse,
+            vendor_id: 0x1038,
+            product_id: 0x1872,
+            name: "Rival 3 Wireless Gen 2".into(),
+            serial: None,
+            connected: true,
+            interfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_client_connected_before_the_first_scan_hears_the_devices() {
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(8);
+        // It connected while the list was still empty, so it was sent [] and
+        // is waiting on events.
+        let mut client = event_tx.subscribe();
+        // The first scan comes with no events, only the list.
+        publish(&snapshot_tx, &event_tx, vec![mouse()], Vec::new());
+        match client.try_recv() {
+            Ok(Event::DevicesChanged { devices }) => assert_eq!(devices, vec![mouse()]),
+            other => panic!("the client heard {other:?}"),
+        }
+
+        // An unplug after that goes out as itself, not the whole list again.
+        publish(&snapshot_tx, &event_tx, Vec::new(), vec![Event::DeviceRemoved { id: mouse().id }]);
+        assert!(matches!(client.try_recv(), Ok(Event::DeviceRemoved { .. })));
+        assert!(client.try_recv().is_err(), "nothing more");
     }
 
     #[test]
