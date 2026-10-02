@@ -32,16 +32,17 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
 
-  /** Static colours being edited, by HID code; seeded once from the daemon. */
+  /** Static colours being edited, by HID code. They follow the daemon's, so a
+   *  profile or ggctl changing them shows here, except while there is paint not
+   *  applied yet. */
   let painted = $state<Record<number, Rgb>>({});
-  let seeded = false;
+  let dirty = $state(false);
   const selected = new SvelteSet<number>();
   let brush = $state("#00c8ff");
 
   $effect(() => {
     const l = lighting;
-    if (seeded || !l) return;
-    seeded = true;
+    if (dirty || !l) return;
     painted = Object.fromEntries(l.keys.map((k) => [k.code, k.color]));
   });
 
@@ -62,14 +63,17 @@
   let height = $derived(kb ? Math.max(...kb.layout.map((k) => k.y + 1)) * U : 0);
   let period = $derived(lighting && "period_s" in lighting.effect ? lighting.effect.period_s : 4);
 
-  async function apply(patch: Partial<Lighting>) {
-    if (!lighting) return;
+  /** Whether the change was applied. */
+  async function apply(patch: Partial<Lighting>): Promise<boolean> {
+    if (!lighting) return false;
     busy = true;
     error = null;
     try {
       await daemon.setLighting({ ...lighting, ...patch });
+      return true;
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
+      return false;
     } finally {
       busy = false;
     }
@@ -102,11 +106,12 @@
   function paint(codes: number[]) {
     const c = rgbOf(brush);
     painted = { ...painted, ...Object.fromEntries(codes.map((code) => [code, c])) };
+    dirty = true;
   }
 
-  function applyStatic() {
+  async function applyStatic() {
     const keys: KeyColor[] = Object.entries(painted).map(([code, color]) => ({ code: Number(code), color }));
-    void apply({ effect: { kind: "static" }, keys });
+    if (await apply({ effect: { kind: "static" }, keys })) dirty = false;
   }
 </script>
 
