@@ -19,6 +19,10 @@ pub trait PwTools {
     fn mic_plugins_present(&self) -> bool {
         crate::mic::plugins_present()
     }
+    /// Whether PipeWire can load Smart Volume's compressor (swh's `sc4m_1916`).
+    fn smart_volume_supported(&self) -> bool {
+        crate::smart::compressor_present()
+    }
 }
 
 /// The real tools, run as child processes.
