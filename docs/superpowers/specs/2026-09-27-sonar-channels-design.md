@@ -65,7 +65,9 @@ command or parses output is pure and unit-tested; a fake `PwTools` tests the orc
   (case-insensitive) to a channel; unknown apps → Game. Defaults: discord, vesktop, teamspeak,
   ts3client_linux_amd64, mumble → Chat; firefox, chromium, chrome, brave, spotify, mpv, vlc → Media.
 - **Volume:** channel volume = the sink's volume (`wpctl set-volume <sink> v`, 0–1, the same cubic
-  scale the desktop mixer shows); saved and re-applied on enable/startup.
+  scale the desktop mixer shows); saved and re-applied on enable/startup. A change made elsewhere
+  (the desktop mixer, the volume keys, an app) is saved too, so a restart brings back the level the
+  user last had; the same goes for the virtual mic's volume.
 - **ChatMix:** balance −1 (all Game) … 0 (both full) … +1 (all Chat). The favoured side stays at
   full, the other is turned down linearly; applied to the Game and Chat **outlets**, so it
   multiplies with, and never overwrites, the channel volumes.

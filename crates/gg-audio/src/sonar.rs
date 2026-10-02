@@ -24,6 +24,10 @@ use crate::{config, eq, mic, mix, smart};
 const APPEAR_TIMEOUT: Duration = Duration::from_secs(5);
 const APPEAR_POLL: Duration = Duration::from_millis(250);
 
+/// How far a volume read back from PipeWire may be from the saved one and
+/// still be the same: it comes back cubed and to six decimals.
+const VOLUME_SLACK: f32 = 0.005;
+
 /// Whether PipeWire has all four channel sinks.
 fn channels_up(g: &Graph) -> bool {
     Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some())
@@ -103,6 +107,7 @@ impl<T: PwTools> Sonar<T> {
         self.refresh();
         if self.settings.enabled {
             self.follow_compressor();
+            self.follow_volumes();
             self.keep_levels();
             self.route();
         }
@@ -745,6 +750,36 @@ impl<T: PwTools> Sonar<T> {
         }
     }
 
+    /// Save the channel and mic volumes PipeWire has, once the saved ones were
+    /// pushed to these channels: the desktop's mixer, the volume keys or an
+    /// app may have changed them since, and the levels pushed after the next
+    /// PipeWire restart should be the ones the user last had.
+    fn follow_volumes(&mut self) {
+        if !self.levels_applied || !channels_up(&self.graph) {
+            return;
+        }
+        let differs = |saved: Option<f32>, now: f32| saved.is_none_or(|s| (s - now).abs() > VOLUME_SLACK);
+        let mut changed = false;
+        for channel in Channel::ALL {
+            let Some(now) = self.graph.node(&config::sink_name(channel)).and_then(|n| n.volume) else { continue };
+            let now = now.clamp(0.0, 1.0);
+            if differs(self.settings.volumes.get(&channel).copied(), now) {
+                self.settings.volumes.insert(channel, now);
+                changed = true;
+            }
+        }
+        if let Some(now) = self.graph.node(mic::SOURCE).and_then(|n| n.volume) {
+            let now = now.clamp(0.0, 1.0);
+            if differs(self.settings.mic_volume, now) {
+                self.settings.mic_volume = Some(now);
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist();
+        }
+    }
+
     /// Push the saved levels once per appearance of the channels, and the
     /// stream levels once per appearance of the stream mix (while streamer mode
     /// is on). Each waits only for its own nodes. Each appearance of the
@@ -875,6 +910,8 @@ mod tests {
         fails: RefCell<&'static [&'static str]>,
         /// The running PipeWire's `info.cookie`: new at each start.
         cookie: RefCell<u64>,
+        /// Volumes set since PipeWire started, by node id; the rest are full.
+        volumes: RefCell<HashMap<u32, f32>>,
         runs: RefCell<Vec<Vec<String>>>,
     }
 
@@ -892,6 +929,7 @@ mod tests {
                 stream_comes_up: RefCell::new(true),
                 fails: RefCell::new(&[]),
                 cookie: RefCell::new(1),
+                volumes: RefCell::new(HashMap::new()),
                 runs: RefCell::new(Vec::new()),
             }
         }
@@ -950,14 +988,25 @@ mod tests {
             let Value::Array(mut objects) = serde_json::from_str(&dump_with_source(&nodes, BT, Some(MIC)))? else {
                 unreachable!()
             };
+            for object in &mut objects {
+                let volume = object["id"].as_u64().and_then(|id| self.volumes.borrow().get(&(id as u32)).copied());
+                if let Some(v) = volume {
+                    let linear = f64::from(v).powi(3);
+                    object["info"]["params"]["Props"][0]["channelVolumes"] = json!([linear, linear]);
+                }
+            }
             let core = json!({ "id": 0, "type": "PipeWire:Interface:Core", "info": { "cookie": *self.cookie.borrow() } });
             objects.insert(0, core);
             Ok(Value::Array(objects).to_string())
         }
 
         fn run(&self, argv: &[String]) -> Result<()> {
+            if argv[..2] == ["wpctl", "set-volume"] {
+                self.volumes.borrow_mut().insert(argv[2].parse().unwrap(), argv[3].parse().unwrap());
+            }
             if argv[0] == "systemctl" {
                 *self.cookie.borrow_mut() += 1;
+                self.volumes.borrow_mut().clear();
                 let refused = *self.refuses_stage.borrow()
                     && std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("sv_comp"));
                 *self.up.borrow_mut() = self.channels_come_up && self.dropin.exists() && !refused;
@@ -1165,6 +1214,31 @@ mod tests {
         fake.runs.borrow_mut().clear();
         sonar.tick();
         assert!(fake.runs.borrow().is_empty(), "and only once");
+    }
+
+    #[test]
+    fn a_volume_changed_elsewhere_is_the_one_brought_back() {
+        let (_dir, settings_path, dropin) = paths("volume-elsewhere");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        sonar.enable().unwrap();
+        sonar.set_volume(Channel::Game, 0.9).unwrap();
+        sonar.set_mic_volume(0.8).unwrap();
+        sonar.tick();
+        assert_eq!(settings::load(&settings_path).volumes.get(&Channel::Game), Some(&0.9), "the slider's level stands");
+        // The volume keys turn Game down, and an app's AGC the mic.
+        fake.volumes.borrow_mut().extend([(20, 0.15), (24, 0.5)]);
+        sonar.tick();
+        // PipeWire restarts: the channels come back at full volume.
+        fake.volumes.borrow_mut().clear();
+        *fake.cookie.borrow_mut() += 1;
+        fake.runs.borrow_mut().clear();
+        sonar.tick();
+        assert!(fake.ran(&["wpctl", "set-volume", "20", "0.150"]), "Game as the user left it");
+        assert!(fake.ran(&["wpctl", "set-volume", "24", "0.500"]), "and the mic");
+        let saved = settings::load(&settings_path);
+        assert!((saved.volumes[&Channel::Game] - 0.15).abs() < 1e-3, "{saved:?}");
+        assert!(saved.mic_volume.is_some_and(|v| (v - 0.5).abs() < 1e-3), "{saved:?}");
     }
 
     #[test]
