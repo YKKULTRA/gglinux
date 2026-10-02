@@ -191,6 +191,11 @@ setting write from the UI, including whether mic volume 1–10 sounds right by e
 spare battery charging in the base station steps `07 b7` about every 20 minutes, and each step
 briefly lights the screen.
 
+**Deferred:** the kernel half of the headset backend (prefer `hid-steelseries`' sysfs/ALSA when
+present). No kernel here drives `0x12e0` — the `hid-steelseries` modules of every installed 7.2
+kernel alias only `12c2`, `12b6` and `1410` — hidraw keeps working after one lands, and code
+against an unseen sysfs layout would be untested guesswork.
+
 ### M3 — Sonar audio core
 `gg-audio` on pipewire-rs. Virtual sinks **Game / Chat / Media / Aux / Mic** (hybrid: static
 `context.objects` for stable sinks + daemon-controlled gains/links/routing). Per-channel 10-band biquad
@@ -263,6 +268,7 @@ inotify new prefixes). Implement all endpoints + the handler model (color/tactil
 events onto keyboard RGB/OLED via M4. Built-in Engine Apps: clock, audio visualizer, Discord (mute/talk),
 CS2 (health/ammo). Document "native Steam only (not Flatpak Steam)".
 **Accept:** a GameSense title under Proton (e.g. CS2) drives the Apex OLED/RGB live; a heartbeat timeout
+clears state after 15 s.
 
 Progress 2026-09-29 — **M6a GameSense server done in software** (spec:
 `docs/superpowers/specs/2026-09-29-gamesense-server-design.md`): new `gg-gamesense` crate (requests,
@@ -277,7 +283,6 @@ SDK. Not yet verified on hardware. Next: M6b game-independent effects on the sam
 bands from `pw-record` of the default output, bars rising from the bottom row) and a **mic-mute
 light** (a chosen key, red by default, while PipeWire's default microphone is muted). Not yet
 verified on hardware.
-clears state after 15 s.
 
 ### M7 — Suite features & polish
 Profiles + per-game auto-switch (QuickSet-style `/proc` exec watcher swaps profiles on game launch/exit);
@@ -308,21 +313,69 @@ autostart), settings backup/restore, `install-local.sh` installs the UI, and an 
 (`gglinux-git`, for when the repo is published — publishing is the owner's call). Skipped:
 PrismSync (one RGB device) and virtual surround (optional).
 
+**M7e done in software** (spec `docs/superpowers/specs/2026-10-02-smart-volume-game-clips-design.md`):
+**Smart Volume** per Sonar channel (off, Quiet, Balanced or Loud): swh's SC4 compressor at the end
+of each channel's chain, switched live with no restart. It needs `swh-plugins`; without it the
+channels stay exactly as they were, and gglinux takes the compressor out again if the package
+goes away. **Games-only clips** keep the replay buffer only while a program from the game rules
+runs. Event-based highlights (kills and the like) stay out of scope. Not yet verified: Sonar
+hasn't run live, and `gpu-screen-recorder` isn't installed.
+
 ---
 
 ## Feature parity checklist (vs SteelSeries GG)
 
-**Engine:** device config ✓(M1–M5) · macros ✓(M1/M5) · per-game auto-switch ✓(M7) · onboard profiles
-✓(M1/M4) · firmware update ✗(out of scope — bricking risk) · cloud sync → local backup only (GG
-discontinued cloud anyway).
-**Sonar:** Game/Chat/Media/Aux/Mic sinks ✓(M3) · 10-band parametric EQ ✓(M3) · per-app mixer ✓(M3) ·
-ChatMix ✓(M3) · ClearCast denoise → RNNoise ✓(M3) · Smart Volume ✓(M3, compressor/limiter) · virtual
-surround ✓(M7) · Streamer Mode ✓(M7) · preset library ✓(AutoEQ import; community sharing later).
-**Devices:** Apex actuation/RapidTrigger/RapidTap/Protection/Dual ✓(M5) · per-key RGB ✓(M4) · OLED
-✓(M4) · Rival DPI/polling/buttons ✓(M1) · Nova ANC/sidetone/EQ/mic/battery ✓(M2).
-**GameSense/Engine Apps:** event server ✓(M6) · OLED/RGB/tactile handlers ✓(M6) · built-in apps ✓(M6) ·
-**works under Proton** ✓(M6). **PrismSync** ✓(M7). **Moments** → gpu-screen-recorder ✓(M7).
-**3D Aim Trainer** ✗ (out of scope). **GG Home dashboard** → the UI's device dashboard ✓.
+Each row says where it stands: **verified** (seen working on the owner's hardware), **built** (in
+software and tested against fakes, not yet verified on hardware), **parked** (built; the hardware
+is gone), **blocked** (needs something we don't have yet), **deferred**, or **skipped** (the
+owner's decision).
+
+**Engine:**
+- Apex per-key RGB, the wave effect, and hand-back to onboard lighting: **verified** (M4a).
+  Breathing, spectrum and reactive lighting: **built**.
+- Apex actuation, Rapid Trigger, Rapid Tap, Protection, Dual actuation, key remap and macros:
+  **blocked** (M5) — needs a GG USB capture on Windows.
+- Rival 3 DPI, polling, button remap and onboard save: **parked** (M1); its battery: **verified**.
+- Lighting profiles and per-game switching: **built** (M7a). Profiles are lighting profiles only.
+- Settings backup and restore, in place of cloud sync (which GG dropped anyway): **built** (M7d).
+- Firmware update: **skipped** — bricking risk.
+
+**Sonar** (never turned on live yet, so nothing here is verified):
+- Game / Chat / Media / Aux channels, per-app routing, and the ChatMix slider: **built** (M3a).
+  The base station's ChatMix dial: **skipped** — its knob is damaged.
+- 10-band channel EQ, headphone correction, AutoEQ import: **built** (M3b). A shared preset
+  library: not planned.
+- Virtual mic with RNNoise suppression, gate and compressor (ClearCast's job): **built** (M3c).
+- Smart Volume: **built** (M7e) — swh's SC4 compressor per channel; needs `swh-plugins`.
+- Streamer mode: **built** (M7c).
+- Virtual surround: **skipped**.
+
+**Headset (Nova Pro Wireless):**
+- Status, battery, volume readback, and base-station screen protection: **verified** (M2; waking
+  the screen on the wheel, ANC and mic mute not yet watched).
+- ANC, transparency, sidetone, mic volume and light, auto-off, 2.4 GHz mode, on-device EQ:
+  **built** — not yet tried from the UI.
+- Kernel backend (prefer `hid-steelseries` when present): **deferred** — see M2.
+
+**OLED:** the Apex OLED is **blocked** (M4b) on the same Windows capture as M5. The base
+station's screen is kept dark on purpose (burn-in protection).
+
+**GameSense / Engine Apps:**
+- Event server, colour handlers on the keyboard, `coreProps.json` in Proton prefixes: **built**
+  (M6a). Screen and tactile handlers are accepted but never drawn (OLED blocked; no tactile
+  hardware).
+- Built-in apps — the audio visualizer and the mic-mute light: **built** (M6b). A clock needs the
+  blocked OLED.
+- CS2 Game State Integration and Discord mute: **skipped**.
+- PrismSync: **skipped** — the keyboard is the only RGB device.
+
+**Moments:** an instant-replay buffer with a hotkey and a clip library: **built** (M7b;
+`gpu-screen-recorder` isn't installed yet). Games-only clips: **built** (M7e). Event-based
+highlights: **skipped**.
+
+**Elsewhere:** GG Home → the UI's device dashboard, listing the three devices live: **verified**
+(M0; unplugging and replugging not yet seen). Start at login, tray, `ggctl` and an Arch
+`PKGBUILD`: **built** (M7d). The 3D Aim Trainer: **skipped**.
 
 ---
 
@@ -333,8 +386,8 @@ surround ✓(M7) · Streamer Mode ✓(M7) · preset library ✓(AutoEQ import; c
   carefully. This is the project's one genuinely dangerous surface.
 - **Actuation RE stalls (M5).** It gates only keyboard *switch* config, not the rest — M1–M4/M6 ship
   independently. Worst case, the keyboard still gets full RGB/OLED/remap without actuation tuning.
-- **Kernel `hid-steelseries` lands mid-project.** Verified: hidraw stays open regardless; build the
-  headset backend to detect + prefer kernel sysfs/ALSA when present. No blocker.
+- **Kernel `hid-steelseries` lands mid-project.** Verified: hidraw stays open regardless. Preferring
+  the kernel's sysfs/ALSA is deferred until a kernel supports `0x12e0` (see M2). No blocker.
 - **PipeWire latency stacking (M3).** Keep the whole chain at 48 kHz, collapse hops (filter-chain node
   *is* the sink), `clock.force-quantum 256`; measure with `pw-top`.
 - **Proton coreProps reachability (M6).** Confirmed reachable (shared host netns); the only failure mode

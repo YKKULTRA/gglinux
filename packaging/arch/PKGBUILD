@@ -9,7 +9,7 @@ license=('GPL-3.0-or-later')
 depends=('systemd-libs' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'pipewire' 'wireplumber')
 makedepends=('git' 'cargo' 'nodejs' 'npm')
 optdepends=('noise-suppression-for-voice: noise suppression for the Sonar microphone'
-            'swh-plugins: compressor for the Sonar microphone'
+            'swh-plugins: compressor for the Sonar microphone and Smart Volume'
             'gpu-screen-recorder: instant-replay clips')
 provides=('gglinux')
 conflicts=('gglinux')
