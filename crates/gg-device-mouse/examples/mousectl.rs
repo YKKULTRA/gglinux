@@ -25,11 +25,7 @@ fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let save = args.iter().any(|a| a == "--save");
-    let positional: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .filter(|a| !a.starts_with("--"))
-        .collect();
+    let positional = positional(&args);
 
     let api = HidApi::new().context("initialising hidapi")?;
     let mouse = Mouse::open(&api)?;
@@ -91,6 +87,21 @@ fn report_battery(mouse: &Mouse) -> Result<()> {
     Ok(())
 }
 
+/// The arguments that aren't `--flags`, or the value that follows `--select`.
+fn positional(args: &[String]) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut args = args.iter().map(String::as_str);
+    while let Some(a) = args.next() {
+        if a == "--select" {
+            // Its number, which would otherwise be taken for the DPI list.
+            args.next();
+        } else if !a.starts_with("--") {
+            words.push(a);
+        }
+    }
+    words
+}
+
 fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     let i = args.iter().position(|a| a == flag)?;
     args.get(i + 1).map(String::as_str)
@@ -131,4 +142,20 @@ fn parse_buttons(spec: &str) -> Result<[ButtonAction; BUTTON_COUNT]> {
     let mut actions = proto::default_buttons();
     actions.copy_from_slice(&parsed);
     Ok(actions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn the_select_value_is_not_read_as_the_dpi_list() {
+        for line in ["dpi --select 0 800,1600 --save", "dpi 800,1600 --select 0 --save"] {
+            assert_eq!(positional(&args(line)), ["dpi", "800,1600"], "{line}");
+        }
+    }
 }
