@@ -67,8 +67,9 @@ pub struct Sonar<T: PwTools> {
 impl<T: PwTools> Sonar<T> {
     /// Load saved settings and look at PipeWire once. If settings say enabled
     /// but the drop-in is gone, the user removed it by hand: become disabled
-    /// rather than put it back. With Sonar on, it also checks that PipeWire
-    /// took Smart Volume's stage.
+    /// rather than put it back. If they say off but the drop-in is there — a
+    /// backup from while Sonar was off was restored, say — take it out. With
+    /// Sonar on, it also checks that PipeWire took Smart Volume's stage.
     pub fn new(tools: T, settings_path: PathBuf, dropin_path: PathBuf) -> Self {
         let settings = settings::load(&settings_path);
         let compressor_seen = tools.smart_volume_supported();
@@ -95,6 +96,8 @@ impl<T: PwTools> Sonar<T> {
             sonar.upgrade_dropin();
             sonar.check_stage();
             sonar.keep_levels();
+        } else if sonar.dropin_path.exists() {
+            sonar.remove_stray_dropin();
         }
         sonar
     }
@@ -214,7 +217,11 @@ impl<T: PwTools> Sonar<T> {
         std::fs::write(&self.dropin_path, text)
             .with_context(|| format!("writing {}", self.dropin_path.display()))?;
         info!(%output, path = %self.dropin_path.display(), "enabling Sonar; restarting PipeWire");
-        self.tools.run(&tools::restart_pipewire())?;
+        if let Err(e) = self.tools.run(&tools::restart_pipewire()) {
+            warn!("could not restart PipeWire; undoing");
+            self.undo_enable();
+            return Err(e);
+        }
 
         let want_mic = mic_input.is_some();
         let all_up = |g: &Graph| channels_up(g) && (!want_mic || g.node(mic::SOURCE).is_some());
@@ -224,11 +231,7 @@ impl<T: PwTools> Sonar<T> {
                 warn!("the Sonar mic did not load; continuing without it");
             } else if !self.drop_refused_stage(&output, mic_input.as_deref()) {
                 warn!("Sonar channels did not appear; undoing");
-                let _ = std::fs::remove_file(&self.dropin_path);
-                let _ = self.tools.run(&tools::restart_pipewire());
-                // Not the stage's fault: turning Sonar on again tries it again.
-                self.settings.smart_volume_refused = false;
-                self.persist();
+                self.undo_enable();
                 bail!(
                     "PipeWire did not create the Sonar channels within {} s, so the change was undone",
                     APPEAR_TIMEOUT.as_secs()
@@ -237,7 +240,11 @@ impl<T: PwTools> Sonar<T> {
             // Otherwise PipeWire refused Smart Volume's stage: the channels run without it.
         }
         self.stage_loaded = self.staged();
-        self.take_defaults()?;
+        if let Err(e) = self.take_defaults() {
+            warn!("could not make the Sonar channels the defaults; undoing");
+            self.undo_enable();
+            return Err(e);
+        }
 
         self.settings.enabled = true;
         self.settings.output = Some(output);
@@ -489,6 +496,33 @@ impl<T: PwTools> Sonar<T> {
     }
 
     // --- internals ------------------------------------------------------------
+
+    /// Take back a half-done `enable`: remove the drop-in and restart PipeWire
+    /// without it, so Sonar is wholly off, as its settings say.
+    fn undo_enable(&mut self) {
+        let _ = std::fs::remove_file(&self.dropin_path);
+        let _ = self.tools.run(&tools::restart_pipewire());
+        // Not the stage's fault: turning Sonar on again tries it again.
+        self.settings.smart_volume_refused = false;
+        self.persist();
+    }
+
+    /// Sonar is off but its drop-in is there: remove it, and restart PipeWire
+    /// if it runs the channels, so Sonar is off for real and not just on paper.
+    fn remove_stray_dropin(&mut self) {
+        info!(path = %self.dropin_path.display(), "Sonar is off but its PipeWire drop-in is there; removing it");
+        if let Err(e) = std::fs::remove_file(&self.dropin_path) {
+            warn!(error = %e, "could not remove Sonar's drop-in");
+            return;
+        }
+        if self.graph.nodes.iter().any(|n| config::is_ours(&n.name)) {
+            info!("restarting PipeWire to take the Sonar channels down");
+            match self.tools.run(&tools::restart_pipewire()) {
+                Ok(()) => self.refresh(),
+                Err(e) => warn!(error = %format!("{e:#}"), "could not restart PipeWire"),
+            }
+        }
+    }
 
     /// Make the Game channel the default output and gglinux Mic the default input.
     fn take_defaults(&self) -> Result<()> {
@@ -1080,6 +1114,23 @@ mod tests {
     }
 
     #[test]
+    fn enable_undoes_itself_when_a_later_step_fails() {
+        let (_dir, settings_path, dropin) = paths("enable-fails");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        *fake.fails.borrow_mut() = &["wpctl", "set-default"];
+        assert!(sonar.enable().is_err());
+        assert!(!dropin.exists(), "the drop-in is removed again");
+        assert!(sonar.state().channels.iter().all(|c| !c.present), "and the channels are gone");
+        // systemctl reports a failure though PipeWire did restart (no pipewire-pulse, say).
+        *fake.fails.borrow_mut() = &["systemctl"];
+        assert!(sonar.enable().is_err());
+        assert!(!dropin.exists());
+        assert!(sonar.state().channels.iter().all(|c| !c.present));
+        assert!(!settings::load(&settings_path).enabled);
+    }
+
+    #[test]
     fn streams_are_routed_once() {
         let (_dir, settings_path, dropin) = paths("once");
         let fake = Fake::new(dropin.clone(), APPS);
@@ -1197,6 +1248,23 @@ mod tests {
         assert!(!sonar.is_enabled());
         assert!(!settings::load(&settings_path).enabled);
         assert_eq!(fake.count("systemctl"), 0, "nothing re-installed behind the user's back");
+    }
+
+    #[test]
+    fn a_dropin_left_while_sonar_is_off_is_taken_out_on_startup() {
+        let (_dir, settings_path, dropin) = paths("off-with-dropin");
+        // A backup from before Sonar was on was restored over its settings.
+        settings::save(&settings_path, &Settings::default()).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, true).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.up.borrow_mut() = true; // PipeWire runs the drop-in
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        assert!(!sonar.is_enabled());
+        assert!(!dropin.exists());
+        assert_eq!(fake.count("systemctl"), 1, "one restart takes the channels down");
+        assert!(sonar.state().channels.iter().all(|c| !c.present));
+        assert!(!settings::load(&settings_path).enabled);
     }
 
     #[test]

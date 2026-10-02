@@ -54,11 +54,13 @@ command or parses output is pure and unit-tested; a fake `PwTools` tests the orc
 - **Enable:** pick the output (saved choice if present, else the current default sink if it is a
   physical one, else the first physical sink), remember the current default, write the drop-in,
   restart PipeWire, wait up to 5 s for the four sinks, make Game the default, apply saved volumes
-  and ChatMix, route all running streams. If the sinks never appear: remove the drop-in, restart
-  again, report the error.
+  and ChatMix, route all running streams. If the sinks never appear, or a step after writing the
+  drop-in fails: remove the drop-in, restart again, report the error.
 - **Disable:** remove the drop-in, restart PipeWire, restore the remembered default.
 - **Startup:** if settings say enabled but the drop-in is gone (the user removed it), become
-  disabled; otherwise resume routing and re-apply volumes/ChatMix.
+  disabled; otherwise resume routing and re-apply volumes/ChatMix. If settings say disabled but the
+  drop-in is there (a backup from while Sonar was off was restored, say), remove it, and restart
+  PipeWire if it runs the channels.
 - **Routing:** while enabled, every 1 s read `pw-dump`; each app stream (`Stream/Output/Audio`,
   not one of our outlets) is sent to its channel with `pw-metadata <id> target.object gglinux_<c>`
   once per stream id (again only if its rule changes). Rules map `application.process.binary`
