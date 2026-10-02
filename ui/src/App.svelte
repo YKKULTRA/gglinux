@@ -77,14 +77,13 @@
       {:else if daemon.devices.length === 0}
         <section class="notice">
           <h2>No SteelSeries devices found</h2>
+          <!-- Not the udev rule: without it devices are still listed (listing reads only
+               sysfs); they just can't be opened. -->
           <p>
             Connected devices show up here the moment they&rsquo;re plugged in. If yours is
-            attached but missing, the udev rule may not be installed:
+            attached but missing, check its cable or try another USB port. A wireless one is
+            found through its dongle or base station, so that is what needs to be plugged in.
           </p>
-          <pre><code>sudo install -Dm644 data/udev/60-gglinux.rules \
-  /etc/udev/rules.d/60-gglinux.rules
-sudo udevadm control --reload
-sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
         </section>
       {:else}
         {#if hasRival3}
@@ -284,6 +283,9 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
     color: var(--text-dim);
     font-size: 0.86rem;
     line-height: 1.5;
+  }
+  .notice p:last-child {
+    margin-bottom: 0;
   }
   .notice pre {
     margin: 0;
