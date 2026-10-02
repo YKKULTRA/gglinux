@@ -104,8 +104,10 @@ Volume), and one for clips:
 
 **Smart Volume** uses the `sc4m` compressor from `swh-plugins`. Without it, the channels stay
 exactly as they were and the Sonar tab asks you to install it. If you remove it while Sonar is on,
-gglinux takes Smart Volume out of the channels at once; if gglinux wasn't running then, the
-channels are missing from the next login until gglinux starts and puts them back without it.
+gglinux takes Smart Volume out of its PipeWire drop-in at once, but the channels PipeWire is already
+running keep it, as last set, until PipeWire next restarts, and the Sonar tab can no longer switch
+it: turn Sonar off and on to take it out of them. If gglinux wasn't running then, the channels are
+missing from the next login until gglinux starts and puts them back without it.
 
 **GameSense** (games and apps driving the keyboard lighting) is off until you turn it on in the
 Games page. Turning it on starts a server on `127.0.0.1` and writes a small `coreProps.json`
