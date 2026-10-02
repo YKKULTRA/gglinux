@@ -257,7 +257,12 @@
           {#if kb.reactive === "no_access"}
             <div class="notice">
               <p>{ACCESS_WARNING}</p>
-              <p>To allow it: <code>./scripts/install-local.sh --no-build --no-ui --reactive</code></p>
+              <!-- Just the rule: install-local.sh would also put a ~/.local daemon before a packaged one. -->
+              <p>To allow it, add the optional rule, then replug the keyboard:</p>
+              <pre><code>sudo install -m644 /usr/share/gglinux/61-gglinux-reactive.rules \
+  /etc/udev/rules.d/
+sudo udevadm control --reload</code></pre>
+              <p>Built from source? Copy <code>data/udev/61-gglinux-reactive.rules</code> from the checkout instead.</p>
             </div>
           {/if}
         {/if}
@@ -367,6 +372,7 @@
   .notice p { margin: 0; }
   .notice p + p { margin-top: 0.45rem; }
   .notice code { font-size: 0.78rem; color: var(--text); }
+  .notice pre { margin: 0.45rem 0; padding: 0.45rem 0.6rem; overflow-x: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
   .hint { margin: 0.5rem 0 0; font-size: 0.78rem; color: var(--text-dim); }
   .error { margin: 0.8rem 0 0; padding: 0.5rem 0.7rem; font-size: 0.8rem; color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-radius: 8px; }
 </style>
