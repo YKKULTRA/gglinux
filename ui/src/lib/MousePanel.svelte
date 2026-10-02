@@ -110,9 +110,11 @@
   function removeStage(i: number) {
     if (stages.length <= 1) return;
     stages = stages.filter((_, n) => n !== i);
-    // The daemon rejects an out-of-range active index, and it would be a
-    // confusing error to surface for an edit the user made somewhere else.
-    if (active >= stages.length) active = stages.length - 1;
+    // The selected stage moves down a place when one before it goes. And the
+    // daemon rejects an out-of-range active index, which would be a confusing
+    // error to surface for an edit the user made somewhere else.
+    if (i < active) active -= 1;
+    else if (active >= stages.length) active = stages.length - 1;
   }
 
   /** Run one write, keeping the button that triggered it disabled meanwhile. */
