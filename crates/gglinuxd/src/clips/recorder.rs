@@ -15,7 +15,10 @@ const HEALTHY_RUN: Duration = Duration::from_secs(60);
 const VIDEO: [&str; 3] = ["mp4", "mkv", "webm"];
 const MAX_CLIPS: usize = 200;
 
-pub fn argv(s: &ClipsSettings, dir: &Path) -> Vec<String> {
+/// The recorder's command line. Desktop audio is the monitor of `mixed`, the
+/// output Sonar's channels play into while it's on (the default output is then
+/// the Game channel alone), or else of the default output.
+pub fn argv(s: &ClipsSettings, dir: &Path, mixed: Option<&str>) -> Vec<String> {
     let quality = match s.quality {
         ClipQuality::Medium => "medium",
         ClipQuality::High => "high",
@@ -30,7 +33,8 @@ pub fn argv(s: &ClipsSettings, dir: &Path) -> Vec<String> {
     .map(|x| x.to_string())
     .collect();
     if s.desktop_audio {
-        v.extend(["-a".to_string(), "default_output".to_string()]);
+        let source = mixed.map_or_else(|| "default_output".to_string(), |output| format!("device:{output}.monitor"));
+        v.extend(["-a".to_string(), source]);
     }
     if s.mic {
         v.extend(["-a".to_string(), "default_input".to_string()]);
@@ -131,15 +135,22 @@ mod tests {
     #[test]
     fn the_command_line_follows_the_settings() {
         let s = ClipsSettings::default();
-        assert_eq!(argv(&s, Path::new("/v")), [
+        assert_eq!(argv(&s, Path::new("/v"), None), [
             "gpu-screen-recorder", "-w", "portal", "-restore-portal-session", "yes", "-c", "mp4",
             "-f", "60", "-r", "30", "-q", "high", "-o", "/v", "-a", "default_output",
         ]);
         let s = ClipsSettings { desktop_audio: false, mic: true, quality: ClipQuality::VeryHigh, fps: 30, seconds: 90, ..s };
-        let a = argv(&s, Path::new("/v"));
+        let a = argv(&s, Path::new("/v"), None);
         assert!(a.windows(2).any(|w| w == ["-a", "default_input"]));
         assert!(!a.iter().any(|x| x == "default_output"));
         assert!(a.windows(2).any(|w| w == ["-q", "very_high"]) && a.windows(2).any(|w| w == ["-r", "90"]));
+    }
+
+    #[test]
+    fn with_sonar_on_desktop_audio_is_the_output_its_channels_play_into() {
+        let a = argv(&ClipsSettings::default(), Path::new("/v"), Some("alsa_output.usb-SteelSeries"));
+        assert!(a.windows(2).any(|w| w == ["-a", "device:alsa_output.usb-SteelSeries.monitor"]), "{a:?}");
+        assert!(!a.iter().any(|x| x == "default_output"), "the default output is then the Game channel alone: {a:?}");
     }
 
     #[test]

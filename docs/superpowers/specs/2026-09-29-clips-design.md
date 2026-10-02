@@ -48,6 +48,10 @@ From PROTOCOLS.md §5, plus the gpu-screen-recorder docs:
 
 **The recorder** (daemon `clips.rs`, a tokio task):
 - **Command line:** a pure `argv(&settings, dir)`, so it can be tested.
+- **Desktop audio:** `-a default_output`. With Sonar on, the default output is the Game channel
+  alone, so it's `-a device:<node.name>.monitor` for the output Sonar's channels play into, whose
+  monitor carries every channel. Sonar's worker says when that changes (Sonar turned on or off, or
+  another output chosen), and a recorder taking desktop audio starts again there.
 - **Starting:** while enabled and the program is found on `PATH`, it runs the recorder as a child
   process, creating `dir` if needed.
 - **Crashes:** a child that exits on its own is restarted after 5 s, doubling to at most 60 s. A

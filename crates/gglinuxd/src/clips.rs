@@ -94,6 +94,9 @@ pub struct Controller {
     game: Option<String>,
     /// Games-only, the game gone: when to stop.
     linger_until: Option<Instant>,
+    /// Where everything playing mixes, from Sonar while it's on: desktop
+    /// audio records its monitor. `None` is the default output.
+    mixed: Option<String>,
     error: Option<String>,
     hotkey: Option<String>,
     hotkey_task: Option<tokio::task::JoinHandle<()>>,
@@ -119,7 +122,7 @@ impl Controller {
         let c = Controller {
             settings, path, program, event_tx, internal_tx,
             running: None, generation: 0, delay: Duration::ZERO, retry_at: None,
-            game: None, linger_until: None,
+            game: None, linger_until: None, mixed: None,
             error: None, hotkey: None, hotkey_task: None, hotkey_allowed: false, published: None,
         };
         (c, internal_rx)
@@ -151,7 +154,7 @@ impl Controller {
             self.error = Some(format!("cannot create {}: {e}", dir.display()));
             return self.publish();
         }
-        let argv = recorder::argv(&self.settings, &dir);
+        let argv = recorder::argv(&self.settings, &dir, self.mixed.as_deref());
         let mut child = match Process::new(&program).args(&argv[1..]).kill_on_drop(false).spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -235,6 +238,20 @@ impl Controller {
             self.linger_until = Some(Instant::now() + GAME_GRACE);
         }
         self.publish();
+    }
+
+    /// Sonar was turned on or off, or moved its channels to another output.
+    /// Desktop audio follows, so a recorder taking it starts again there.
+    pub async fn set_mixed(&mut self, mixed: Option<String>) {
+        if mixed == self.mixed {
+            return;
+        }
+        self.mixed = mixed;
+        if self.settings.desktop_audio && self.running.is_some() {
+            info!(output = ?self.mixed, "desktop audio moved; restarting the replay buffer");
+            self.stop().await;
+            self.start().await;
+        }
     }
 
     /// The grace after a game is over: stop, unless the game came back.
@@ -335,13 +352,18 @@ impl Controller {
     }
 }
 
-pub fn spawn(event_tx: broadcast::Sender<Event>, mut games: watch::Receiver<Option<String>>) -> Handle {
+pub fn spawn(
+    event_tx: broadcast::Sender<Event>,
+    mut games: watch::Receiver<Option<String>>,
+    mut mixed: watch::Receiver<Option<String>>,
+) -> Handle {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let path = gg_ipc::config_dir().join("clips.json");
     let (mut c, mut internal) = Controller::new(recorder::load(&path), path, None, event_tx);
     c.hotkey_allowed = true;
     tokio::spawn(async move {
         c.game = games.borrow_and_update().clone();
+        c.mixed = mixed.borrow_and_update().clone();
         c.start().await;
         loop {
             let retry = c.retry_at;
@@ -355,6 +377,10 @@ pub fn spawn(event_tx: broadcast::Sender<Event>, mut games: watch::Receiver<Opti
                 Ok(()) = games.changed() => {
                     let game = games.borrow_and_update().clone();
                     c.set_game(game).await;
+                }
+                Ok(()) = mixed.changed() => {
+                    let output = mixed.borrow_and_update().clone();
+                    c.set_mixed(output).await;
                 }
                 _ = async { tokio::time::sleep_until(retry.expect("guarded").into()).await }, if retry.is_some() => {
                     c.retry_at = None;
@@ -417,8 +443,12 @@ mod tests {
     }
 
     async fn log_has(dir: &Path, line: &str) -> bool {
+        log_has_line(dir, |l| l.starts_with(line)).await
+    }
+
+    async fn log_has_line(dir: &Path, wanted: impl Fn(&str) -> bool) -> bool {
         for _ in 0..40 {
-            if std::fs::read_to_string(dir.join("log")).unwrap_or_default().lines().any(|l| l.starts_with(line)) {
+            if std::fs::read_to_string(dir.join("log")).unwrap_or_default().lines().any(&wanted) {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -470,6 +500,25 @@ mod tests {
         assert!(s.error.as_deref().is_some_and(|e| e.contains("stopped")), "{:?}", s.error);
         assert_eq!(c.delay, Duration::from_secs(5));
         assert!(c.retry_at.is_some());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn desktop_audio_follows_sonar() {
+        let d = scratch("sonar");
+        let (mut c, _internal) = controller(&d, stand_in(&d, false));
+        start(&mut c).await;
+        assert!(log_has_line(&d, |l| l.starts_with("start") && l.ends_with("-a default_output")).await);
+        // Sonar on: the default output is now the Game channel alone.
+        c.set_mixed(Some("alsa_output.usb-SteelSeries".into())).await;
+        start(&mut c).await; // retried if the stand-in was busy
+        assert!(log_has(&d, "int").await, "the recorder hearing the default output is stopped");
+        let monitor = "-a device:alsa_output.usb-SteelSeries.monitor";
+        assert!(log_has_line(&d, |l| l.starts_with("start") && l.ends_with(monitor)).await, "and started again on every channel");
+        c.set_mixed(Some("alsa_output.usb-SteelSeries".into())).await;
+        let log = std::fs::read_to_string(d.join("log")).unwrap();
+        assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 2, "the same output changes nothing:\n{log}");
+        c.stop().await;
         std::fs::remove_dir_all(d).unwrap();
     }
 

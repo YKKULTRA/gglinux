@@ -84,14 +84,16 @@ async fn main() -> Result<()> {
     let keyboard = keyboard::spawn(event_tx.clone(), vec![engine.overlay()]);
     // The game from the profiles' rules that's running now; games-only clips follow it.
     let (game_tx, game_rx) = watch::channel::<Option<String>>(None);
+    // Where everything playing mixes, from Sonar; clips' desktop audio follows it.
+    let (mixed_tx, mixed_rx) = watch::channel::<Option<String>>(None);
     let workers = Workers {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
         gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
         profiles: profiles::spawn(event_tx.clone(), keyboard.clone(), game_tx),
-        clips: clips::spawn(event_tx.clone(), game_rx),
-        // Sonar tells the keyboard's visualizer where everything playing mixes.
-        sonar: sonar::spawn(event_tx.clone(), keyboard.clone()),
+        clips: clips::spawn(event_tx.clone(), game_rx, mixed_rx),
+        // Sonar tells the keyboard's visualizer and clips where everything playing mixes.
+        sonar: sonar::spawn(event_tx.clone(), keyboard.clone(), mixed_tx),
         keyboard,
     };
 

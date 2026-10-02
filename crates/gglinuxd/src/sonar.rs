@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gg_audio::sonar::Sonar;
 use gg_audio::tools::SystemTools;
 use gg_ipc::{Channel, EqBand, Event, HeadphoneEq, MicSettings, SmartVolume, SonarState};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 
 use crate::keyboard;
 
@@ -56,19 +56,29 @@ impl Handle {
     }
 }
 
-pub fn spawn(event_tx: broadcast::Sender<Event>, keyboard: keyboard::Handle) -> Handle {
+pub fn spawn(
+    event_tx: broadcast::Sender<Event>,
+    keyboard: keyboard::Handle,
+    mixed_tx: watch::Sender<Option<String>>,
+) -> Handle {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("gg-sonar".into())
-        .spawn(move || worker(rx, event_tx, keyboard))
+        .spawn(move || worker(rx, event_tx, keyboard, mixed_tx))
         .expect("spawn gg-sonar thread");
     Handle { tx }
 }
 
-fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>, keyboard: keyboard::Handle) {
+fn worker(
+    rx: Receiver<Command>,
+    event_tx: broadcast::Sender<Event>,
+    keyboard: keyboard::Handle,
+    mixed_tx: watch::Sender<Option<String>>,
+) {
     let mut sonar = Sonar::new(SystemTools, gg_audio::settings::path(), gg_audio::config::dropin_path());
     let mut published: Option<SonarState> = None;
-    // What the keyboard's visualizer was last told to listen to; it starts on the default output.
+    // What the keyboard's visualizer and clips were last told to listen to;
+    // they start on the default output.
     let mut heard: Option<String> = None;
     let mut last_tick = Instant::now();
     loop {
@@ -87,6 +97,7 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>, keyboard: k
             let output = mixed_output(now.enabled, &now.output);
             if output != heard {
                 keyboard.listen_to(output.clone());
+                mixed_tx.send_replace(output.clone());
                 heard = output;
             }
             published = Some(now.clone());
@@ -95,9 +106,10 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>, keyboard: k
     }
 }
 
-/// Where everything playing mixes, for the keyboard's visualizer: with Sonar
-/// on, the output its channels play into, since the default output is then
-/// the Game channel alone; with it off, none — the default output has it all.
+/// Where everything playing mixes, for the keyboard's visualizer and clips'
+/// desktop audio: with Sonar on, the output its channels play into, since the
+/// default output is then the Game channel alone; with it off, none — the
+/// default output has it all.
 fn mixed_output(enabled: bool, output: &Option<String>) -> Option<String> {
     output.clone().filter(|_| enabled)
 }
