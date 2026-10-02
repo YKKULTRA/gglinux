@@ -628,6 +628,10 @@ impl<T: PwTools> Sonar<T> {
             info!("restarting PipeWire to bring the Sonar channels back without Smart Volume");
             match self.tools.run(&tools::restart_pipewire()) {
                 Ok(()) => {
+                    // `keep_levels` and `route` never see the channels gone: push it all again.
+                    self.levels_applied = false;
+                    self.stream_levels_applied = false;
+                    self.routed.clear();
                     self.wait_until(channels_up);
                 }
                 Err(e) => warn!(error = %format!("{e:#}"), "could not restart PipeWire"),
@@ -1555,14 +1559,18 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
-        let restarts = fake.count("systemctl");
+        sonar.set_chatmix(0.5).unwrap();
+        fake.runs.borrow_mut().clear();
         // swh-plugins removed, and PipeWire restarted by something else before gglinux
         // looked: it skipped the channel modules.
         *fake.smart_volume.borrow_mut() = false;
         *fake.up.borrow_mut() = false;
         sonar.tick();
         assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
-        assert_eq!(fake.count("systemctl"), restarts + 1, "one restart, without the stage");
+        assert_eq!(fake.count("systemctl"), 1, "one restart, without the stage");
         assert!(sonar.snapshot().channels.iter().all(|c| c.present));
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ is pushed again");
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "and ChatMix");
+        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "and the apps routed again");
     }
 }
