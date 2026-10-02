@@ -442,11 +442,26 @@ mod tests {
         script
     }
 
+    /// A new folder for one test, made here with a name nobody can guess and
+    /// private: never one another account made first, since the stand-in in it
+    /// gets run.
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("gglinux-clipctl-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        use std::hash::BuildHasher;
+        use std::os::unix::fs::DirBuilderExt;
+        let random = std::collections::hash_map::RandomState::new().hash_one(tag);
+        let d = std::env::temp_dir().join(format!("gglinux-clipctl-{}-{tag}-{random:016x}", std::process::id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn scratch_folders_are_new_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (a, b) = (scratch("probe"), scratch("probe"));
+        assert_ne!(a, b, "a name nobody can guess, so nobody can make it first");
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::remove_dir_all(a).unwrap();
+        std::fs::remove_dir_all(b).unwrap();
     }
 
     fn controller(dir: &Path, program: PathBuf) -> (Controller, mpsc::UnboundedReceiver<Internal>) {

@@ -125,10 +125,15 @@ mod tests {
     use super::*;
     use gg_ipc::ClipQuality;
 
+    /// A new folder for one test, made here with a name nobody can guess and
+    /// private: never one another account made first, which could point the
+    /// files written in it elsewhere.
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("gglinux-clips-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        use std::hash::BuildHasher;
+        use std::os::unix::fs::DirBuilderExt;
+        let random = std::collections::hash_map::RandomState::new().hash_one(tag);
+        let d = std::env::temp_dir().join(format!("gglinux-clips-{}-{tag}-{random:016x}", std::process::id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
         d
     }
 
