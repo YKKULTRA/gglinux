@@ -206,7 +206,9 @@ impl Controller {
             }
             info!("replay buffer stopped");
         }
+        // Nothing is being started now, so a failure to start is over.
         self.retry_at = None;
+        self.error = None;
         self.linger_until = None;
         self.publish();
     }
@@ -253,6 +255,9 @@ impl Controller {
             self.start().await;
         } else if self.settings.games_only && self.running.is_some() && self.linger_until.is_none() {
             self.linger_until = Some(Instant::now() + GAME_GRACE);
+        } else if self.running.is_none() && !self.wanted() {
+            // A restart pending for the game that's gone won't happen.
+            self.stop().await;
         }
         self.publish();
     }
@@ -638,6 +643,19 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
 
+    #[tokio::test]
+    async fn turning_clips_off_ends_a_pending_retry_and_its_message() {
+        let d = scratch("retry-off");
+        let (mut c, mut internal) = controller(&d, stand_in(&d, true));
+        start(&mut c).await;
+        let exited = next_exit(&mut internal).await;
+        c.on_internal(exited).await;
+        assert!(c.state().error.is_some_and(|e| e.contains("retrying")));
+        c.set_settings(ClipsSettings { enabled: false, ..c.settings.clone() }).await.unwrap();
+        assert_eq!((c.state().error, c.retry_at), (None, None), "nothing will be retried");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
     fn games_only(dir: &Path, program: PathBuf) -> (Controller, mpsc::UnboundedReceiver<Internal>) {
         let (mut c, internal) = controller(dir, program);
         c.settings.games_only = true;
@@ -684,6 +702,22 @@ mod tests {
         assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 1, "one recorder throughout:\n{log}");
         assert!(!log.lines().any(|l| l == "int"), "{log}");
         c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_retry_ends_with_the_game() {
+        let d = scratch("retry-game");
+        let (mut c, mut internal) = games_only(&d, stand_in(&d, true));
+        c.set_game(Some("game-a".into())).await;
+        start(&mut c).await;
+        let exited = next_exit(&mut internal).await;
+        c.on_internal(exited).await;
+        assert!(c.retry_at.is_some());
+        c.set_game(None).await;
+        let s = c.state();
+        assert!(s.waiting);
+        assert_eq!((s.error, c.retry_at), (None, None), "no game, nothing to retry");
         std::fs::remove_dir_all(d).unwrap();
     }
 

@@ -395,7 +395,8 @@ The first draft. It needs no optional package, since the meter ships in `pipewir
   `SIGINT`. The grace gives the owner time to save the game's last moments after quitting. It
   also bridges a launcher handing over to the game. If the game comes back within it, the same
   recorder carries on.
-- **An unexpected exit while not wanted** (the game's gone) isn't retried.
+- **An unexpected exit while not wanted** (the game's gone) isn't retried, and a restart still
+  pending when the game goes is dropped, with its "retrying" message.
 - Changing the settings works as before (stop, then start if wanted). Turning `games_only` on
   with no game stops the recorder.
 
