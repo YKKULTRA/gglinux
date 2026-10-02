@@ -42,6 +42,10 @@ pub struct Settings {
     pub stream_master: f32,
     /// Smart Volume per channel; off when unset.
     pub smart_volume: BTreeMap<Channel, SmartVolume>,
+    /// PipeWire wouldn't make the channels with Smart Volume's stage, so they
+    /// run without it. Only ever set while Sonar is on: turning Sonar off
+    /// forgets it, so turning it on again tries the stage again.
+    pub smart_volume_refused: bool,
 }
 
 impl Default for Settings {
@@ -63,6 +67,7 @@ impl Default for Settings {
             stream_volumes: BTreeMap::new(),
             stream_master: 1.0,
             smart_volume: BTreeMap::new(),
+            smart_volume_refused: false,
         }
     }
 }
@@ -157,5 +162,6 @@ mod tests {
         let s = load(&path);
         assert!(s.enabled && s.smart_volume.is_empty());
         assert_eq!(s.smart_volume(Channel::Game), gg_ipc::SmartVolume::default());
+        assert!(!s.smart_volume_refused);
     }
 }
