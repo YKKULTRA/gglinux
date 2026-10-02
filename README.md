@@ -96,6 +96,10 @@ sudo udevadm control --reload
 rm -rf ~/.config/gglinux ~/.local/share/io.github.ykk.gglinux   # settings, and the UI's web storage
 ```
 
+**Moving to the Arch package** (`packaging/arch/PKGBUILD`)? Don't keep both installs: what
+`install-local.sh` put in your home runs instead of what the package installs. Quit gglinux from
+its tray and run the commands above first, all but the last line, which removes your settings.
+
 **Sonar** (the audio channels, EQ and virtual mic) needs PipeWire ≥ 1.0 with WirePlumber 0.5; it
 drives them with PipeWire's own `pw-dump`, `pw-metadata`, `pw-cli` and `wpctl`, so there is nothing
 extra to build. Three packages are **optional**: two for the mic chain (one of them also for Smart
