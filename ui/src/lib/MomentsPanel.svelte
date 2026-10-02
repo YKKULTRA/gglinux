@@ -59,10 +59,22 @@
         />
         Keep an instant-replay buffer
       </label>
+      <label class="toggle small">
+        <input
+          type="checkbox"
+          checked={st.settings.games_only}
+          disabled={busy}
+          onchange={(e) => set({ games_only: e.currentTarget.checked })}
+        />
+        Only while a game from your game rules runs
+      </label>
       <p class="meta">
         While on, the last {st.settings.seconds} seconds of the screen are kept in memory and nothing is written until you save.
-        {st.recording ? "Recording now." : ""}
+        {st.recording ? (st.settings.games_only && st.game ? `Recording while ${st.game} runs.` : "Recording now.") : ""}
       </p>
+      {#if st.waiting}
+        <p class="meta">Waiting for a game from your game rules (Settings → Profiles) to start.</p>
+      {/if}
       <div class="row">
         <span class="label">Length</span>
         <input type="range" min="5" max="300" step="5" value={st.settings.seconds} disabled={busy} onchange={(e) => set({ seconds: e.currentTarget.valueAsNumber })} />
