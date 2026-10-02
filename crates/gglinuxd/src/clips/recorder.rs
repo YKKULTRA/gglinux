@@ -91,8 +91,8 @@ pub fn find_program(path_var: Option<&OsStr>) -> Option<PathBuf> {
 }
 
 pub fn load(path: &Path) -> ClipsSettings {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
             let moved_to = gg_ipc::set_aside(path);
             warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable clip settings");
             ClipsSettings::default()
