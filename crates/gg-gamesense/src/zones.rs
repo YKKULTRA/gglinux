@@ -54,6 +54,9 @@ fn key(name: &str) -> Option<u8> {
     if let Some(f) = name.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
         return (1..=12).contains(&f).then(|| 0x3A + f - 1);
     }
+    if name == "win-menu" {
+        return ANSI_TKL.iter().find(|k| k.1 == "Menu").map(|k| k.0); // whatever code the layout gives it
+    }
     Some(match name {
         "return" => 0x28,
         "escape" => 0x29,
@@ -86,7 +89,6 @@ fn key(name: &str) -> Option<u8> {
         "leftarrow" => 0x50,
         "downarrow" => 0x51,
         "uparrow" => 0x52,
-        "win-menu" => 0x65,
         "l-ctrl" => 0xE0,
         "l-shift" => 0xE1,
         "l-alt" => 0xE2,
@@ -94,8 +96,7 @@ fn key(name: &str) -> Option<u8> {
         "r-ctrl" => 0xE4,
         "r-shift" => 0xE5,
         "r-alt" => 0xE6,
-        "r-win" => 0xE7,
-        _ => return None, // ss-key and m0–m5 too: not HID keys on this board
+        _ => return None, // ss-key, m0–m5 and r-win too: not keys on this board
     })
 }
 
@@ -145,7 +146,7 @@ mod tests {
 
     #[test]
     fn zones_this_keyboard_lacks_are_empty() {
-        for zone in ["keypad", "keypad-nums", "macro-keys", "all-macro-keys", "logo", "keypad-5", "m0", "pound", "ss-key", "no-such-zone"] {
+        for zone in ["keypad", "keypad-nums", "macro-keys", "all-macro-keys", "logo", "keypad-5", "m0", "pound", "ss-key", "r-win", "no-such-zone"] {
             assert!(named(zone).is_empty(), "{zone}");
         }
     }
@@ -160,5 +161,7 @@ mod tests {
         assert_eq!(named("escape"), vec![0x29]);
         assert_eq!(named("l-shift"), vec![0xE1]);
         assert_eq!(named("uparrow"), vec![0x52]);
+        let menu = ANSI_TKL.iter().find(|k| k.1 == "Menu").unwrap().0;
+        assert_eq!(named("win-menu"), vec![menu], "the key the layout calls Menu");
     }
 }
