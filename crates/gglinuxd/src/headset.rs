@@ -95,6 +95,7 @@ struct State {
 }
 
 fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
+    let hid = gg_hid::lock();
     let api = match HidApi::new() {
         Ok(api) => api,
         Err(e) => {
@@ -102,6 +103,7 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
             return;
         }
     };
+    drop(hid);
     let settings = ScreenSettings::default();
     let mut state = State {
         api,
@@ -214,11 +216,14 @@ fn try_open(state: &mut State) {
         return;
     }
     state.last_open_attempt = Some(Instant::now());
+    let hid = gg_hid::lock();
     if let Err(e) = state.api.refresh_devices() {
         debug!(error = %e, "could not refresh HID devices");
         return;
     }
-    match Headset::open(&state.api) {
+    let opened = Headset::open(&state.api);
+    drop(hid);
+    match opened {
         Ok(headset) => {
             info!("base station connected");
             state.device = Some(headset);

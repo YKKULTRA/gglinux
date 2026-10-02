@@ -97,6 +97,7 @@ struct State {
 }
 
 fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
+    let hid = gg_hid::lock();
     let api = match HidApi::new() {
         Ok(api) => api,
         Err(e) => {
@@ -104,6 +105,7 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
             return;
         }
     };
+    drop(hid);
     let mut state = State {
         api,
         applied: None,
@@ -228,10 +230,12 @@ fn with_mouse<T>(
     f: impl FnOnce(&Mouse) -> anyhow::Result<T>,
 ) -> Result<T, String> {
     // Re-enumerate so a mouse plugged in after startup is found.
+    let hid = gg_hid::lock();
     if let Err(e) = state.api.refresh_devices() {
         return Err(format!("could not refresh HID devices: {e}"));
     }
     let mouse = Mouse::open(&state.api).map_err(|e| format!("{e:#}"))?;
+    drop(hid);
     f(&mouse).map_err(|e| format!("{e:#}"))
 }
 
@@ -247,10 +251,13 @@ fn poll_battery(state: &mut State, event_tx: &broadcast::Sender<Event>) {
     // Stamped even if the read below fails, so a disconnected mouse is retried on
     // the normal schedule rather than on every request.
     state.last_poll = Some(Instant::now());
+    let hid = gg_hid::lock();
     if state.api.refresh_devices().is_err() {
         return;
     }
-    let reading = match Mouse::open(&state.api) {
+    let opened = Mouse::open(&state.api);
+    drop(hid);
+    let reading = match opened {
         Ok(mouse) => match mouse.battery() {
             Ok(battery) => battery,
             Err(e) => {

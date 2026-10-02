@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::io::AsRawFd;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
 use gg_ipc::{DeviceInfo, DeviceKind, Event, InterfaceInfo};
@@ -24,6 +25,16 @@ const RESCAN_INTERVAL_MS: i32 = 10_000;
 /// Rescan interval when no udev monitor could be opened — polling is then the only
 /// way we notice a device appearing, so it has to be frequent enough to feel live.
 const POLL_ONLY_INTERVAL_MS: i32 = 1_500;
+
+/// Hold while enumerating or opening through hidapi (`HidApi::new`,
+/// `refresh_devices`, opening a device), on every thread. Its C library keeps
+/// one error string for the whole process and frees and replaces it on each
+/// of those calls without a lock, so two at once can free it twice. Reads and
+/// writes on an open device keep their own error and need no lock.
+pub fn lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Map a SteelSeries product id to its kind and display name.
 fn classify(pid: u16) -> (DeviceKind, &'static str) {
@@ -110,7 +121,9 @@ fn diff(old: &[DeviceInfo], new: &[DeviceInfo]) -> Vec<Event> {
 /// on every subsequent change. Intended to run on its own OS thread — `hidapi` and
 /// `udev` are blocking C libraries.
 pub fn run_monitor(mut on_change: impl FnMut(Vec<DeviceInfo>, Vec<Event>)) -> Result<()> {
+    let hid = lock();
     let mut api = HidApi::new()?;
+    drop(hid);
     let mut known = scan(&api);
     debug!(count = known.len(), "initial device scan");
     on_change(known.clone(), Vec::new());
@@ -147,7 +160,10 @@ pub fn run_monitor(mut on_change: impl FnMut(Vec<DeviceInfo>, Vec<Event>)) -> Re
             for _event in m.iter() {}
         }
 
-        if let Err(e) = api.refresh_devices() {
+        let hid = lock();
+        let refreshed = api.refresh_devices();
+        drop(hid);
+        if let Err(e) = refreshed {
             warn!(error = %e, "hid refresh failed");
             continue;
         }
@@ -254,5 +270,15 @@ mod tests {
         assert_eq!(classify(0x1872).0, DeviceKind::Mouse);
         assert_eq!(classify(0x12e0).0, DeviceKind::Headset);
         assert_eq!(classify(0x0000).0, DeviceKind::Other);
+    }
+
+    #[test]
+    fn a_thread_that_panics_holding_the_hid_lock_does_not_wedge_the_others() {
+        let _ = std::thread::spawn(|| {
+            let _hid = lock();
+            panic!("a worker died mid-enumeration");
+        })
+        .join();
+        drop(lock());
     }
 }

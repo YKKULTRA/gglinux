@@ -161,6 +161,7 @@ struct State {
 }
 
 fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sender<Event>, overlays: Vec<Arc<dyn Overlay>>) {
+    let hid = gg_hid::lock();
     let api = match HidApi::new() {
         Ok(api) => api,
         Err(e) => {
@@ -168,6 +169,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
             return;
         }
     };
+    drop(hid);
     let settings_path = gg_ipc::config_dir().join("lighting.json");
     let mut state = State {
         api,
@@ -444,10 +446,13 @@ fn try_open(state: &mut State) {
         return;
     }
     state.last_open_attempt = Some(Instant::now());
+    let hid = gg_hid::lock();
     if state.api.refresh_devices().is_err() {
         return;
     }
-    match Keyboard::open(&state.api) {
+    let opened = Keyboard::open(&state.api);
+    drop(hid);
+    match opened {
         Ok(keyboard) => {
             info!("keyboard connected");
             state.device = Some(keyboard);
@@ -465,7 +470,10 @@ fn look_for(state: &mut State) {
         return;
     }
     state.last_open_attempt = Some(Instant::now());
-    if state.api.refresh_devices().is_err() {
+    let hid = gg_hid::lock();
+    let refreshed = state.api.refresh_devices();
+    drop(hid);
+    if refreshed.is_err() {
         return;
     }
     if state.device.as_ref().is_some_and(|d| !d.is_listed(&state.api)) {
