@@ -39,8 +39,9 @@ pub struct Sonar<T: PwTools> {
     routed: HashMap<u32, Channel>,
     available: bool,
     /// Whether saved volumes and ChatMix have been pushed to the channels
-    /// PipeWire has now. Cleared when they vanish, so a PipeWire restart gglinux
-    /// did not do — a reboot, say — gets the levels back once they reappear.
+    /// PipeWire has now. Cleared when they vanish or PipeWire's cookie
+    /// changes, so a PipeWire restart gglinux did not do — a reboot, say —
+    /// gets the levels back once they reappear.
     levels_applied: bool,
     /// The same for the stream mix, kept apart so a stream that's late or
     /// missing never holds back the channels' own levels.
@@ -52,6 +53,10 @@ pub struct Sonar<T: PwTools> {
     /// from the drop-in whenever they come up, since PipeWire made them from
     /// it; the drop-in only gains the stage just before a restart.
     stage_loaded: bool,
+    /// The cookie of the PipeWire last read. A restart can be over between
+    /// two ticks, so the channels are never seen missing; a new cookie still
+    /// tells.
+    cookie: Option<u64>,
 }
 
 impl<T: PwTools> Sonar<T> {
@@ -74,6 +79,7 @@ impl<T: PwTools> Sonar<T> {
             stream_levels_applied: false,
             compressor_seen,
             stage_loaded: false,
+            cookie: None,
         };
         sonar.refresh();
         if sonar.settings.enabled && !sonar.dropin_path.exists() {
@@ -674,6 +680,14 @@ impl<T: PwTools> Sonar<T> {
     fn refresh(&mut self) {
         match self.tools.dump().and_then(|json| Graph::parse(&json)) {
             Ok(graph) => {
+                if graph.cookie.is_some() && graph.cookie != self.cookie {
+                    // A PipeWire started since the last look: it made the channels
+                    // with the drop-in's defaults and knows none of the routes.
+                    self.levels_applied = false;
+                    self.stream_levels_applied = false;
+                    self.routed.clear();
+                    self.cookie = graph.cookie;
+                }
                 self.graph = graph;
                 self.available = true;
             }
@@ -834,6 +848,7 @@ mod tests {
     use super::*;
     use crate::testing::{dump_with_source, scratch, Scratch};
     use gg_ipc::{HeadphoneEq, MicSettings, SmartLevel};
+    use serde_json::{json, Value};
     use std::cell::RefCell;
 
     const HEADSET: &str = "alsa_output.usb-SteelSeries_Arctis";
@@ -858,6 +873,8 @@ mod tests {
         stream_comes_up: RefCell<bool>,
         /// Commands starting with these words fail, after doing what they do.
         fails: RefCell<&'static [&'static str]>,
+        /// The running PipeWire's `info.cookie`: new at each start.
+        cookie: RefCell<u64>,
         runs: RefCell<Vec<Vec<String>>>,
     }
 
@@ -874,6 +891,7 @@ mod tests {
                 refuses_stage: RefCell::new(false),
                 stream_comes_up: RefCell::new(true),
                 fails: RefCell::new(&[]),
+                cookie: RefCell::new(1),
                 runs: RefCell::new(Vec::new()),
             }
         }
@@ -929,11 +947,17 @@ mod tests {
             }
             let streams = self.streams.borrow();
             nodes.extend(streams.iter().map(|&(id, bin)| (id, bin, "Stream/Output/Audio", Some(bin))));
-            Ok(dump_with_source(&nodes, BT, Some(MIC)))
+            let Value::Array(mut objects) = serde_json::from_str(&dump_with_source(&nodes, BT, Some(MIC)))? else {
+                unreachable!()
+            };
+            let core = json!({ "id": 0, "type": "PipeWire:Interface:Core", "info": { "cookie": *self.cookie.borrow() } });
+            objects.insert(0, core);
+            Ok(Value::Array(objects).to_string())
         }
 
         fn run(&self, argv: &[String]) -> Result<()> {
             if argv[0] == "systemctl" {
+                *self.cookie.borrow_mut() += 1;
                 let refused = *self.refuses_stage.borrow()
                     && std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("sv_comp"));
                 *self.up.borrow_mut() = self.channels_come_up && self.dropin.exists() && !refused;
@@ -1121,6 +1145,26 @@ mod tests {
         fake.runs.borrow_mut().clear();
         sonar.tick();
         assert_eq!(fake.count("wpctl"), 0, "and only once");
+    }
+
+    #[test]
+    fn a_pipewire_restart_between_two_ticks_gets_everything_back() {
+        let (_dir, settings_path, dropin) = paths("restart-unseen");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_chatmix(0.5).unwrap();
+        sonar.tick();
+        fake.runs.borrow_mut().clear();
+        // PipeWire restarted by something else, so quickly that no tick saw the channels gone.
+        *fake.cookie.borrow_mut() += 1;
+        sonar.tick();
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
+        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "the apps routed again");
+        fake.runs.borrow_mut().clear();
+        sonar.tick();
+        assert!(fake.runs.borrow().is_empty(), "and only once");
     }
 
     #[test]

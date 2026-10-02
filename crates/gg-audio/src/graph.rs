@@ -39,6 +39,9 @@ pub struct Graph {
     pub default_sink: Option<String>,
     /// `node.name` of the configured default source.
     pub default_source: Option<String>,
+    /// The PipeWire daemon's `info.cookie`, random each time it starts: a new
+    /// one means PipeWire restarted, however quickly.
+    pub cookie: Option<u64>,
 }
 
 const SINK: &str = "Audio/Sink";
@@ -51,6 +54,7 @@ impl Graph {
         let mut graph = Graph::default();
         for object in &objects {
             match object["type"].as_str() {
+                Some("PipeWire:Interface:Core") => graph.cookie = object["info"]["cookie"].as_u64(),
                 Some("PipeWire:Interface:Node") => graph.nodes.extend(parse_node(object)),
                 Some("PipeWire:Interface:Metadata")
                     if object["props"]["metadata.name"] == "default" =>
@@ -180,6 +184,13 @@ mod tests {
         assert_eq!(elisa.route_key().as_deref(), Some("elisa"));
         let firefox = g.app_streams().find(|s| s.app_binary.as_deref() == Some("firefox")).unwrap();
         assert_eq!(firefox.route_key().as_deref(), Some("firefox"));
+    }
+
+    #[test]
+    fn the_cookie_tells_pipewire_starts_apart() {
+        let json = r#"[{"id":0,"type":"PipeWire:Interface:Core","info":{"cookie":3377742783,"name":"pipewire-0"}}]"#;
+        assert_eq!(Graph::parse(json).unwrap().cookie, Some(3377742783));
+        assert_eq!(Graph::parse(CAPTURE).unwrap().cookie, None, "a dump without the core has none");
     }
 
     #[test]
