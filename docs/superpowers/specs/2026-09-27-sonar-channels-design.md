@@ -52,11 +52,13 @@ gglinux drives PipeWire with its own tools behind a `PwTools` trait (`pw-dump`; 
 command or parses output is pure and unit-tested; a fake `PwTools` tests the orchestration.
 
 - **Enable:** pick the output (saved choice if present, else the current default sink if it is a
-  physical one, else the first physical sink), remember the current default, write the drop-in,
+  physical one — the one WirePlumber plays into while the configured one is away — else the first
+  physical sink), remember the current default, write the drop-in,
   restart PipeWire, wait up to 5 s for the four sinks, make Game the default, apply saved volumes
   and ChatMix, route all running streams. If the sinks never appear, or a step after writing the
   drop-in fails: remove the drop-in, restart again, report the error.
-- **Disable:** remove the drop-in, restart PipeWire, restore the remembered default.
+- **Disable:** remove the drop-in, restart PipeWire, restore the remembered default if PipeWire has
+  it (one that's away isn't waited for: WirePlumber remembers it and picks it when it returns).
 - **Startup:** if settings say enabled but the drop-in is gone (the user removed it), become
   disabled; otherwise resume routing and re-apply volumes/ChatMix. If settings say disabled but the
   drop-in is there (a backup from while Sonar was off was restored, say), remove it, and restart

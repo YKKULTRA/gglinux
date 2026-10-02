@@ -277,7 +277,12 @@ impl<T: PwTools> Sonar<T> {
         self.routed.clear();
         self.levels_applied = false;
         self.stream_levels_applied = false;
-        let previous = self.settings.previous_default.take();
+        // Only a device PipeWire had before the restart comes back with it: one
+        // that's away isn't waited for. WirePlumber remembers it was chosen and
+        // makes it the default again when it returns.
+        let here = |name: &String| self.graph.node(name).is_some();
+        let previous = self.settings.previous_default.take().filter(here);
+        let previous_source = self.settings.previous_default_source.take().filter(here);
         self.persist();
         if let Some(name) = previous {
             if self.wait_until(|g| g.node(&name).is_some()) {
@@ -288,8 +293,7 @@ impl<T: PwTools> Sonar<T> {
                 warn!(%name, "the previous default output did not come back");
             }
         }
-        if let Some(name) = self.settings.previous_default_source.take() {
-            self.persist();
+        if let Some(name) = previous_source {
             if self.wait_until(|g| g.node(&name).is_some()) {
                 if let Some(node) = self.graph.node(&name) {
                     self.tools.run(&tools::set_default(node.id))?;
@@ -536,7 +540,8 @@ impl<T: PwTools> Sonar<T> {
     }
 
     /// The input the mic should read, if the plugins exist: the saved one if it
-    /// is still there, else the default input if it is a real one, else the first.
+    /// is still there, else the default input if it is a real one — the one in
+    /// use while the configured one is away — else the first.
     fn choose_mic(&self) -> Option<String> {
         if !self.tools.mic_plugins_present() {
             return None;
@@ -547,6 +552,7 @@ impl<T: PwTools> Sonar<T> {
             .clone()
             .filter(physical)
             .or_else(|| self.graph.default_source.clone().filter(physical))
+            .or_else(|| self.graph.current_source.clone().filter(physical))
             .or_else(|| self.graph.physical_sources().next().map(|n| n.name.clone()))
     }
 
@@ -753,7 +759,8 @@ impl<T: PwTools> Sonar<T> {
     }
 
     /// The saved output if it still exists, else the current default if it is a
-    /// real device, else the first real device.
+    /// real device — the one in use while the configured one is away — else
+    /// the first real device.
     fn choose_output(&self) -> Option<String> {
         let physical = |name: &String| self.graph.physical_sinks().any(|n| &n.name == name);
         self.settings
@@ -761,6 +768,7 @@ impl<T: PwTools> Sonar<T> {
             .clone()
             .filter(physical)
             .or_else(|| self.graph.default_sink.clone().filter(physical))
+            .or_else(|| self.graph.current_sink.clone().filter(physical))
             .or_else(|| self.graph.physical_sinks().next().map(|n| n.name.clone()))
     }
 
@@ -949,6 +957,11 @@ mod tests {
         volumes: RefCell<HashMap<u32, f32>>,
         /// `object.serial` by node id, where it isn't the id.
         serials: RefCell<HashMap<u32, u64>>,
+        /// The default output the user chose; WirePlumber plays into `BT`
+        /// while it's away.
+        configured_sink: &'static str,
+        /// How many times gglinux waited for PipeWire.
+        pauses: RefCell<usize>,
         runs: RefCell<Vec<Vec<String>>>,
     }
 
@@ -968,6 +981,8 @@ mod tests {
                 cookie: RefCell::new(1),
                 volumes: RefCell::new(HashMap::new()),
                 serials: RefCell::new(HashMap::new()),
+                configured_sink: BT,
+                pauses: RefCell::new(0),
                 runs: RefCell::new(Vec::new()),
             }
         }
@@ -1023,9 +1038,15 @@ mod tests {
             }
             let streams = self.streams.borrow();
             nodes.extend(streams.iter().map(|&(id, bin)| (id, bin, "Stream/Output/Audio", Some(bin))));
-            let Value::Array(mut objects) = serde_json::from_str(&dump_with_source(&nodes, BT, Some(MIC)))? else {
-                unreachable!()
-            };
+            let dump = dump_with_source(&nodes, self.configured_sink, Some(MIC));
+            let Value::Array(mut objects) = serde_json::from_str(&dump)? else { unreachable!() };
+            for object in objects.iter_mut().filter(|o| o["type"] == "PipeWire:Interface:Metadata") {
+                let in_use = |kind: &str, name: &str| {
+                    json!({ "subject": 0, "key": format!("default.audio.{kind}"), "type": "Spa:String:JSON", "value": { "name": name } })
+                };
+                let entries = object["metadata"].as_array_mut().unwrap();
+                entries.extend([in_use("sink", BT), in_use("source", MIC)]);
+            }
             for object in objects.iter_mut().filter(|o| o["type"] == "PipeWire:Interface:Node") {
                 let id = object["id"].as_u64().unwrap() as u32;
                 let serial = self.serials.borrow().get(&id).copied().unwrap_or(u64::from(id));
@@ -1059,7 +1080,9 @@ mod tests {
             Ok(())
         }
 
-        fn pause(&self, _: Duration) {}
+        fn pause(&self, _: Duration) {
+            *self.pauses.borrow_mut() += 1;
+        }
 
         fn mic_plugins_present(&self) -> bool {
             self.mic_plugins
@@ -1236,6 +1259,22 @@ mod tests {
         assert_eq!(fake.count("systemctl"), 2);
         assert!(fake.ran(&["wpctl", "set-default", "11"]), "back to the Bluetooth output");
         assert!(!settings::load(&settings_path).enabled);
+    }
+
+    #[test]
+    fn an_absent_default_output_gives_way_to_the_one_in_use() {
+        let (_dir, settings_path, dropin) = paths("default-away");
+        let mut fake = Fake::new(dropin.clone(), APPS);
+        // The user's default is Bluetooth headphones that are off; WirePlumber plays into BT meanwhile.
+        fake.configured_sink = "bluez_output.away";
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        sonar.enable().unwrap();
+        let saved = settings::load(&settings_path);
+        assert_eq!(saved.output.as_deref(), Some(BT), "the channels play where the user hears audio now");
+        assert_eq!(saved.previous_default.as_deref(), Some("bluez_output.away"), "still the default to give back");
+        let waits = *fake.pauses.borrow();
+        sonar.disable().unwrap();
+        assert_eq!(*fake.pauses.borrow(), waits, "no waiting for a device that isn't there");
     }
 
     #[test]
