@@ -48,9 +48,10 @@ impl Capture {
             let mut bytes = vec![0u8; HOP * 4];
             let mut hop = vec![0f32; HOP];
             while out.read_exact(&mut bytes).is_ok() {
-                let (samples, _) = bytes.as_chunks::<4>();
+                #[allow(clippy::chunks_exact_to_as_chunks)] // `as_chunks` needs Rust 1.88
+                let samples = bytes.chunks_exact(4);
                 for (s, b) in hop.iter_mut().zip(samples) {
-                    *s = f32::from_le_bytes(*b);
+                    *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
                 }
                 let new = analyzer.push(&hop);
                 *levels.lock().unwrap_or_else(|e| e.into_inner()) = new;
