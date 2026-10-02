@@ -141,9 +141,11 @@ pub fn newly_failed(seen: &mut HashSet<PathBuf>, failed: &[PathBuf]) -> Vec<Path
     new
 }
 
-/// 100 → 0 → 100, one value per step.
+/// 100 → 0 → 100, one value per step. From 20 down it moves in fives, each
+/// held for five steps: a new value restarts the flash, and one every step
+/// would never reach the dark half of the 4 Hz flash.
 pub fn test_values() -> Vec<i64> {
-    (0..=100).rev().chain(1..=100).collect()
+    (0..=100).rev().chain(1..=100).map(|v| if v <= 20 { (v + 4) / 5 * 5 } else { v }).collect()
 }
 
 fn define_test_game(r: &mut Registry) -> Result<(), String> {
@@ -516,6 +518,26 @@ mod tests {
         assert_eq!(low[&0x45], gg_device_keyboard::Rgb::default(), "F12 dark at 10%");
         assert_ne!(low[&0x3A], gg_device_keyboard::Rgb::default(), "F1 lit (first half of a flash)");
         assert_eq!(r.paint(1.2).unwrap()[&0x3A], gg_device_keyboard::Rgb::default(), "…and dark in the second half at 4 Hz");
+    }
+
+    #[test]
+    fn the_test_game_flashes_as_it_sweeps_through_the_low_values() {
+        let mut r = Registry::default();
+        define_test_game(&mut r).unwrap();
+        let step = TEST_STEP.as_secs_f64();
+        let mut dark = Vec::new();
+        for (i, value) in test_values().into_iter().enumerate() {
+            let t = i as f64 * step;
+            send_test_value(&mut r, value, t).unwrap();
+            for frame in 0..3 { // the keyboard draws every 33 ms
+                let f1 = r.paint(t + f64::from(frame) / 30.0).unwrap()[&0x3A];
+                if value > 0 && f1 == gg_device_keyboard::Rgb::default() {
+                    dark.push(value);
+                }
+            }
+        }
+        assert!(!dark.is_empty(), "F1 never went dark: every step restarted the flash");
+        assert!(dark.iter().all(|&v| v <= 20), "only low values flash: {dark:?}");
     }
 
     #[test]
