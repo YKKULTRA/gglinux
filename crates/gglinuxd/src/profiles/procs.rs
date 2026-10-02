@@ -15,7 +15,16 @@ pub fn names(comm: &str, cmdline: &[u8]) -> Vec<String> {
     if !comm.is_empty() {
         out.push(comm.to_string());
     }
-    if let Some(arg0) = cmdline.split(|&b| b == 0).next().filter(|a| !a.is_empty()) {
+    let mut args = cmdline.split(|&b| b == 0);
+    if let Some(arg0) = args.next().filter(|a| !a.is_empty()) {
+        // Chromium, Electron and node rewrite their title as the whole command
+        // line in one string; the program is what comes before its first option.
+        let rewritten = args.all(|a| a.is_empty());
+        let option = arg0.windows(3).position(|w| w[0] == b' ' && w[1] == b'-' && w[2] != b' ');
+        let arg0 = match option {
+            Some(i) if rewritten => &arg0[..i],
+            _ => arg0,
+        };
         let arg0 = String::from_utf8_lossy(arg0);
         let base = arg0.rsplit(['/', '\\']).next().unwrap_or(&arg0).trim().to_string();
         if !base.is_empty() && !out.iter().any(|n| n.eq_ignore_ascii_case(&base)) {
@@ -59,6 +68,19 @@ mod tests {
             vec!["wine64-preload".to_string(), "portal.exe".to_string()]);
         assert_eq!(names("kworker/0:1\n", b""), vec!["kworker/0:1".to_string()]);
         assert!(names("", b"").is_empty());
+    }
+
+    #[test]
+    fn a_rewritten_title_gives_its_program_not_its_options() {
+        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(names("chrome\n", b"/opt/google/chrome/chrome --type=renderer --renderer-client-id=7\0\0\0"), owned(&["chrome"]));
+        assert_eq!(names("steamwebhelper\n", b"/home/u/.steam/ubuntu12_64/steamwebhelper -lang=en_US -cachedir=/tmp/x\0"),
+            owned(&["steamwebhelper"]));
+        assert_eq!(names("npm exec @model\n", b"npm exec @modelcontextprotocol/server-pdf --stdio\0\0"),
+            owned(&["npm exec @model", "server-pdf"]));
+        // A path with spaces, dashes or real arguments is the program as it is.
+        assert_eq!(names("wine64-preload\n", b"C:\\Games\\Star Wars - KOTOR\\swkotor.exe\0"), owned(&["wine64-preload", "swkotor.exe"]));
+        assert_eq!(names("wine64-preload\n", b"C:\\Games\\Odd -Name\\odd.exe\0-windowed\0"), owned(&["wine64-preload", "odd.exe"]));
     }
 
     #[test]
