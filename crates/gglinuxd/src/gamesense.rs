@@ -233,6 +233,10 @@ async fn run(mut c: Controller, mut rx: mpsc::UnboundedReceiver<Command>, mut ch
         if let Err(e) = c.start().await {
             warn!(error = %e, "could not start the GameSense server");
         }
+    } else {
+        // Off, yet our files can still be there: a restored backup with
+        // GameSense off, an unreadable settings file, or a stop cut short.
+        c.clear_prefixes().await;
     }
     let mut tick = tokio::time::interval(SCAN_EVERY);
     loop {
@@ -344,6 +348,12 @@ impl Controller {
         }
         self.engine.settings.enabled = false;
         self.save();
+        self.clear_prefixes().await;
+        Ok(())
+    }
+
+    /// Take gglinux's files out of every prefix; other files are left alone.
+    async fn clear_prefixes(&mut self) {
         let libraries = self.libraries_or_read();
         let removed = tokio::task::spawn_blocking(move || {
             prefixes::program_data_dirs(&libraries)
@@ -355,7 +365,6 @@ impl Controller {
         .unwrap_or(0);
         debug!(removed, "removed coreProps.json from Proton prefixes");
         self.holding = 0;
-        Ok(())
     }
 
     fn libraries_or_read(&mut self) -> Vec<PathBuf> {
