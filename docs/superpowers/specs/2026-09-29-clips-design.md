@@ -53,7 +53,8 @@ From PROTOCOLS.md §5, plus the gpu-screen-recorder docs:
   monitor carries every channel. Sonar's worker says when that changes (Sonar turned on or off, or
   another output chosen), and a recorder taking desktop audio starts again there.
 - **Starting:** while enabled and the program is found on `PATH`, it runs the recorder as a child
-  process, creating `dir` if needed.
+  process, creating `dir` if needed. While enabled without the program, it looks for it every 5 s,
+  so clips start once it's installed.
 - **Crashes:** a child that exits on its own is restarted after 5 s, doubling to at most 60 s. A
   child that has run for 60 s resets the delay. A start that fails (`dir` can't be created yet, the
   program can't be run) is retried on the same backoff.

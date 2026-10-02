@@ -22,6 +22,9 @@ const SAVE_SETTLE: Duration = Duration::from_millis(1500);
 /// How long games-only clips keep recording after the game has gone: time to
 /// save its last moments, and to bridge a launcher handing over to the game.
 const GAME_GRACE: Duration = Duration::from_secs(15);
+/// How often clips that are on look for a missing `gpu-screen-recorder`, so
+/// they start once it's installed.
+const INSTALL_POLL: Duration = Duration::from_secs(5);
 
 pub enum Command {
     GetState(Reply<ClipsState>),
@@ -82,7 +85,7 @@ impl Running {
 pub struct Controller {
     settings: ClipsSettings,
     path: PathBuf,
-    /// Set in tests; `None` searches `PATH`.
+    /// Set in tests, installed once the file is there; `None` searches `PATH`.
     program: Option<PathBuf>,
     event_tx: broadcast::Sender<Event>,
     internal_tx: mpsc::UnboundedSender<Internal>,
@@ -129,7 +132,10 @@ impl Controller {
     }
 
     fn program(&self) -> Option<PathBuf> {
-        self.program.clone().or_else(|| recorder::find_program(std::env::var_os("PATH").as_deref()))
+        match &self.program {
+            Some(p) => p.is_file().then(|| p.clone()),
+            None => recorder::find_program(std::env::var_os("PATH").as_deref()),
+        }
     }
 
     fn dir(&self) -> PathBuf {
@@ -146,6 +152,7 @@ impl Controller {
             return;
         }
         let Some(program) = self.program() else {
+            self.retry_at = Some(Instant::now() + INSTALL_POLL);
             self.error = Some("gpu-screen-recorder is not installed".into());
             return self.publish();
         };
@@ -560,6 +567,24 @@ mod tests {
         assert!(c.error.as_deref().is_some_and(|e| e.starts_with("could not start")), "{:?}", c.error);
         assert!(c.retry_at.is_some(), "tried again after the backoff");
         assert!(!c.state().recording);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn clips_start_once_the_recorder_is_installed() {
+        let d = scratch("install");
+        let (mut c, _internal) = controller(&d, d.join("gpu-screen-recorder"));
+        c.start().await;
+        let s = c.state();
+        assert!(!s.available && !s.recording);
+        assert!(c.retry_at.is_some(), "it looks again later");
+        stand_in(&d, false); // installed
+        assert!(c.state().available);
+        c.retry_at = None; // the wait is over, as in spawn()
+        start(&mut c).await;
+        let s = c.state();
+        assert!(s.recording && s.error.is_none(), "{:?}", s.error);
+        c.stop().await;
         std::fs::remove_dir_all(d).unwrap();
     }
 
