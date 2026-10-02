@@ -16,6 +16,7 @@ gg-audio = { path = "../gg-audio" }
 gg-device-keyboard = { path = "../gg-device-keyboard" }
 gg-gamesense = { path = "../gg-gamesense" }
 axum.workspace = true
+hyper-util.workspace = true
 rustfft.workspace = true
 ashpd.workspace = true
 futures-util.workspace = true

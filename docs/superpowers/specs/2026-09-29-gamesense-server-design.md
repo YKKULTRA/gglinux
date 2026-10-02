@@ -143,6 +143,10 @@ request is rejected with an error.
 - `axum` on `127.0.0.1:<port>`, on the daemon's tokio runtime.
 - The port is picked once (a free ephemeral port) and saved. If it's taken on a later start, a new
   one is picked and saved, and the prefixes are rewritten.
+- Served HTTP/1 only, through hyper-util with a timer, so no local program can hold the daemon's
+  file descriptors: at most 32 connections at once (more wait in the listen queue); headers must
+  arrive within 5 s, which also closes a kept-alive connection left idle that long; a whole request
+  gets 10 s, then 408. Stopping closes every connection, giving a request in progress 0.5 s.
 
 **Request checks** (a browser can't pass them):
 - any request carrying an `Origin` header → 403;

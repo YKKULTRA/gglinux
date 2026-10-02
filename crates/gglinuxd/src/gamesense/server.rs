@@ -3,7 +3,10 @@
 //! `application/json`, which a browser can't send cross-origin without a
 //! CORS preflight this server never approves.
 
+use std::future::Future;
+use std::pin::pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Request, State};
@@ -13,8 +16,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gg_gamesense::{proto, Registry};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
+use tracing::debug;
 
 use super::{Change, Clock};
 
@@ -28,6 +38,85 @@ pub struct Shared {
     pub clock: Clock,
     /// Called after every accepted request: wake the keyboard, publish, save.
     pub changed: Arc<dyn Fn(Change) + Send + Sync>,
+}
+
+/// How much one client can hold, so a local program can't use up the
+/// daemon's file descriptors with connections it never finishes.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Connections served at once. More wait in the listen queue until one
+    /// closes, rather than being accepted and closed: a game that connects
+    /// while the server is full is served late, not refused.
+    pub connections: usize,
+    /// How long a request's headers can take to arrive, which is also how long
+    /// a kept-alive connection can sit idle between requests.
+    pub headers: Duration,
+    /// How long a whole request can take, body included; past it the answer
+    /// is 408 and the connection closes.
+    pub request: Duration,
+    /// How long a stop gives open requests to finish before their connections
+    /// are dropped.
+    pub grace: Duration,
+}
+
+pub const LIMITS: Limits = Limits {
+    connections: 32,
+    headers: Duration::from_secs(5),
+    request: Duration::from_secs(10),
+    grace: Duration::from_millis(500),
+};
+
+/// How long to wait after a failed accept (out of file descriptors, say)
+/// before trying again.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
+/// Serve `app` on `listener` within `limits` until `stop` finishes, then close
+/// every connection: idle ones at once, ones mid-request within the grace.
+pub async fn serve(listener: TcpListener, app: Router, limits: Limits, stop: impl Future<Output = ()>) {
+    let app = app.layer(middleware::from_fn(move |req: Request, next: Next| async move {
+        tokio::time::timeout(limits.request, next.run(req))
+            .await
+            .unwrap_or_else(|_| error(StatusCode::REQUEST_TIMEOUT, "the request took too long"))
+    }));
+    let (closing, closed) = watch::channel(());
+    let mut connections = JoinSet::new();
+    let mut stop = pin!(stop);
+    loop {
+        tokio::select! {
+            () = &mut stop => break,
+            Some(_) = connections.join_next() => {}
+            accepted = listener.accept(), if connections.len() < limits.connections => match accepted {
+                Ok((stream, _)) => {
+                    connections.spawn(connection(stream, app.clone(), limits, closed.clone()));
+                }
+                Err(e) => {
+                    debug!(error = %e, "GameSense server could not accept a connection");
+                    tokio::time::sleep(ACCEPT_RETRY).await;
+                }
+            },
+        }
+    }
+    drop(listener);
+    drop(closing);
+    let _ = tokio::time::timeout(limits.grace, async { while connections.join_next().await.is_some() {} }).await;
+    // Dropping the set aborts what's left, which closes those connections.
+}
+
+/// One client connection, until it closes or the server stops.
+async fn connection(stream: TcpStream, app: Router, limits: Limits, mut closing: watch::Receiver<()>) {
+    let mut builder = Builder::new(TokioExecutor::new()).http1_only();
+    builder.http1().timer(TokioTimer::new()).header_read_timeout(limits.headers);
+    let mut conn = pin!(builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(app)));
+    tokio::select! {
+        result = conn.as_mut() => {
+            if let Err(e) = result {
+                debug!(error = %e, "GameSense connection ended");
+            }
+            return;
+        }
+        _ = closing.changed() => conn.as_mut().graceful_shutdown(),
+    }
+    let _ = conn.await;
 }
 
 pub fn router(shared: Shared) -> Router {
@@ -135,6 +224,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use http_body_util::BodyExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
     use tower::ServiceExt;
 
     fn shared() -> (Shared, Arc<Mutex<Vec<Change>>>) {
@@ -222,6 +313,85 @@ mod tests {
         assert_eq!(s.registry.lock().unwrap().active_game(s.clock.now()), Some("G"));
         assert_eq!(post(&app, "/stop_game", r#"{"game":"G"}"#).await.0, StatusCode::OK);
         assert_eq!(s.registry.lock().unwrap().paint(s.clock.now()), None);
+    }
+
+    /// Short limits, so the tests don't wait long.
+    const QUICK: Limits = Limits {
+        connections: 2,
+        headers: Duration::from_millis(200),
+        request: Duration::from_millis(400),
+        grace: Duration::from_millis(200),
+    };
+
+    const PROBE: &[u8] = b"GET /supports_multiple_game_events HTTP/1.1\r\nHost: x\r\n\r\n";
+
+    async fn listen(limits: Limits) -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve(listener, router(shared().0), limits, async {
+            let _ = stopped.await;
+        }));
+        (addr, stop, task)
+    }
+
+    /// What the server sends until it closes the connection, or `None` if it
+    /// is still open after `wait`.
+    async fn closed_within(stream: &mut TcpStream, wait: Duration) -> Option<String> {
+        let mut got = Vec::new();
+        let read = tokio::time::timeout(wait, async {
+            let mut buf = [0u8; 1024];
+            while let Ok(n @ 1..) = stream.read(&mut buf).await {
+                got.extend_from_slice(&buf[..n]);
+            }
+        });
+        read.await.ok().map(|()| String::from_utf8_lossy(&got).into_owned())
+    }
+
+    #[tokio::test]
+    async fn a_silent_or_idle_connection_is_closed() {
+        let (addr, _stop, _task) = listen(QUICK).await;
+        let mut silent = TcpStream::connect(addr).await.unwrap();
+        assert!(closed_within(&mut silent, Duration::from_secs(2)).await.is_some(), "a connection that sends nothing");
+        let mut idle = TcpStream::connect(addr).await.unwrap();
+        idle.write_all(PROBE).await.unwrap();
+        let answer = closed_within(&mut idle, Duration::from_secs(2)).await.expect("a kept-alive connection left idle");
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn a_request_whose_body_never_arrives_is_cut_off() {
+        let (addr, _stop, _task) = listen(QUICK).await;
+        let mut slow = TcpStream::connect(addr).await.unwrap();
+        slow.write_all(b"POST /game_event HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{").await.unwrap();
+        let answer = closed_within(&mut slow, Duration::from_secs(2)).await.expect("closed");
+        assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn connections_beyond_the_cap_wait_their_turn() {
+        let (addr, _stop, _task) = listen(Limits { headers: Duration::from_secs(10), ..QUICK }).await;
+        let first = TcpStream::connect(addr).await.unwrap();
+        let _second = TcpStream::connect(addr).await.unwrap();
+        let mut third = TcpStream::connect(addr).await.unwrap();
+        third.write_all(b"GET /supports_multiple_game_events HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+        assert_eq!(closed_within(&mut third, Duration::from_millis(300)).await, None, "not served while two are open");
+        drop(first);
+        let answer = closed_within(&mut third, Duration::from_secs(2)).await.expect("served once one closes");
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn stopping_closes_open_connections() {
+        let (addr, stop, task) = listen(Limits { headers: Duration::from_secs(10), ..QUICK }).await;
+        let mut silent = TcpStream::connect(addr).await.unwrap();
+        let mut half = TcpStream::connect(addr).await.unwrap();
+        half.write_all(b"POST /game_event HTTP/1.1\r\nHost: x\r\n").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stop.send(()).unwrap();
+        assert!(closed_within(&mut silent, Duration::from_secs(1)).await.is_some(), "a silent connection");
+        assert!(closed_within(&mut half, Duration::from_secs(1)).await.is_some(), "a half-sent request");
+        tokio::time::timeout(Duration::from_secs(1), task).await.expect("the server task ends").unwrap();
     }
 
     #[tokio::test]

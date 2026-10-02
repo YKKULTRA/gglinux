@@ -321,14 +321,9 @@ impl Controller {
             }),
         };
         let (shutdown, stop) = oneshot::channel::<()>();
-        let task = tokio::spawn(async move {
-            let serve = axum::serve(listener, server::router(shared)).with_graceful_shutdown(async {
-                let _ = stop.await;
-            });
-            if let Err(e) = serve.await {
-                warn!(error = %e, "GameSense server stopped");
-            }
-        });
+        let task = tokio::spawn(server::serve(listener, server::router(shared), server::LIMITS, async {
+            let _ = stop.await;
+        }));
         info!(port, "GameSense server listening on 127.0.0.1");
         self.running = Some(Running { port, shutdown, task });
         self.engine.settings.enabled = true;
