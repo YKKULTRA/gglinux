@@ -111,10 +111,6 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
           {/each}
         </div>
       {/if}
-
-      {#if daemon.lastError}
-        <p class="error">{daemon.lastError}</p>
-      {/if}
     {:else if page === "sonar"}
       <header class="page-head">
         <h1>Sonar</h1>
@@ -305,10 +301,5 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
   .fine {
     margin: 0.7rem 0 0;
     font-size: 0.78rem;
-  }
-  .error {
-    margin-top: 1rem;
-    color: var(--danger);
-    font-size: 0.82rem;
   }
 </style>

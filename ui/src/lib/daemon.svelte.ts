@@ -60,8 +60,6 @@ class Daemon {
   profiles = $state<ProfilesState | null>(null);
   /** The replay recorder, its settings and the clip library; null until first fetched. */
   clips = $state<ClipsState | null>(null);
-  /** Last transport/protocol error, for surfacing in the UI. */
-  lastError = $state<string | null>(null);
 
   #pending = new Map<number, Pending>();
   #nextId = 1;
@@ -358,7 +356,6 @@ class Daemon {
       this.#pending.delete(msg.id);
       clearTimeout(p.timer);
       if (msg.result.type === "error") {
-        this.lastError = msg.result.message;
         p.reject(new Error(msg.result.message));
       } else {
         p.resolve(msg.result);
