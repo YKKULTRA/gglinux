@@ -31,14 +31,12 @@ async fn bind(internal: &mpsc::UnboundedSender<Internal>) -> ashpd::Result<()> {
     let shortcut = NewShortcut::new(ID, "Save the last clip").preferred_trigger("ALT+S");
     let request = portal.bind_shortcuts(session.get(), &[shortcut], None, BindShortcutsOptions::default()).await?;
     let bound = request.response()?;
-    let trigger = bound
-        .shortcuts()
-        .iter()
-        .find(|s| s.id() == ID)
-        .map(|s| s.trigger_description().to_string())
-        .unwrap_or_else(|| "bound".into());
-    info!(%trigger, "clip hotkey bound");
-    let _ = internal.send(Internal::Hotkey(Ok(trigger)));
+    let trigger = outcome(bound.shortcuts().iter().find(|s| s.id() == ID).map(|s| s.trigger_description()));
+    match &trigger {
+        Ok(trigger) => info!(%trigger, "clip hotkey bound"),
+        Err(e) => warn!(error = %e, "no clip hotkey"),
+    }
+    let _ = internal.send(Internal::Hotkey(trigger));
     let mut activations = portal.receive_activated().await?;
     while let Some(a) = activations.next().await {
         if a.shortcut_id() == ID {
@@ -49,6 +47,17 @@ async fn bind(internal: &mpsc::UnboundedSender<Internal>) -> ashpd::Result<()> {
     warn!("the clip hotkey's portal connection closed");
     let _ = internal.send(Internal::Hotkey(Err("the portal connection closed".into())));
     Ok(())
+}
+
+/// What the portal bound, for the UI: the key, or why there's none. KDE binds
+/// the shortcut with no key when Alt+S is taken, or when the owner clears it in
+/// its dialog. The session stays open either way, so a key set later in System
+/// Settings can still save.
+fn outcome(trigger: Option<&str>) -> Result<String, String> {
+    match trigger {
+        Some("") => Err("KDE gave it no key; set one in System Settings → Shortcuts".into()),
+        trigger => Ok(trigger.unwrap_or("bound").to_string()),
+    }
 }
 
 /// Closes the portal session when this task ends, aborted or not. ashpd
@@ -70,5 +79,16 @@ impl Drop for OpenSession {
                 let _ = session.close().await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shortcut_bound_with_no_key_is_no_hotkey() {
+        assert_eq!(outcome(Some("Alt+S")), Ok("Alt+S".into()));
+        assert!(outcome(Some("")).is_err_and(|e| e.contains("no key")), "KDE asked already; nothing to wait for");
     }
 }
