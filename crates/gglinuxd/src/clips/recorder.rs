@@ -93,7 +93,8 @@ pub fn find_program(path_var: Option<&OsStr>) -> Option<PathBuf> {
 pub fn load(path: &Path) -> ClipsSettings {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            warn!(path = %path.display(), error = %e, "ignoring unreadable clip settings");
+            let moved_to = gg_ipc::set_aside(path);
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable clip settings");
             ClipsSettings::default()
         }),
         Err(_) => ClipsSettings::default(),
@@ -204,6 +205,7 @@ mod tests {
         assert_eq!(load(&p), s);
         std::fs::write(&p, "{ nope").unwrap();
         assert_eq!(load(&p), ClipsSettings::default());
+        assert!(!p.exists(), "moved aside, so a save can't destroy it");
         std::fs::remove_dir_all(d).unwrap();
     }
 }

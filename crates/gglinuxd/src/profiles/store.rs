@@ -74,7 +74,8 @@ impl Store {
 pub fn load(path: &Path) -> Store {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            warn!(path = %path.display(), error = %e, "ignoring unreadable profiles");
+            let moved_to = gg_ipc::set_aside(path);
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable profiles");
             Store::default()
         }),
         Err(_) => Store::default(),
@@ -198,6 +199,12 @@ mod tests {
         assert_eq!(load(&path), s);
         std::fs::write(&path, "{ nope").unwrap();
         assert_eq!(load(&path), Store::default());
+        save(&path, &Store::default()); // the next change
+        let aside: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+            .filter(|e| e.file_name() != "profiles.json")
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect();
+        assert_eq!(aside, ["{ nope"], "kept, not saved over");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

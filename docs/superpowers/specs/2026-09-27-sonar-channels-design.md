@@ -81,8 +81,9 @@ command or parses output is pure and unit-tested; a fake `PwTools` tests the orc
 ### Settings
 
 `$XDG_CONFIG_HOME/gglinux/sonar.json`: `enabled`, `output`, `previous_default`, `chatmix`,
-`volumes` (per channel), `rules`. Missing or unreadable → defaults (logged). Written atomically
-(temp file + rename).
+`volumes` (per channel), `rules`. Missing or unreadable → defaults (logged); an unreadable file is
+moved aside to `sonar.json.unreadable-<unix seconds>` first, so saving can't destroy it. Written
+atomically (temp file + rename).
 
 ### Code layout
 

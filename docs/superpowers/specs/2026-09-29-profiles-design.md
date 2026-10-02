@@ -25,8 +25,10 @@ Out of scope:
   `get_profiles`, not in events, because it changes all the time.
 
 **Persistence:** `~/.config/gglinux/profiles.json` = `{ profiles: [Profile], rules: [GameRule], before: Lighting | null }`,
-written atomically. Unreadable → empty, with a warning. `before` is saved because `SetLighting`
-saves a game's profile as the lighting, so a restart mid-game would otherwise lose the owner's.
+written atomically. Unreadable → empty, with a warning, the file moved aside to
+`profiles.json.unreadable-<unix seconds>` so saving can't destroy it. `before` is saved because
+`SetLighting` saves a game's profile as the lighting, so a restart mid-game would otherwise lose the
+owner's.
 
 **Requests:**
 - `get_profiles`;

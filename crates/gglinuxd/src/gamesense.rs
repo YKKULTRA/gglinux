@@ -61,11 +61,13 @@ pub struct Settings {
     pub games: Vec<SavedGame>,
 }
 
-/// Saved settings; a missing or unreadable file means GameSense off.
+/// Saved settings; a missing or unreadable file means GameSense off. An
+/// unreadable one is moved aside first.
 pub fn load_settings(path: &Path) -> Settings {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            warn!(path = %path.display(), error = %e, "ignoring unreadable GameSense settings");
+            let moved_to = gg_ipc::set_aside(path);
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable GameSense settings");
             Settings::default()
         }),
         Err(_) => Settings::default(),
@@ -486,6 +488,7 @@ mod tests {
         assert_eq!(load_settings(&path), Settings::default(), "missing file");
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(load_settings(&path), Settings::default(), "corrupted file");
+        assert!(!path.exists(), "moved aside, so a save can't destroy it");
         assert!(!Settings::default().enabled, "GameSense is off until asked");
         let s = Settings { enabled: true, port: Some(5000), games: Vec::new() };
         save_settings(&path, &s);

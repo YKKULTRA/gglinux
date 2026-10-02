@@ -904,6 +904,21 @@ pub fn config_dir() -> std::path::PathBuf {
     base.join("gglinux")
 }
 
+/// Move a settings file that doesn't parse out of the way, to
+/// `<name>.unreadable-<unix seconds>` beside it, so the defaults saved in its
+/// place later don't destroy the only copy. Says where it went, for the log;
+/// call it before the log macro, whose arguments only run when it's enabled.
+pub fn set_aside(path: &std::path::Path) -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".unreadable-{secs}"));
+    let aside = path.with_file_name(name);
+    match std::fs::rename(path, &aside) {
+        Ok(()) => aside.display().to_string(),
+        Err(e) => format!("nowhere ({e})"),
+    }
+}
+
 // Avoid a libc dependency in this leaf crate just for one call.
 extern "C" {
     fn geteuid() -> u32;
@@ -1300,5 +1315,19 @@ mod tests {
         assert!(on.games_only);
         let s = serde_json::to_value(ClipsState::default()).unwrap();
         assert_eq!((s["waiting"].as_bool(), s["game"].is_null()), (Some(false), true));
+    }
+
+    #[test]
+    fn an_unreadable_settings_file_is_set_aside_beside_itself() {
+        let dir = std::env::temp_dir().join(format!("gglinux-aside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.json");
+        std::fs::write(&path, "{ nope").unwrap();
+        let moved = set_aside(&path);
+        assert!(moved.starts_with(&*dir.join("x.json.unreadable-").to_string_lossy()), "{moved}");
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "{ nope");
+        assert!(!path.exists());
+        assert!(set_aside(&path).starts_with("nowhere"), "nothing to move");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

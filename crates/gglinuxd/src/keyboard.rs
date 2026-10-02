@@ -569,10 +569,12 @@ fn publish(state: &mut State, event_tx: &broadcast::Sender<Event>) {
 }
 
 /// Saved lighting; a missing or unreadable file means the defaults (lighting off).
+/// An unreadable one is moved aside first.
 fn load(path: &Path) -> Lighting {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            warn!(path = %path.display(), error = %e, "ignoring unreadable lighting settings");
+            let moved_to = gg_ipc::set_aside(path);
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable lighting settings");
             Lighting::default()
         }),
         Err(_) => Lighting::default(),
