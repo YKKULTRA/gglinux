@@ -55,7 +55,8 @@ From PROTOCOLS.md §5, plus the gpu-screen-recorder docs:
 - **Starting:** while enabled and the program is found on `PATH`, it runs the recorder as a child
   process, creating `dir` if needed.
 - **Crashes:** a child that exits on its own is restarted after 5 s, doubling to at most 60 s. A
-  child that has run for 60 s resets the delay.
+  child that has run for 60 s resets the delay. A start that fails (`dir` can't be created yet, the
+  program can't be run) is retried on the same backoff.
 - **Settings changes:** stop with `SIGINT` (waiting up to 3 s, then `kill`), then start again with
   the new flags.
 - **Save:** `SIGUSR1` to the child. After 1.5 s the clip list is re-read, and the new file is

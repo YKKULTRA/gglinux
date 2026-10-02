@@ -151,16 +151,12 @@ impl Controller {
         };
         let dir = self.dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.error = Some(format!("cannot create {}: {e}", dir.display()));
-            return self.publish();
+            return self.retry_later(format!("cannot create {}: {e}", dir.display()));
         }
         let argv = recorder::argv(&self.settings, &dir, self.mixed.as_deref());
         let mut child = match Process::new(&program).args(&argv[1..]).kill_on_drop(false).spawn() {
             Ok(c) => c,
-            Err(e) => {
-                self.error = Some(format!("could not start gpu-screen-recorder: {e}"));
-                return self.publish();
-            }
+            Err(e) => return self.retry_later(format!("could not start gpu-screen-recorder: {e}")),
         };
         let pid = child.id().map_or(0, |p| p as i32);
         self.generation += 1;
@@ -177,6 +173,16 @@ impl Controller {
         self.error = None;
         self.retry_at = None;
         self.ensure_hotkey();
+        self.publish();
+    }
+
+    /// Starting failed (a folder on a drive not mounted yet, a binary being
+    /// replaced): say why, and try again after the backoff, as after a crash.
+    fn retry_later(&mut self, why: String) {
+        self.delay = recorder::next_delay(Duration::ZERO, self.delay);
+        self.retry_at = Some(Instant::now() + self.delay);
+        warn!(error = %why, delay_s = self.delay.as_secs(), "could not start gpu-screen-recorder");
+        self.error = Some(format!("{why}; retrying in {} s", self.delay.as_secs()));
         self.publish();
     }
 
@@ -435,9 +441,12 @@ mod tests {
         let busy = format!("(os error {})", libc::ETXTBSY);
         for _ in 0..50 {
             c.start().await;
-            if !c.error.as_deref().is_some_and(|e| e.ends_with(&busy)) {
+            if !c.error.as_deref().is_some_and(|e| e.contains(&busy)) {
                 return;
             }
+            // The test's doing, not the recorder's: no backoff from it.
+            c.delay = Duration::ZERO;
+            c.retry_at = None;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -519,6 +528,38 @@ mod tests {
         let log = std::fs::read_to_string(d.join("log")).unwrap();
         assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 2, "the same output changes nothing:\n{log}");
         c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_cannot_be_made_yet_is_tried_again() {
+        let d = scratch("no-folder");
+        let (mut c, _internal) = controller(&d, stand_in(&d, false));
+        // Something in the way, like a drive that's mounted only later.
+        std::fs::write(d.join("clips"), b"").unwrap();
+        c.start().await;
+        assert!(c.error.as_deref().is_some_and(|e| e.starts_with("cannot create")), "{:?}", c.error);
+        assert!(c.retry_at.is_some(), "tried again after the backoff");
+        assert_eq!(c.delay, Duration::from_secs(5));
+        std::fs::remove_file(d.join("clips")).unwrap();
+        c.retry_at = None; // the backoff is over, as in spawn()
+        start(&mut c).await;
+        let s = c.state();
+        assert!(s.recording && s.error.is_none(), "{:?}", s.error);
+        c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_recorder_that_cannot_be_run_yet_is_tried_again() {
+        let d = scratch("no-exec");
+        let program = d.join("gpu-screen-recorder");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap(); // not executable
+        let (mut c, _internal) = controller(&d, program);
+        c.start().await;
+        assert!(c.error.as_deref().is_some_and(|e| e.starts_with("could not start")), "{:?}", c.error);
+        assert!(c.retry_at.is_some(), "tried again after the backoff");
+        assert!(!c.state().recording);
         std::fs::remove_dir_all(d).unwrap();
     }
 
