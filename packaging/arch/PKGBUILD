@@ -26,16 +26,18 @@ pkgver() {
 
 build() {
   cd gglinux
-  # The daemon and ggctl; the UI is its own cargo project, built by the Tauri CLI.
-  cargo build --release --locked -p gglinuxd --bins
+  # The daemon and ggctl; the UI is its own cargo project, built by the Tauri CLI. Each builds
+  # into its own target/, where package() looks, even if CARGO_TARGET_DIR or a cargo config
+  # names another target dir.
+  CARGO_TARGET_DIR="$PWD/target" cargo build --release --locked -p gglinuxd --bins
   cd ui
   npm ci
-  npm run tauri build -- --no-bundle
+  CARGO_TARGET_DIR="$PWD/src-tauri/target" npm run tauri build -- --no-bundle
 }
 
 check() {
   cd gglinux
-  cargo test --release --locked --workspace
+  CARGO_TARGET_DIR="$PWD/target" cargo test --release --locked --workspace
 }
 
 package() {

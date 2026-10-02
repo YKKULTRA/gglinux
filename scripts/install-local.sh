@@ -39,7 +39,9 @@ built() {
 
 if [[ $do_build -eq 1 ]]; then
   echo "==> building (release)"
-  cargo build --release --manifest-path "$repo/Cargo.toml" --bins
+  # Into the repo's own target/, where the steps below look, even if CARGO_TARGET_DIR or a
+  # cargo config names another target dir; the UI's build does the same.
+  CARGO_TARGET_DIR="$repo/target" cargo build --release --manifest-path "$repo/Cargo.toml" --bins
 fi
 
 echo "==> installing gglinuxd -> ~/.local/bin"
@@ -57,7 +59,8 @@ systemctl --user daemon-reload
 if [[ $do_ui -eq 1 ]]; then
   if [[ $do_build -eq 1 ]]; then
     echo "==> building the UI (release)"
-    (cd "$repo/ui" && npm ci && npm run tauri build -- --no-bundle)
+    (cd "$repo/ui" && npm ci \
+      && CARGO_TARGET_DIR="$repo/ui/src-tauri/target" npm run tauri build -- --no-bundle)
   fi
   if built "$repo/ui/src-tauri/target/release/gglinux" "the UI"; then
     echo "==> installing the UI -> ~/.local/bin/gglinux"
