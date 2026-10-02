@@ -20,10 +20,13 @@ pub fn names(comm: &str, cmdline: &[u8]) -> Vec<String> {
         // Chromium, Electron and node rewrite their title as the whole command
         // line in one string; the program is what comes before its first option.
         // A dash word with a path separator before any `=` carries on the path
-        // ("Odd -Name\odd.exe"), so it isn't an option.
+        // ("Odd -Name\odd.exe"), and one ending in `.exe` is the file name
+        // ("Game -Remastered.exe"), so neither is an option.
         let rewritten = args.all(|a| a.is_empty());
         let is_option = |word: &[u8]| {
-            word.iter().take_while(|&&b| b != b' ' && b != b'=').all(|&b| b != b'/' && b != b'\\')
+            let word = &word[..word.iter().position(|&b| b == b' ').unwrap_or(word.len())];
+            let exe = !word.contains(&b'=') && word.len() > 4 && word[word.len() - 4..].eq_ignore_ascii_case(b".exe");
+            !exe && word.iter().take_while(|&&b| b != b'=').all(|&b| b != b'/' && b != b'\\')
         };
         let option = (0..arg0.len().saturating_sub(2))
             .find(|&i| arg0[i] == b' ' && arg0[i + 1] == b'-' && arg0[i + 2] != b' ' && is_option(&arg0[i + 1..]));
@@ -95,6 +98,8 @@ mod tests {
         assert_eq!(names("wine64-preload\n", b"C:\\Games\\Odd -Name\\odd.exe\0"), owned(&["wine64-preload", "odd.exe"]));
         assert_eq!(names("GameThread\n", b"/home/u/Games/My -Game/bin/game\0"), owned(&["GameThread", "game"]));
         assert_eq!(names("game\n", b"/opt/My -Game/game --fullscreen -cfg=/tmp/x.cfg\0\0"), owned(&["game"]));
+        assert_eq!(names("wine64-preload\n", b"Z:\\Games\\Game -Remastered.exe\0"),
+            owned(&["wine64-preload", "Game -Remastered.exe"]));
     }
 
     #[test]
