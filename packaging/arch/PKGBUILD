@@ -6,11 +6,13 @@ pkgdesc="Open-source SteelSeries GG for Linux: lighting, headset, Sonar-style au
 arch=('x86_64')
 url="https://github.com/ykk/gglinux"
 license=('GPL-3.0-or-later')
-depends=('systemd-libs' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'pipewire' 'wireplumber')
+depends=('systemd-libs' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'pipewire' 'wireplumber'
+         'xdg-utils')
 makedepends=('git' 'cargo' 'nodejs' 'npm')
 optdepends=('noise-suppression-for-voice: noise suppression for the Sonar microphone'
             'swh-plugins: compressor for the Sonar microphone and Smart Volume'
-            'gpu-screen-recorder: instant-replay clips')
+            'gpu-screen-recorder: instant-replay clips'
+            'xdg-desktop-portal: clip hotkey and screen capture, with a backend like xdg-desktop-portal-kde')
 provides=('gglinux')
 conflicts=('gglinux')
 install=gglinux.install
