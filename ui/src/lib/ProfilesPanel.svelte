@@ -87,7 +87,11 @@
         <button
           class="ghost"
           disabled={busy || !newProcess.trim() || !newProfile}
-          onclick={() => setRules([...st!.rules, { process: newProcess, profile: newProfile }]).then(() => (newProcess = ""))}
+          onclick={() =>
+            run(async () => {
+              await daemon.setGameRules([...st!.rules, { process: newProcess, profile: newProfile }]);
+              newProcess = "";
+            })}
         >
           Add rule
         </button>
