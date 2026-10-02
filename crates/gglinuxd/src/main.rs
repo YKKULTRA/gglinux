@@ -6,9 +6,10 @@
 //! Gen 3's lighting, run Sonar-style audio channels on PipeWire, and serve all
 //! of it over a newline-delimited JSON unix socket. PipeWire audio and the GameSense server land in later milestones.
 
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use gg_ipc::{DeviceInfo, Event, Request, RequestFrame, ResponseData, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -66,12 +67,7 @@ async fn main() -> Result<()> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating socket dir {}", dir.display()))?;
     }
-    // Clear a stale socket from an unclean shutdown.
-    if path.exists() {
-        let _ = std::fs::remove_file(&path);
-    }
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("binding unix socket {}", path.display()))?;
+    let listener = claim_socket(&path)?;
     info!(socket = %path.display(), "gglinuxd listening");
 
     // Shared device state: `snapshot` holds the current list; `events` fans out diffs.
@@ -107,6 +103,22 @@ async fn main() -> Result<()> {
     // Best-effort cleanup so the next start binds cleanly.
     let _ = std::fs::remove_file(&path);
     result
+}
+
+/// Bind the daemon's socket at `path`, unless another gglinuxd answers there:
+/// two would both drive the devices, and the first to exit would take the
+/// other's socket with it.
+fn claim_socket(path: &Path) -> Result<UnixListener> {
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => bail!("gglinuxd is already running on {}", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // Nobody listens: a stale socket from an unclean shutdown.
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            let _ = std::fs::remove_file(path);
+        }
+        Err(e) => return Err(e).with_context(|| format!("checking {} for a running gglinuxd", path.display())),
+    }
+    UnixListener::bind(path).with_context(|| format!("binding unix socket {}", path.display()))
 }
 
 /// Bridge the blocking gg-hid monitor thread into the async world via watch/broadcast.
@@ -458,4 +470,62 @@ async fn write_message(write_half: &mut (impl AsyncWriteExt + Unpin), msg: &Serv
     let line = msg.to_line()?;
     write_half.write_all(line.as_bytes()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A new private folder for one test's socket, removed when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::hash::BuildHasher;
+            use std::os::unix::fs::DirBuilderExt;
+            let random = std::collections::hash_map::RandomState::new().hash_one(tag);
+            let d = std::env::temp_dir().join(format!("gglinuxd-{}-{tag}-{random:016x}", std::process::id()));
+            std::fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
+            Scratch(d)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_daemon_leaves_the_running_ones_socket_alone() {
+        let d = Scratch::new("second");
+        let path = d.0.join("gglinuxd.sock");
+        let running = claim_socket(&path).unwrap();
+
+        let second = claim_socket(&path);
+        assert!(second.is_err(), "a second daemon must not start while one listens");
+        assert!(format!("{:#}", second.err().unwrap()).contains("already running"));
+
+        // Clients still reach the first one.
+        let client = UnixStream::connect(&path).await.expect("the running daemon's socket is still there");
+        tokio::time::timeout(Duration::from_secs(1), running.accept())
+            .await
+            .expect("the running daemon hears the client")
+            .unwrap();
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_from_an_unclean_shutdown_is_cleared() {
+        let d = Scratch::new("stale");
+        let path = d.0.join("gglinuxd.sock");
+        // Bound and then gone without removing its file, as after a crash.
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+
+        let listener = claim_socket(&path).expect("nobody listens there, so it can go");
+        let _client = UnixStream::connect(&path).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), listener.accept()).await.unwrap().unwrap();
+    }
 }
