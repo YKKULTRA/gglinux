@@ -20,3 +20,7 @@ packaging/arch/*.pkg.tar.zst
 *.log
 .DS_Store
 .claude/
+
+# Local assistant/tooling state; never part of the project
+.superpowers/
+.remember/
