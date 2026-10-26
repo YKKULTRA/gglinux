@@ -72,12 +72,19 @@ const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 /// Serve `app` on `listener` within `limits` until `stop` finishes, then close
 /// every connection: idle ones at once, ones mid-request within the grace.
-pub async fn serve(listener: TcpListener, app: Router, limits: Limits, stop: impl Future<Output = ()>) {
-    let app = app.layer(middleware::from_fn(move |req: Request, next: Next| async move {
-        tokio::time::timeout(limits.request, next.run(req))
-            .await
-            .unwrap_or_else(|_| error(StatusCode::REQUEST_TIMEOUT, "the request took too long"))
-    }));
+pub async fn serve(
+    listener: TcpListener,
+    app: Router,
+    limits: Limits,
+    stop: impl Future<Output = ()>,
+) {
+    let app = app.layer(middleware::from_fn(
+        move |req: Request, next: Next| async move {
+            tokio::time::timeout(limits.request, next.run(req))
+                .await
+                .unwrap_or_else(|_| error(StatusCode::REQUEST_TIMEOUT, "the request took too long"))
+        },
+    ));
     let (closing, closed) = watch::channel(());
     let mut connections = JoinSet::new();
     let mut stop = pin!(stop);
@@ -98,15 +105,27 @@ pub async fn serve(listener: TcpListener, app: Router, limits: Limits, stop: imp
     }
     drop(listener);
     drop(closing);
-    let _ = tokio::time::timeout(limits.grace, async { while connections.join_next().await.is_some() {} }).await;
+    let _ = tokio::time::timeout(limits.grace, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
     // Dropping the set aborts what's left, which closes those connections.
 }
 
 /// One client connection, until it closes or the server stops.
-async fn connection(stream: TcpStream, app: Router, limits: Limits, mut closing: watch::Receiver<()>) {
+async fn connection(
+    stream: TcpStream,
+    app: Router,
+    limits: Limits,
+    mut closing: watch::Receiver<()>,
+) {
     let mut builder = Builder::new(TokioExecutor::new()).http1_only();
-    builder.http1().timer(TokioTimer::new()).header_read_timeout(limits.headers);
-    let mut conn = pin!(builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(app)));
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(limits.headers);
+    let mut conn =
+        pin!(builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(app)));
     tokio::select! {
         result = conn.as_mut() => {
             if let Err(e) = result {
@@ -130,7 +149,10 @@ pub fn router(shared: Shared) -> Router {
         .route("/stop_game", post(stop_game))
         .route("/remove_game", post(remove_game))
         .route("/remove_game_event", post(remove_game_event))
-        .route("/supports_multiple_game_events", get(|| async { Json(json!({})) }))
+        .route(
+            "/supports_multiple_game_events",
+            get(|| async { Json(json!({})) }),
+        )
         .layer(middleware::from_fn(guard))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(shared)
@@ -138,7 +160,10 @@ pub fn router(shared: Shared) -> Router {
 
 async fn guard(req: Request, next: Next) -> Response {
     if req.headers().contains_key(header::ORIGIN) {
-        return error(StatusCode::FORBIDDEN, "requests from web pages are not accepted");
+        return error(
+            StatusCode::FORBIDDEN,
+            "requests from web pages are not accepted",
+        );
     }
     if req.method() == Method::POST {
         let json = req
@@ -148,7 +173,10 @@ async fn guard(req: Request, next: Next) -> Response {
             .and_then(|v| v.split(';').next())
             .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"));
         if !json {
-            return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Content-Type must be application/json");
+            return error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Content-Type must be application/json",
+            );
         }
     }
     next.run(req).await
@@ -183,39 +211,69 @@ fn apply<T: DeserializeOwned>(
 }
 
 async fn game_metadata(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Structure, |r, m: proto::GameMetadata, _| r.game_metadata(m))
+    apply(
+        &s,
+        &body,
+        Change::Structure,
+        |r, m: proto::GameMetadata, _| r.game_metadata(m),
+    )
 }
 
 async fn register_game_event(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Structure, |r, e: proto::RegisterEvent, _| r.register_event(e))
+    apply(
+        &s,
+        &body,
+        Change::Structure,
+        |r, e: proto::RegisterEvent, _| r.register_event(e),
+    )
 }
 
 async fn bind_game_event(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Structure, |r, e: proto::BindEvent, _| r.bind_event(e))
+    apply(&s, &body, Change::Structure, |r, e: proto::BindEvent, _| {
+        r.bind_event(e)
+    })
 }
 
 async fn game_event(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Live, |r, e: proto::GameEvent, now| r.game_event(e, now))
+    apply(&s, &body, Change::Live, |r, e: proto::GameEvent, now| {
+        r.game_event(e, now)
+    })
 }
 
 async fn multiple_game_events(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Live, |r, m: proto::MultipleEvents, now| r.multiple_events(m, now))
+    apply(
+        &s,
+        &body,
+        Change::Live,
+        |r, m: proto::MultipleEvents, now| r.multiple_events(m, now),
+    )
 }
 
 async fn game_heartbeat(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Live, |r, g: proto::GameOnly, now| r.heartbeat(&g.game, now))
+    apply(&s, &body, Change::Live, |r, g: proto::GameOnly, now| {
+        r.heartbeat(&g.game, now)
+    })
 }
 
 async fn stop_game(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Live, |r, g: proto::GameOnly, _| r.stop_game(&g.game))
+    apply(&s, &body, Change::Live, |r, g: proto::GameOnly, _| {
+        r.stop_game(&g.game)
+    })
 }
 
 async fn remove_game(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Structure, |r, g: proto::GameOnly, _| r.remove_game(&g.game))
+    apply(&s, &body, Change::Structure, |r, g: proto::GameOnly, _| {
+        r.remove_game(&g.game)
+    })
 }
 
 async fn remove_game_event(State(s): State<Shared>, body: Bytes) -> Response {
-    apply(&s, &body, Change::Structure, |r, e: proto::RemoveEvent, _| r.remove_event(&e.game, &e.event))
+    apply(
+        &s,
+        &body,
+        Change::Structure,
+        |r, e: proto::RemoveEvent, _| r.remove_event(&e.game, &e.event),
+    )
 }
 
 #[cfg(test)]
@@ -239,19 +297,36 @@ mod tests {
         (s, seen)
     }
 
-    async fn call(app: &Router, method: &str, path: &str, headers: &[(&str, &str)], body: String) -> (StatusCode, String) {
+    async fn call(
+        app: &Router,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: String,
+    ) -> (StatusCode, String) {
         let mut req = HttpRequest::builder().method(method).uri(path);
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
-        let res = app.clone().oneshot(req.body(Body::from(body)).unwrap()).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(req.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
         let status = res.status();
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     async fn post(app: &Router, path: &str, body: &str) -> (StatusCode, String) {
-        call(app, "POST", path, &[("content-type", "application/json")], body.to_string()).await
+        call(
+            app,
+            "POST",
+            path,
+            &[("content-type", "application/json")],
+            body.to_string(),
+        )
+        .await
     }
 
     const BIND: &str = r#"{"game":"G","event":"HEALTH","handlers":[{"device-type":"keyboard",
@@ -261,12 +336,32 @@ mod tests {
     async fn web_pages_are_refused() {
         let (s, _) = shared();
         let app = router(s);
-        let (status, body) = call(&app, "POST", "/game_event",
-            &[("content-type", "application/json"), ("origin", "https://example.com")], "{}".into()).await;
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/game_event",
+            &[
+                ("content-type", "application/json"),
+                ("origin", "https://example.com"),
+            ],
+            "{}".into(),
+        )
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(body.contains("error"));
-        let (status, _) = call(&app, "POST", "/game_event", &[("content-type", "text/plain")], "{}".into()).await;
-        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "a no-cors fetch can only send text/plain");
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/game_event",
+            &[("content-type", "text/plain")],
+            "{}".into(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "a no-cors fetch can only send text/plain"
+        );
         let (status, _) = call(&app, "POST", "/game_event", &[], "{}".into()).await;
         assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
@@ -282,12 +377,37 @@ mod tests {
     async fn register_bind_and_send_paint_the_keyboard() {
         let (s, seen) = shared();
         let app = router(s.clone());
-        assert_eq!(post(&app, "/game_metadata", r#"{"game":"G","game_display_name":"Game"}"#).await, (StatusCode::OK, "{}".into()));
+        assert_eq!(
+            post(
+                &app,
+                "/game_metadata",
+                r#"{"game":"G","game_display_name":"Game"}"#
+            )
+            .await,
+            (StatusCode::OK, "{}".into())
+        );
         assert_eq!(post(&app, "/bind_game_event", BIND).await.0, StatusCode::OK);
-        assert_eq!(post(&app, "/game_event", r#"{"game":"G","event":"HEALTH","data":{"value":100}}"#).await.0, StatusCode::OK);
-        let layer = s.registry.lock().unwrap().paint(s.clock.now()).expect("G paints");
+        assert_eq!(
+            post(
+                &app,
+                "/game_event",
+                r#"{"game":"G","event":"HEALTH","data":{"value":100}}"#
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let layer = s
+            .registry
+            .lock()
+            .unwrap()
+            .paint(s.clock.now())
+            .expect("G paints");
         assert_eq!(layer.len(), 12);
-        assert_eq!(*seen.lock().unwrap(), vec![Change::Structure, Change::Structure, Change::Live]);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Change::Structure, Change::Structure, Change::Live]
+        );
     }
 
     #[tokio::test]
@@ -297,10 +417,18 @@ mod tests {
         let (status, body) = post(&app, "/game_event", "{not json").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("\"error\""), "{body}");
-        let (status, body) = post(&app, "/game_event", r#"{"game":"G","event":"E","data":{"value":1}}"#).await;
+        let (status, body) = post(
+            &app,
+            "/game_event",
+            r#"{"game":"G","event":"E","data":{"value":1}}"#,
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("unknown game"), "{body}");
-        assert!(seen.lock().unwrap().is_empty(), "failed requests change nothing");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "failed requests change nothing"
+        );
     }
 
     #[tokio::test]
@@ -308,10 +436,24 @@ mod tests {
         let (s, _) = shared();
         let app = router(s.clone());
         post(&app, "/bind_game_event", BIND).await;
-        post(&app, "/game_event", r#"{"game":"G","event":"HEALTH","data":{"value":50}}"#).await;
-        assert_eq!(post(&app, "/game_heartbeat", r#"{"game":"G"}"#).await.0, StatusCode::OK);
-        assert_eq!(s.registry.lock().unwrap().active_game(s.clock.now()), Some("G"));
-        assert_eq!(post(&app, "/stop_game", r#"{"game":"G"}"#).await.0, StatusCode::OK);
+        post(
+            &app,
+            "/game_event",
+            r#"{"game":"G","event":"HEALTH","data":{"value":50}}"#,
+        )
+        .await;
+        assert_eq!(
+            post(&app, "/game_heartbeat", r#"{"game":"G"}"#).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            s.registry.lock().unwrap().active_game(s.clock.now()),
+            Some("G")
+        );
+        assert_eq!(
+            post(&app, "/stop_game", r#"{"game":"G"}"#).await.0,
+            StatusCode::OK
+        );
         assert_eq!(s.registry.lock().unwrap().paint(s.clock.now()), None);
     }
 
@@ -325,7 +467,13 @@ mod tests {
 
     const PROBE: &[u8] = b"GET /supports_multiple_game_events HTTP/1.1\r\nHost: x\r\n\r\n";
 
-    async fn listen(limits: Limits) -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    async fn listen(
+        limits: Limits,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -345,17 +493,26 @@ mod tests {
                 got.extend_from_slice(&buf[..n]);
             }
         });
-        read.await.ok().map(|()| String::from_utf8_lossy(&got).into_owned())
+        read.await
+            .ok()
+            .map(|()| String::from_utf8_lossy(&got).into_owned())
     }
 
     #[tokio::test]
     async fn a_silent_or_idle_connection_is_closed() {
         let (addr, _stop, _task) = listen(QUICK).await;
         let mut silent = TcpStream::connect(addr).await.unwrap();
-        assert!(closed_within(&mut silent, Duration::from_secs(2)).await.is_some(), "a connection that sends nothing");
+        assert!(
+            closed_within(&mut silent, Duration::from_secs(2))
+                .await
+                .is_some(),
+            "a connection that sends nothing"
+        );
         let mut idle = TcpStream::connect(addr).await.unwrap();
         idle.write_all(PROBE).await.unwrap();
-        let answer = closed_within(&mut idle, Duration::from_secs(2)).await.expect("a kept-alive connection left idle");
+        let answer = closed_within(&mut idle, Duration::from_secs(2))
+            .await
+            .expect("a kept-alive connection left idle");
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     }
 
@@ -364,34 +521,65 @@ mod tests {
         let (addr, _stop, _task) = listen(QUICK).await;
         let mut slow = TcpStream::connect(addr).await.unwrap();
         slow.write_all(b"POST /game_event HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{").await.unwrap();
-        let answer = closed_within(&mut slow, Duration::from_secs(2)).await.expect("closed");
+        let answer = closed_within(&mut slow, Duration::from_secs(2))
+            .await
+            .expect("closed");
         assert!(answer.starts_with("HTTP/1.1 408"), "{answer}");
     }
 
     #[tokio::test]
     async fn connections_beyond_the_cap_wait_their_turn() {
-        let (addr, _stop, _task) = listen(Limits { headers: Duration::from_secs(10), ..QUICK }).await;
+        let (addr, _stop, _task) = listen(Limits {
+            headers: Duration::from_secs(10),
+            ..QUICK
+        })
+        .await;
         let first = TcpStream::connect(addr).await.unwrap();
         let _second = TcpStream::connect(addr).await.unwrap();
         let mut third = TcpStream::connect(addr).await.unwrap();
         third.write_all(b"GET /supports_multiple_game_events HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
-        assert_eq!(closed_within(&mut third, Duration::from_millis(300)).await, None, "not served while two are open");
+        assert_eq!(
+            closed_within(&mut third, Duration::from_millis(300)).await,
+            None,
+            "not served while two are open"
+        );
         drop(first);
-        let answer = closed_within(&mut third, Duration::from_secs(2)).await.expect("served once one closes");
+        let answer = closed_within(&mut third, Duration::from_secs(2))
+            .await
+            .expect("served once one closes");
         assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
     }
 
     #[tokio::test]
     async fn stopping_closes_open_connections() {
-        let (addr, stop, task) = listen(Limits { headers: Duration::from_secs(10), ..QUICK }).await;
+        let (addr, stop, task) = listen(Limits {
+            headers: Duration::from_secs(10),
+            ..QUICK
+        })
+        .await;
         let mut silent = TcpStream::connect(addr).await.unwrap();
         let mut half = TcpStream::connect(addr).await.unwrap();
-        half.write_all(b"POST /game_event HTTP/1.1\r\nHost: x\r\n").await.unwrap();
+        half.write_all(b"POST /game_event HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         stop.send(()).unwrap();
-        assert!(closed_within(&mut silent, Duration::from_secs(1)).await.is_some(), "a silent connection");
-        assert!(closed_within(&mut half, Duration::from_secs(1)).await.is_some(), "a half-sent request");
-        tokio::time::timeout(Duration::from_secs(1), task).await.expect("the server task ends").unwrap();
+        assert!(
+            closed_within(&mut silent, Duration::from_secs(1))
+                .await
+                .is_some(),
+            "a silent connection"
+        );
+        assert!(
+            closed_within(&mut half, Duration::from_secs(1))
+                .await
+                .is_some(),
+            "a half-sent request"
+        );
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the server task ends")
+            .unwrap();
     }
 
     #[tokio::test]
@@ -402,7 +590,14 @@ mod tests {
         let (status, _) = post(&app, "/multiple_game_events",
             r#"{"game":"G","events":[{"event":"HEALTH","data":{"value":10}},{"event":"HEALTH","data":{"value":90}}]}"#).await;
         assert_eq!(status, StatusCode::OK);
-        let (status, body) = call(&app, "GET", "/supports_multiple_game_events", &[], String::new()).await;
+        let (status, body) = call(
+            &app,
+            "GET",
+            "/supports_multiple_game_events",
+            &[],
+            String::new(),
+        )
+        .await;
         assert_eq!((status, body.as_str()), (StatusCode::OK, "{}"));
     }
 }

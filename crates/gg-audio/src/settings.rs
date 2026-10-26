@@ -75,7 +75,10 @@ impl Default for Settings {
 impl Settings {
     /// A channel's bands, flat if never set.
     pub fn channel_eq(&self, channel: Channel) -> Vec<EqBand> {
-        self.eq.get(&channel).cloned().unwrap_or_else(eq::flat_channel)
+        self.eq
+            .get(&channel)
+            .cloned()
+            .unwrap_or_else(eq::flat_channel)
     }
 
     /// A channel's stream level, full if never set.
@@ -147,7 +150,10 @@ mod tests {
 
     #[test]
     fn missing_settings_are_the_defaults() {
-        assert_eq!(load(&scratch("settings-missing").join("sonar.json")), Settings::default());
+        assert_eq!(
+            load(&scratch("settings-missing").join("sonar.json")),
+            Settings::default()
+        );
     }
 
     #[test]
@@ -159,17 +165,27 @@ mod tests {
         assert!(!path.exists(), "moved aside, so a save can't destroy it");
         std::fs::write(&path, b"{\xff}").unwrap();
         assert_eq!(load(&path), Settings::default());
-        assert!(!path.exists(), "not UTF-8: moved aside too, not only logged");
+        assert!(
+            !path.exists(),
+            "not UTF-8: moved aside too, not only logged"
+        );
     }
 
     #[test]
     fn settings_from_before_smart_volume_still_load() {
         let dir = scratch("settings-old");
         let path = dir.join("sonar.json");
-        std::fs::write(&path, r#"{"enabled":true,"output":"alsa_output.x","chatmix":0.5}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"enabled":true,"output":"alsa_output.x","chatmix":0.5}"#,
+        )
+        .unwrap();
         let s = load(&path);
         assert!(s.enabled && s.smart_volume.is_empty());
-        assert_eq!(s.smart_volume(Channel::Game), gg_ipc::SmartVolume::default());
+        assert_eq!(
+            s.smart_volume(Channel::Game),
+            gg_ipc::SmartVolume::default()
+        );
         assert!(!s.smart_volume_refused);
     }
 }

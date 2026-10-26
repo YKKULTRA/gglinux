@@ -56,13 +56,19 @@ pub fn config_home() -> PathBuf {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| {
-            std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".config")
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join(".config")
         })
 }
 
 /// Where the drop-in lives.
 pub fn dropin_path() -> PathBuf {
-    config_home().join("pipewire").join("pipewire.conf.d").join(FILE_NAME)
+    config_home()
+        .join("pipewire")
+        .join("pipewire.conf.d")
+        .join(FILE_NAME)
 }
 
 /// A `node.name` we can safely quote into the drop-in.
@@ -85,7 +91,12 @@ pub(crate) fn check_name(name: &str) -> Result<()> {
 /// Every outlet sets `node.dont-fallback`: if the output disappears, the
 /// outlet waits for it rather than falling back to the default sink — which,
 /// with Sonar on, is the Game channel, and would feed audio into itself.
-pub fn dropin(output: &str, mic_input: Option<&str>, streamer: bool, smart_volume: bool) -> Result<String> {
+pub fn dropin(
+    output: &str,
+    mic_input: Option<&str>,
+    streamer: bool,
+    smart_volume: bool,
+) -> Result<String> {
     check_name(output)?;
     let mut text = String::from(
         "# Written by gglinux: Sonar-style output channels.\n\
@@ -126,7 +137,11 @@ pub fn dropin(output: &str, mic_input: Option<&str>, streamer: bool, smart_volum
             graph = filter_graph(smart_volume),
             // A graph PipeWire refuses then costs the channels, not PipeWire. Without the
             // stage the modules are as before, so existing drop-ins stay byte-for-byte.
-            flags = if smart_volume { "\n      flags = [ nofail ]" } else { "" },
+            flags = if smart_volume {
+                "\n      flags = [ nofail ]"
+            } else {
+                ""
+            },
         ));
     }
     if streamer {
@@ -208,11 +223,18 @@ fn filter_graph(smart_volume: bool) -> String {
         .iter()
         .enumerate()
         .map(|(i, b)| (format!("hp_{}", i + 1), *b))
-        .chain(channel.iter().enumerate().map(|(i, b)| (format!("eq_{}", i + 1), *b)))
+        .chain(
+            channel
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (format!("eq_{}", i + 1), *b)),
+        )
         .collect();
 
-    let mut nodes =
-        vec![r#"            { type = builtin name = pre label = linear control = { "Mult" = 1.0 } }"#.to_string()];
+    let mut nodes = vec![
+        r#"            { type = builtin name = pre label = linear control = { "Mult" = 1.0 } }"#
+            .to_string(),
+    ];
     for (name, band) in &stages {
         nodes.push(format!(
             r#"            {{ type = builtin name = {name} label = {label} control = {{ "Freq" = {freq:.1} "Q" = {q:.3} "Gain" = 0.0 }} }}"#,
@@ -221,17 +243,26 @@ fn filter_graph(smart_volume: bool) -> String {
             q = band.q,
         ));
     }
-    let names: Vec<&str> =
-        std::iter::once("pre").chain(stages.iter().map(|(n, _)| n.as_str())).collect();
-    let link = |output: &str, input: &str| format!(r#"            {{ output = "{output}" input = "{input}" }}"#);
-    let mut links: Vec<String> =
-        names.windows(2).map(|w| link(&format!("{}:Out", w[0]), &format!("{}:In", w[1]))).collect();
+    let names: Vec<&str> = std::iter::once("pre")
+        .chain(stages.iter().map(|(n, _)| n.as_str()))
+        .collect();
+    let link = |output: &str, input: &str| {
+        format!(r#"            {{ output = "{output}" input = "{input}" }}"#)
+    };
+    let mut links: Vec<String> = names
+        .windows(2)
+        .map(|w| link(&format!("{}:Out", w[0]), &format!("{}:In", w[1])))
+        .collect();
     let mut volumes = String::new();
     if smart_volume {
         let last = format!("{}:Out", names.last().expect("the chain has stages"));
         nodes.extend(smart::NODES.iter().map(|n| format!("            {n}")));
         links.extend(smart::INPUTS.iter().map(|&input| link(&last, input)));
-        links.extend(smart::LINKS.iter().map(|&(output, input)| link(output, input)));
+        links.extend(
+            smart::LINKS
+                .iter()
+                .map(|&(output, input)| link(output, input)),
+        );
         // The sink's volume moves from before the chain to after the compressor.
         volumes = format!(
             "\n          capture.volumes = [\n            {{ control = \"{}\" }}\n          ]",
@@ -263,11 +294,18 @@ mod tests {
         assert_eq!(text.matches("libpipewire-module-filter-chain").count(), 4);
         assert!(!text.contains("libpipewire-module-loopback"));
         for c in Channel::ALL {
-            assert!(text.contains(&format!("node.name      = \"gglinux_{}\"", c.key())), "{text}");
-            assert!(text.contains(&format!("node.name          = \"gglinux_{}.out\"", c.key())), "{text}");
+            assert!(
+                text.contains(&format!("node.name      = \"gglinux_{}\"", c.key())),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!("node.name          = \"gglinux_{}.out\"", c.key())),
+                "{text}"
+            );
         }
         assert_eq!(
-            text.matches("target.object      = \"alsa_output.usb-SteelSeries_Arctis\"").count(),
+            text.matches("target.object      = \"alsa_output.usb-SteelSeries_Arctis\"")
+                .count(),
             4
         );
         assert_eq!(
@@ -284,8 +322,16 @@ mod tests {
         assert_eq!(text.matches("name = hp_1 label = bq_lowshelf").count(), 4);
         assert_eq!(text.matches("name = hp_12 label = bq_highshelf").count(), 4);
         assert_eq!(text.matches("name = eq_10 label = bq_highshelf").count(), 4);
-        assert_eq!(text.matches(r#"{ output = "hp_12:Out" input = "eq_1:In" }"#).count(), 4);
-        assert_eq!(text.matches("input = ").count(), 4 * 22, "23 stages, 22 links each");
+        assert_eq!(
+            text.matches(r#"{ output = "hp_12:Out" input = "eq_1:In" }"#)
+                .count(),
+            4
+        );
+        assert_eq!(
+            text.matches("input = ").count(),
+            4 * 22,
+            "23 stages, 22 links each"
+        );
     }
 
     #[test]
@@ -298,7 +344,9 @@ mod tests {
 
     #[test]
     fn the_mic_module_is_added_only_when_asked() {
-        assert!(!dropin("alsa_output.x", None, false, false).unwrap().contains("gglinux_mic"));
+        assert!(!dropin("alsa_output.x", None, false, false)
+            .unwrap()
+            .contains("gglinux_mic"));
         let with = dropin("alsa_output.x", Some("alsa_input.y"), false, false).unwrap();
         assert_eq!(with.matches("libpipewire-module-filter-chain").count(), 5);
         assert!(with.contains(r#"target.object      = "alsa_input.y""#));
@@ -320,57 +368,98 @@ mod tests {
             "a broken stream piece must not take PipeWire, and the channels, down"
         );
         for c in Channel::ALL {
-            assert!(on.contains(&format!("\"{}\"", stream_feed_name(c))), "{c:?} feed");
-            assert!(on.contains(&format!("\"{}.stream_in\"", sink_name(c))), "{c:?} capture");
+            assert!(
+                on.contains(&format!("\"{}\"", stream_feed_name(c))),
+                "{c:?} feed"
+            );
+            assert!(
+                on.contains(&format!("\"{}.stream_in\"", sink_name(c))),
+                "{c:?} capture"
+            );
             // The capture side's alignment, so a swapped pair doesn't match.
-            assert!(on.contains(&format!("target.object       = \"{}\"", sink_name(c))), "{c:?} capture target");
+            assert!(
+                on.contains(&format!("target.object       = \"{}\"", sink_name(c))),
+                "{c:?} capture target"
+            );
         }
         assert_eq!(
-            on.matches(&format!("target.object      = \"{STREAM_SINK}\"")).count(),
+            on.matches(&format!("target.object      = \"{STREAM_SINK}\""))
+                .count(),
             4,
             "every feed plays into the stream sink"
         );
         assert!(on.contains("stream.capture.sink = true"));
-        assert!(on.starts_with("# Written by gglinux"), "the header stays first");
+        assert!(
+            on.starts_with("# Written by gglinux"),
+            "the header stays first"
+        );
     }
 
     #[test]
     fn the_streamer_dropin_parses() {
-        if std::process::Command::new("spa-json-dump").arg("--help").output().is_err() {
+        if std::process::Command::new("spa-json-dump")
+            .arg("--help")
+            .output()
+            .is_err()
+        {
             return; // not installed here: nothing to check against
         }
         let dir = crate::testing::scratch("streamer-parse");
-        let texts = [dropin("hs", None, true, false).unwrap(), dropin("hs", Some("mic"), true, false).unwrap()];
+        let texts = [
+            dropin("hs", None, true, false).unwrap(),
+            dropin("hs", Some("mic"), true, false).unwrap(),
+        ];
         for (i, text) in texts.iter().enumerate() {
             let path = dir.join(format!("{i}.conf"));
             std::fs::write(&path, text).unwrap();
-            let out = std::process::Command::new("spa-json-dump").arg(&path).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new("spa-json-dump")
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 
     #[test]
     fn smart_volume_ends_every_channels_chain() {
         let text = dropin("alsa_output.x", None, false, true).unwrap();
-        assert_eq!(text.matches(r#"name = sv_comp plugin = "sc4m_1916" label = sc4m"#).count(), 4);
         assert_eq!(
-            text.matches(r#"{ output = "eq_10:Out" input = "sv_comp:Input" }"#).count(),
+            text.matches(r#"name = sv_comp plugin = "sc4m_1916" label = sc4m"#)
+                .count(),
+            4
+        );
+        assert_eq!(
+            text.matches(r#"{ output = "eq_10:Out" input = "sv_comp:Input" }"#)
+                .count(),
             4,
             "after the channel EQ"
         );
         assert_eq!(
-            text.matches(r#"{ output = "eq_10:Out" input = "sv_mix:In 1" }"#).count(),
+            text.matches(r#"{ output = "eq_10:Out" input = "sv_mix:In 1" }"#)
+                .count(),
             4,
             "the mix also hears the EQ itself, for when Smart Volume is off"
         );
-        assert_eq!(text.matches(r#"{ output = "sv_mix:Out" input = "vol:In" }"#).count(), 4);
+        assert_eq!(
+            text.matches(r#"{ output = "sv_mix:Out" input = "vol:In" }"#)
+                .count(),
+            4
+        );
         assert_eq!(
             text.matches("{ type = builtin name = vol label = linear control = { \"Mult\" = 1.0 } }\n          ]").count(),
             4,
             "the volume is each chain's last node, so it is the graph's output"
         );
         assert_eq!(text.matches("capture.volumes = [").count(), 4);
-        assert_eq!(text.matches(r#"{ control = "vol:Mult" }"#).count(), 4, "the sink's volume comes after the compressor");
+        assert_eq!(
+            text.matches(r#"{ control = "vol:Mult" }"#).count(),
+            4,
+            "the sink's volume comes after the compressor"
+        );
         assert_eq!(text.matches("input = ").count(), 4 * (22 + 4));
         assert_eq!(
             text.matches("type = ladspa").count(),
@@ -378,7 +467,8 @@ mod tests {
             "the compressor is the only plugin in a channel from outside pipewire-audio"
         );
         assert_eq!(
-            text.matches("{ name = libpipewire-module-filter-chain\n      flags = [ nofail ]").count(),
+            text.matches("{ name = libpipewire-module-filter-chain\n      flags = [ nofail ]")
+                .count(),
             4,
             "a graph PipeWire refuses must cost the channels, not PipeWire"
         );
@@ -387,9 +477,19 @@ mod tests {
     #[test]
     fn without_smart_volume_the_chain_is_as_before() {
         let text = dropin("alsa_output.x", None, false, false).unwrap();
-        assert!(!text.contains("sv_") && !text.contains("capture.volumes") && !text.contains("name = vol "));
-        assert!(!text.contains("type = ladspa"), "no optional plugin in a channel");
-        assert!(!text.contains("nofail"), "the channel modules are as before");
+        assert!(
+            !text.contains("sv_")
+                && !text.contains("capture.volumes")
+                && !text.contains("name = vol ")
+        );
+        assert!(
+            !text.contains("type = ladspa"),
+            "no optional plugin in a channel"
+        );
+        assert!(
+            !text.contains("nofail"),
+            "the channel modules are as before"
+        );
         assert_eq!(
             text.matches("{ type = builtin name = eq_10 label = bq_highshelf control = { \"Freq\" = 16000.0 \"Q\" = 0.707 \"Gain\" = 0.0 } }\n          ]").count(),
             4,
@@ -400,16 +500,30 @@ mod tests {
 
     #[test]
     fn the_smart_volume_dropin_parses() {
-        if std::process::Command::new("spa-json-dump").arg("--help").output().is_err() {
+        if std::process::Command::new("spa-json-dump")
+            .arg("--help")
+            .output()
+            .is_err()
+        {
             return; // not installed here: nothing to check against
         }
         let dir = crate::testing::scratch("smart-parse");
-        let texts = [dropin("hs", None, false, true).unwrap(), dropin("hs", Some("mic"), true, true).unwrap()];
+        let texts = [
+            dropin("hs", None, false, true).unwrap(),
+            dropin("hs", Some("mic"), true, true).unwrap(),
+        ];
         for (i, text) in texts.iter().enumerate() {
             let path = dir.join(format!("{i}.conf"));
             std::fs::write(&path, text).unwrap();
-            let out = std::process::Command::new("spa-json-dump").arg(&path).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let out = std::process::Command::new("spa-json-dump")
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 

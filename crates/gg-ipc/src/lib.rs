@@ -133,7 +133,11 @@ impl ScreenSettings {
 
 impl Default for ScreenSettings {
     fn default() -> Self {
-        ScreenSettings { protect: true, lit_seconds: 10, brightness: None }
+        ScreenSettings {
+            protect: true,
+            lit_seconds: 10,
+            brightness: None,
+        }
     }
 }
 
@@ -478,7 +482,16 @@ impl Reactive {
 
 impl Default for Reactive {
     fn default() -> Self {
-        Reactive { enabled: false, mode: ReactiveMode::Fade, color: Rgb { r: 255, g: 255, b: 255 }, duration_s: 0.6 }
+        Reactive {
+            enabled: false,
+            mode: ReactiveMode::Fade,
+            color: Rgb {
+                r: 255,
+                g: 255,
+                b: 255,
+            },
+            duration_s: 0.6,
+        }
     }
 }
 
@@ -493,7 +506,11 @@ pub struct MicMuteLight {
 
 impl Default for MicMuteLight {
     fn default() -> Self {
-        MicMuteLight { enabled: false, key: 0x48, color: Rgb { r: 255, g: 0, b: 0 } }
+        MicMuteLight {
+            enabled: false,
+            key: 0x48,
+            color: Rgb { r: 255, g: 0, b: 0 },
+        }
     }
 }
 
@@ -522,13 +539,16 @@ impl Lighting {
     /// Check ranges, with a message meant for the user.
     pub fn validate(&self) -> Result<(), String> {
         if self.brightness > 100 {
-            return Err(format!("brightness {}% out of range (0..=100)", self.brightness));
+            return Err(format!(
+                "brightness {}% out of range (0..=100)",
+                self.brightness
+            ));
         }
         let period = match self.effect {
             Effect::Static => None,
-            Effect::Breathing { period_s, .. } | Effect::Wave { period_s } | Effect::Spectrum { period_s } => {
-                Some(period_s)
-            }
+            Effect::Breathing { period_s, .. }
+            | Effect::Wave { period_s }
+            | Effect::Spectrum { period_s } => Some(period_s),
             Effect::Visualizer { .. } => None,
         };
         if let Some(p) = period {
@@ -538,7 +558,9 @@ impl Lighting {
         }
         if let Effect::Visualizer { sensitivity } = self.effect {
             if !(sensitivity.is_finite() && Self::SENSITIVITY.contains(&sensitivity)) {
-                return Err(format!("visualizer sensitivity {sensitivity} out of range (0.25..=4)"));
+                return Err(format!(
+                    "visualizer sensitivity {sensitivity} out of range (0.25..=4)"
+                ));
             }
         }
         let d = self.reactive.duration_s;
@@ -672,7 +694,16 @@ pub struct ClipsSettings {
 
 impl Default for ClipsSettings {
     fn default() -> Self {
-        ClipsSettings { enabled: false, seconds: 30, fps: 60, quality: ClipQuality::High, desktop_audio: true, mic: false, dir: None, games_only: false }
+        ClipsSettings {
+            enabled: false,
+            seconds: 30,
+            fps: 60,
+            quality: ClipQuality::High,
+            desktop_audio: true,
+            mic: false,
+            dir: None,
+            games_only: false,
+        }
     }
 }
 
@@ -682,14 +713,19 @@ impl ClipsSettings {
 
     pub fn validate(&self) -> Result<(), String> {
         if !Self::SECONDS.contains(&self.seconds) {
-            return Err(format!("clip length {} s out of range (5..=300)", self.seconds));
+            return Err(format!(
+                "clip length {} s out of range (5..=300)",
+                self.seconds
+            ));
         }
         if !Self::FPS.contains(&self.fps) {
             return Err(format!("{} fps out of range (15..=240)", self.fps));
         }
         if let Some(dir) = &self.dir {
             if !std::path::Path::new(dir).is_absolute() {
-                return Err(format!("the clips folder must be an absolute path, not {dir:?}"));
+                return Err(format!(
+                    "the clips folder must be an absolute path, not {dir:?}"
+                ));
             }
         }
         Ok(())
@@ -765,63 +801,124 @@ pub enum Request {
     /// Headset battery, power, and screen settings.
     GetHeadsetState,
     /// Replace the base-station screen settings.
-    SetHeadsetScreen { settings: ScreenSettings },
+    SetHeadsetScreen {
+        settings: ScreenSettings,
+    },
     /// Change one headset setting and save it on the base station.
-    SetHeadset { change: HeadsetChange },
+    SetHeadset {
+        change: HeadsetChange,
+    },
     /// Sonar channels, routing, and ChatMix.
     GetSonarState,
     /// Turn Sonar on or off. Restarts PipeWire.
-    SetSonarEnabled { enabled: bool },
+    SetSonarEnabled {
+        enabled: bool,
+    },
     /// The physical output the channels play into (a `node.name`).
-    SetSonarOutput { name: String },
+    SetSonarOutput {
+        name: String,
+    },
     /// 0..=1.
-    SetChannelVolume { channel: Channel, volume: f32 },
+    SetChannelVolume {
+        channel: Channel,
+        volume: f32,
+    },
     /// -1.0 all Game … 1.0 all Chat.
-    SetChatMix { balance: f32 },
+    SetChatMix {
+        balance: f32,
+    },
     /// Route an app (by `application.process.binary`) to a channel, and remember it.
-    SetAppChannel { binary: String, channel: Channel },
+    SetAppChannel {
+        binary: String,
+        channel: Channel,
+    },
     /// Replace a channel's EQ bands.
-    SetChannelEq { channel: Channel, bands: Vec<EqBand> },
+    SetChannelEq {
+        channel: Channel,
+        bands: Vec<EqBand>,
+    },
     /// Replace the headphone correction.
-    SetHeadphoneEq { eq: HeadphoneEq },
+    SetHeadphoneEq {
+        eq: HeadphoneEq,
+    },
     /// Parse an AutoEQ ParametricEQ.txt and make it the headphone correction.
-    ImportAutoEq { text: String, name: Option<String> },
+    ImportAutoEq {
+        text: String,
+        name: Option<String>,
+    },
     /// The physical mic the virtual mic reads (a source `node.name`).
-    SetMicInput { name: String },
-    SetMicSettings { settings: MicSettings },
+    SetMicInput {
+        name: String,
+    },
+    SetMicSettings {
+        settings: MicSettings,
+    },
     /// 0..=1.
-    SetMicVolume { volume: f32 },
+    SetMicVolume {
+        volume: f32,
+    },
     /// Turn streamer mode on or off (restarts PipeWire while Sonar is on).
-    SetStreamer { enabled: bool },
+    SetStreamer {
+        enabled: bool,
+    },
     /// A channel's level in the stream mix, 0..=1.
-    SetStreamVolume { channel: Channel, volume: f32 },
+    SetStreamVolume {
+        channel: Channel,
+        volume: f32,
+    },
     /// The stream mix's master level, 0..=1.
-    SetStreamMaster { volume: f32 },
+    SetStreamMaster {
+        volume: f32,
+    },
     /// Turn Smart Volume on or off for a channel, or change its level. Live: no restart.
-    SetSmartVolume { channel: Channel, settings: SmartVolume },
+    SetSmartVolume {
+        channel: Channel,
+        settings: SmartVolume,
+    },
     /// Keyboard connection, layout and lighting.
     GetKeyboardState,
     /// Replace the keyboard lighting.
-    SetLighting { lighting: Lighting },
+    SetLighting {
+        lighting: Lighting,
+    },
     GetGamesenseState,
     /// Start or stop the GameSense server (and its files in Proton prefixes).
-    SetGamesenseEnabled { enabled: bool },
+    SetGamesenseEnabled {
+        enabled: bool,
+    },
     /// Let one game drive the keyboard, or not.
-    SetGameEnabled { game: String, enabled: bool },
-    RemoveGame { game: String },
+    SetGameEnabled {
+        game: String,
+        enabled: bool,
+    },
+    RemoveGame {
+        game: String,
+    },
     /// Play the built-in test game: an F-key health bar.
     GamesenseTest,
     GetProfiles,
     /// Save the current lighting under this name.
-    SaveProfile { name: String },
-    ApplyProfile { name: String },
-    DeleteProfile { name: String },
-    SetGameRules { rules: Vec<GameRule> },
+    SaveProfile {
+        name: String,
+    },
+    ApplyProfile {
+        name: String,
+    },
+    DeleteProfile {
+        name: String,
+    },
+    SetGameRules {
+        rules: Vec<GameRule>,
+    },
     GetClipsState,
-    SetClipsSettings { settings: ClipsSettings },
+    SetClipsSettings {
+        settings: ClipsSettings,
+    },
     /// Save the replay buffer as a clip.
     SaveClip,
-    DeleteClip { name: String },
+    DeleteClip {
+        name: String,
+    },
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -835,18 +932,36 @@ pub struct RequestFrame {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseData {
-    Devices { devices: Vec<DeviceInfo> },
+    Devices {
+        devices: Vec<DeviceInfo>,
+    },
     Pong,
-    Mouse { state: MouseState },
-    Headset { state: HeadsetState },
-    Sonar { state: SonarState },
-    Keyboard { state: KeyboardState },
-    Gamesense { state: GameSenseState },
-    Profiles { state: ProfilesState },
-    Clips { state: ClipsState },
+    Mouse {
+        state: MouseState,
+    },
+    Headset {
+        state: HeadsetState,
+    },
+    Sonar {
+        state: SonarState,
+    },
+    Keyboard {
+        state: KeyboardState,
+    },
+    Gamesense {
+        state: GameSenseState,
+    },
+    Profiles {
+        state: ProfilesState,
+    },
+    Clips {
+        state: ClipsState,
+    },
     /// A command was accepted and applied.
     Success,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// An unsolicited server push. Adjacently tagged: `{"event":"device_added","data":{...}}`.
@@ -854,23 +969,41 @@ pub enum ResponseData {
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Event {
     DeviceAdded(DeviceInfo),
-    DeviceRemoved { id: String },
+    DeviceRemoved {
+        id: String,
+    },
     /// Full current list — sent on connect and after a lag/resync.
-    DevicesChanged { devices: Vec<DeviceInfo> },
+    DevicesChanged {
+        devices: Vec<DeviceInfo>,
+    },
     /// Mouse battery changed (or became unknown when it went to sleep).
-    MouseBattery { battery: Option<BatteryState> },
+    MouseBattery {
+        battery: Option<BatteryState>,
+    },
     /// Headset state changed: battery, power, connection, or screen.
-    HeadsetChanged { state: HeadsetState },
+    HeadsetChanged {
+        state: HeadsetState,
+    },
     /// Sonar changed: channels, apps, volumes, or on/off.
-    SonarChanged { state: SonarState },
+    SonarChanged {
+        state: SonarState,
+    },
     /// Keyboard connection or lighting changed.
-    KeyboardChanged { state: KeyboardState },
+    KeyboardChanged {
+        state: KeyboardState,
+    },
     /// GameSense switched on/off, or a game appeared, changed, or went quiet.
-    GamesenseChanged { state: GameSenseState },
+    GamesenseChanged {
+        state: GameSenseState,
+    },
     /// Profiles, rules, or the active rule changed.
-    ProfilesChanged { state: ProfilesState },
+    ProfilesChanged {
+        state: ProfilesState,
+    },
     /// The recorder started or stopped, a clip was saved or deleted, or settings changed.
-    ClipsChanged { state: ClipsState },
+    ClipsChanged {
+        state: ClipsState,
+    },
 }
 
 /// Anything the server writes to a client. Internally tagged on `kind`.
@@ -910,7 +1043,10 @@ pub fn config_dir() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| {
-            std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(".config")
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+                .join(".config")
         });
     base.join("gglinux")
 }
@@ -920,7 +1056,9 @@ pub fn config_dir() -> std::path::PathBuf {
 /// place later don't destroy the only copy. Says where it went, for the log;
 /// call it before the log macro, whose arguments only run when it's enabled.
 pub fn set_aside(path: &std::path::Path) -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".unreadable-{secs}"));
     let aside = path.with_file_name(name);
@@ -953,8 +1091,15 @@ mod tests {
         let dpi = r#"{"id":1,"req":{"method":"set_mouse_dpi","params":
             {"stages":[{"x":800,"y":800},{"x":1600,"y":1600}],"active":1,"save":true}}}"#;
         match serde_json::from_str::<RequestFrame>(dpi).unwrap().req {
-            Request::SetMouseDpi { stages, active, save } => {
-                assert_eq!(stages, vec![DpiStage { x: 800, y: 800 }, DpiStage { x: 1600, y: 1600 }]);
+            Request::SetMouseDpi {
+                stages,
+                active,
+                save,
+            } => {
+                assert_eq!(
+                    stages,
+                    vec![DpiStage { x: 800, y: 800 }, DpiStage { x: 1600, y: 1600 }]
+                );
                 assert_eq!(active, 1);
                 assert!(save);
             }
@@ -974,7 +1119,10 @@ mod tests {
         }
 
         for (line, label) in [
-            (r#"{"id":3,"req":{"method":"get_mouse_state"}}"#, "get_mouse_state"),
+            (
+                r#"{"id":3,"req":{"method":"get_mouse_state"}}"#,
+                "get_mouse_state",
+            ),
             (r#"{"id":4,"req":{"method":"save_mouse"}}"#, "save_mouse"),
         ] {
             serde_json::from_str::<RequestFrame>(line)
@@ -986,7 +1134,10 @@ mod tests {
     fn mouse_state_reports_unwritten_settings_as_null() {
         let state = MouseState {
             connected: true,
-            battery: Some(BatteryState { level: 12, charging: false }),
+            battery: Some(BatteryState {
+                level: 12,
+                charging: false,
+            }),
             applied: None,
         };
         let json = serde_json::to_string(&ResponseData::Mouse { state }).unwrap();
@@ -996,18 +1147,25 @@ mod tests {
 
     #[test]
     fn mouse_settings_report_each_unwritten_part_as_null() {
-        let applied = MouseSettings { polling_hz: Some(500), ..Default::default() };
+        let applied = MouseSettings {
+            polling_hz: Some(500),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&applied).unwrap();
         assert_eq!(json, r#"{"dpi":null,"polling_hz":500,"buttons":null}"#);
     }
 
     #[test]
     fn server_messages_are_distinguishable() {
-        let resp = ServerMessage::response(1, ResponseData::Pong).to_line().unwrap();
-        assert!(resp.contains("\"kind\":\"response\""));
-        let note = ServerMessage::notify(Event::DeviceRemoved { id: "1038:1872".into() })
+        let resp = ServerMessage::response(1, ResponseData::Pong)
             .to_line()
             .unwrap();
+        assert!(resp.contains("\"kind\":\"response\""));
+        let note = ServerMessage::notify(Event::DeviceRemoved {
+            id: "1038:1872".into(),
+        })
+        .to_line()
+        .unwrap();
         assert!(note.contains("\"kind\":\"notification\""));
         assert!(note.contains("\"event\":\"device_removed\""));
     }
@@ -1017,7 +1175,9 @@ mod tests {
         let set = r#"{"id":5,"req":{"method":"set_headset_screen","params":
             {"settings":{"protect":true,"lit_seconds":10,"brightness":null}}}}"#;
         match serde_json::from_str::<RequestFrame>(set).unwrap().req {
-            Request::SetHeadsetScreen { settings } => assert_eq!(settings, ScreenSettings::default()),
+            Request::SetHeadsetScreen { settings } => {
+                assert_eq!(settings, ScreenSettings::default())
+            }
             other => panic!("parsed as {other:?}"),
         }
         serde_json::from_str::<RequestFrame>(r#"{"id":6,"req":{"method":"get_headset_state"}}"#)
@@ -1035,7 +1195,8 @@ mod tests {
             screen_dark: true,
             controls: HeadsetControls::default(),
         };
-        let json = serde_json::to_string(&ServerMessage::notify(Event::HeadsetChanged { state })).unwrap();
+        let json =
+            serde_json::to_string(&ServerMessage::notify(Event::HeadsetChanged { state })).unwrap();
         assert!(json.contains(r#""event":"headset_changed""#), "{json}");
         assert!(json.contains(r#""power":"online""#), "{json}");
         assert!(json.contains(r#""spare_battery":null"#), "{json}");
@@ -1047,27 +1208,70 @@ mod tests {
     fn screen_settings_reject_out_of_range_values() {
         let ok = ScreenSettings::default();
         assert!(ok.validate().is_ok());
-        assert!(ScreenSettings { lit_seconds: 2, ..ok }.validate().is_err());
-        assert!(ScreenSettings { lit_seconds: 601, ..ok }.validate().is_err());
-        assert!(ScreenSettings { brightness: Some(0), ..ok }.validate().is_err(), "0 is not off");
-        assert!(ScreenSettings { brightness: Some(11), ..ok }.validate().is_err());
-        assert!(ScreenSettings { brightness: Some(1), lit_seconds: 600, ..ok }.validate().is_ok());
+        assert!(ScreenSettings {
+            lit_seconds: 2,
+            ..ok
+        }
+        .validate()
+        .is_err());
+        assert!(ScreenSettings {
+            lit_seconds: 601,
+            ..ok
+        }
+        .validate()
+        .is_err());
+        assert!(
+            ScreenSettings {
+                brightness: Some(0),
+                ..ok
+            }
+            .validate()
+            .is_err(),
+            "0 is not off"
+        );
+        assert!(ScreenSettings {
+            brightness: Some(11),
+            ..ok
+        }
+        .validate()
+        .is_err());
+        assert!(ScreenSettings {
+            brightness: Some(1),
+            lit_seconds: 600,
+            ..ok
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]
     fn headset_changes_parse_from_their_documented_json() {
         let cases = [
-            (r#"{"setting":"noise_mode","value":"anc"}"#, HeadsetChange::NoiseMode(NoiseMode::Anc)),
-            (r#"{"setting":"sidetone","value":2}"#, HeadsetChange::Sidetone(2)),
-            (r#"{"setting":"auto_off_minutes","value":0}"#, HeadsetChange::AutoOffMinutes(0)),
-            (r#"{"setting":"radio_mode","value":"range"}"#, HeadsetChange::RadioMode(RadioMode::Range)),
+            (
+                r#"{"setting":"noise_mode","value":"anc"}"#,
+                HeadsetChange::NoiseMode(NoiseMode::Anc),
+            ),
+            (
+                r#"{"setting":"sidetone","value":2}"#,
+                HeadsetChange::Sidetone(2),
+            ),
+            (
+                r#"{"setting":"auto_off_minutes","value":0}"#,
+                HeadsetChange::AutoOffMinutes(0),
+            ),
+            (
+                r#"{"setting":"radio_mode","value":"range"}"#,
+                HeadsetChange::RadioMode(RadioMode::Range),
+            ),
             (
                 r#"{"setting":"eq_bands","value":[0,0,0,0,0,0,0,0,0,1.5]}"#,
                 HeadsetChange::EqBands(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.5]),
             ),
         ];
         for (json, expected) in cases {
-            let line = format!(r#"{{"id":1,"req":{{"method":"set_headset","params":{{"change":{json}}}}}}}"#);
+            let line = format!(
+                r#"{{"id":1,"req":{{"method":"set_headset","params":{{"change":{json}}}}}}}"#
+            );
             match serde_json::from_str::<RequestFrame>(&line).unwrap().req {
                 Request::SetHeadset { change } => assert_eq!(change, expected, "{json}"),
                 other => panic!("{json} parsed as {other:?}"),
@@ -1087,10 +1291,22 @@ mod tests {
     fn sonar_requests_parse_from_their_documented_json() {
         for (line, label) in [
             (r#"{"id":1,"req":{"method":"get_sonar_state"}}"#, "get"),
-            (r#"{"id":2,"req":{"method":"set_sonar_enabled","params":{"enabled":true}}}"#, "enable"),
-            (r#"{"id":4,"req":{"method":"set_chat_mix","params":{"balance":-0.25}}}"#, "chatmix"),
-            (r#"{"id":5,"req":{"method":"set_app_channel","params":{"binary":"discord","channel":"chat"}}}"#, "app"),
-            (r#"{"id":6,"req":{"method":"set_sonar_output","params":{"name":"alsa_output.x"}}}"#, "output"),
+            (
+                r#"{"id":2,"req":{"method":"set_sonar_enabled","params":{"enabled":true}}}"#,
+                "enable",
+            ),
+            (
+                r#"{"id":4,"req":{"method":"set_chat_mix","params":{"balance":-0.25}}}"#,
+                "chatmix",
+            ),
+            (
+                r#"{"id":5,"req":{"method":"set_app_channel","params":{"binary":"discord","channel":"chat"}}}"#,
+                "app",
+            ),
+            (
+                r#"{"id":6,"req":{"method":"set_sonar_output","params":{"name":"alsa_output.x"}}}"#,
+                "output",
+            ),
         ] {
             serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{label}: {e}"));
         }
@@ -1108,7 +1324,10 @@ mod tests {
     fn channels_have_stable_keys() {
         let keys: Vec<_> = Channel::ALL.iter().map(|c| c.key()).collect();
         assert_eq!(keys, ["game", "chat", "media", "aux"]);
-        assert_eq!(serde_json::to_string(&Channel::Media).unwrap(), r#""media""#);
+        assert_eq!(
+            serde_json::to_string(&Channel::Media).unwrap(),
+            r#""media""#
+        );
     }
 
     #[test]
@@ -1120,7 +1339,15 @@ mod tests {
         match serde_json::from_str::<RequestFrame>(&set).unwrap().req {
             Request::SetChannelEq { channel, bands } => {
                 assert_eq!(channel, Channel::Game);
-                assert_eq!(bands, vec![EqBand { kind: BandKind::Peaking, freq: 250.0, q: 1.0, gain: -3.5 }]);
+                assert_eq!(
+                    bands,
+                    vec![EqBand {
+                        kind: BandKind::Peaking,
+                        freq: 250.0,
+                        q: 1.0,
+                        gain: -3.5
+                    }]
+                );
             }
             other => panic!("parsed as {other:?}"),
         }
@@ -1134,8 +1361,14 @@ mod tests {
 
     #[test]
     fn band_kinds_are_snake_case() {
-        assert_eq!(serde_json::to_string(&BandKind::LowShelf).unwrap(), r#""low_shelf""#);
-        assert_eq!(serde_json::to_string(&BandKind::HighShelf).unwrap(), r#""high_shelf""#);
+        assert_eq!(
+            serde_json::to_string(&BandKind::LowShelf).unwrap(),
+            r#""low_shelf""#
+        );
+        assert_eq!(
+            serde_json::to_string(&BandKind::HighShelf).unwrap(),
+            r#""high_shelf""#
+        );
     }
 
     #[test]
@@ -1161,7 +1394,10 @@ mod tests {
     fn mic_defaults_suppress_noise_and_leave_the_rest_off() {
         let d = MicSettings::default();
         assert!(d.denoise && !d.gate && !d.compressor);
-        assert_eq!((d.denoise_strength, d.gate_threshold_db, d.makeup_db), (50.0, -45.0, 6.0));
+        assert_eq!(
+            (d.denoise_strength, d.gate_threshold_db, d.makeup_db),
+            (50.0, -45.0, 6.0)
+        );
     }
 
     #[test]
@@ -1172,15 +1408,30 @@ mod tests {
         match serde_json::from_str::<RequestFrame>(line).unwrap().req {
             Request::SetLighting { lighting } => {
                 assert!(lighting.enabled);
-                assert_eq!(lighting.effect, Effect::Breathing { color: Rgb { r: 255, g: 0, b: 0 }, period_s: 3.0 });
-                assert_eq!(lighting.keys, vec![KeyColor { code: 10, color: Rgb { r: 0, g: 255, b: 0 } }]);
+                assert_eq!(
+                    lighting.effect,
+                    Effect::Breathing {
+                        color: Rgb { r: 255, g: 0, b: 0 },
+                        period_s: 3.0
+                    }
+                );
+                assert_eq!(
+                    lighting.keys,
+                    vec![KeyColor {
+                        code: 10,
+                        color: Rgb { r: 0, g: 255, b: 0 }
+                    }]
+                );
                 assert_eq!(lighting.brightness, 80);
             }
             other => panic!("parsed as {other:?}"),
         }
         serde_json::from_str::<RequestFrame>(r#"{"id":2,"req":{"method":"get_keyboard_state"}}"#)
             .expect("get_keyboard_state should parse");
-        assert_eq!(serde_json::to_string(&Effect::Static).unwrap(), r#"{"kind":"static"}"#);
+        assert_eq!(
+            serde_json::to_string(&Effect::Static).unwrap(),
+            r#"{"kind":"static"}"#
+        );
     }
 
     #[test]
@@ -1188,10 +1439,30 @@ mod tests {
         let d = Lighting::default();
         assert!(!d.enabled, "gglinux never takes the lighting until asked");
         assert!(d.validate().is_ok());
-        assert!(Lighting { brightness: 101, ..d.clone() }.validate().is_err());
-        assert!(Lighting { effect: Effect::Wave { period_s: 0.1 }, ..d.clone() }.validate().is_err());
-        assert!(Lighting { effect: Effect::Spectrum { period_s: f32::NAN }, ..d.clone() }.validate().is_err());
-        assert!(Lighting { effect: Effect::Static, ..d }.validate().is_ok());
+        assert!(Lighting {
+            brightness: 101,
+            ..d.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(Lighting {
+            effect: Effect::Wave { period_s: 0.1 },
+            ..d.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(Lighting {
+            effect: Effect::Spectrum { period_s: f32::NAN },
+            ..d.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(Lighting {
+            effect: Effect::Static,
+            ..d
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]
@@ -1206,13 +1477,34 @@ mod tests {
     #[test]
     fn reactive_defaults_json_and_bounds() {
         let d = Reactive::default();
-        assert_eq!((d.mode, d.color, d.duration_s), (ReactiveMode::Fade, Rgb { r: 255, g: 255, b: 255 }, 0.6));
-        let json = serde_json::to_value(Reactive { mode: ReactiveMode::Ripple, ..d }).unwrap();
+        assert_eq!(
+            (d.mode, d.color, d.duration_s),
+            (
+                ReactiveMode::Fade,
+                Rgb {
+                    r: 255,
+                    g: 255,
+                    b: 255
+                },
+                0.6
+            )
+        );
+        let json = serde_json::to_value(Reactive {
+            mode: ReactiveMode::Ripple,
+            ..d
+        })
+        .unwrap();
         assert_eq!(json["mode"], "ripple");
-        assert_eq!(serde_json::to_value(ReactiveStatus::NoAccess).unwrap(), "no_access");
+        assert_eq!(
+            serde_json::to_value(ReactiveStatus::NoAccess).unwrap(),
+            "no_access"
+        );
         assert_eq!(ReactiveStatus::default(), ReactiveStatus::Off);
 
-        let with = |duration_s| Lighting { reactive: Reactive { duration_s, ..d }, ..Lighting::default() };
+        let with = |duration_s| Lighting {
+            reactive: Reactive { duration_s, ..d },
+            ..Lighting::default()
+        };
         assert!(with(0.1).validate().is_ok());
         assert!(with(3.0).validate().is_ok());
         assert!(with(0.05).validate().is_err());
@@ -1223,42 +1515,88 @@ mod tests {
     #[test]
     fn gamesense_requests_and_events_use_their_documented_json() {
         for (line, want) in [
-            (r#"{"id":1,"req":{"method":"get_gamesense_state"}}"#, "GetGamesenseState"),
-            (r#"{"id":2,"req":{"method":"set_gamesense_enabled","params":{"enabled":true}}}"#, "SetGamesenseEnabled"),
-            (r#"{"id":3,"req":{"method":"set_game_enabled","params":{"game":"G","enabled":false}}}"#, "SetGameEnabled"),
-            (r#"{"id":4,"req":{"method":"remove_game","params":{"game":"G"}}}"#, "RemoveGame"),
-            (r#"{"id":5,"req":{"method":"gamesense_test"}}"#, "GamesenseTest"),
+            (
+                r#"{"id":1,"req":{"method":"get_gamesense_state"}}"#,
+                "GetGamesenseState",
+            ),
+            (
+                r#"{"id":2,"req":{"method":"set_gamesense_enabled","params":{"enabled":true}}}"#,
+                "SetGamesenseEnabled",
+            ),
+            (
+                r#"{"id":3,"req":{"method":"set_game_enabled","params":{"game":"G","enabled":false}}}"#,
+                "SetGameEnabled",
+            ),
+            (
+                r#"{"id":4,"req":{"method":"remove_game","params":{"game":"G"}}}"#,
+                "RemoveGame",
+            ),
+            (
+                r#"{"id":5,"req":{"method":"gamesense_test"}}"#,
+                "GamesenseTest",
+            ),
         ] {
             let req = serde_json::from_str::<RequestFrame>(line).unwrap().req;
-            assert!(format!("{req:?}").starts_with(want), "{line} parsed as {req:?}");
+            assert!(
+                format!("{req:?}").starts_with(want),
+                "{line} parsed as {req:?}"
+            );
         }
         let state = GameSenseState {
             enabled: true,
             address: Some("127.0.0.1:5000".into()),
             prefixes: 17,
-            games: vec![GameInfo { name: "G".into(), display_name: None, developer: None, enabled: true, active: false, events: vec!["E".into()] }],
+            games: vec![GameInfo {
+                name: "G".into(),
+                display_name: None,
+                developer: None,
+                enabled: true,
+                active: false,
+                events: vec!["E".into()],
+            }],
         };
-        let v = serde_json::to_value(Event::GamesenseChanged { state: state.clone() }).unwrap();
+        let v = serde_json::to_value(Event::GamesenseChanged {
+            state: state.clone(),
+        })
+        .unwrap();
         assert_eq!(v["event"], "gamesense_changed");
         assert_eq!(v["data"]["state"]["prefixes"], 17);
         let r = serde_json::to_value(ResponseData::Gamesense { state }).unwrap();
         assert_eq!(r["type"], "gamesense");
-        assert_eq!(GameSenseState::default(), GameSenseState { enabled: false, address: None, prefixes: 0, games: vec![] });
+        assert_eq!(
+            GameSenseState::default(),
+            GameSenseState {
+                enabled: false,
+                address: None,
+                prefixes: 0,
+                games: vec![]
+            }
+        );
     }
 
     #[test]
     fn the_visualizer_effect_and_its_sensitivity_bounds() {
         let v: Effect = serde_json::from_str(r#"{"kind":"visualizer","sensitivity":1.5}"#).unwrap();
         assert_eq!(v, Effect::Visualizer { sensitivity: 1.5 });
-        let with = |sensitivity| Lighting { effect: Effect::Visualizer { sensitivity }, ..Lighting::default() };
+        let with = |sensitivity| Lighting {
+            effect: Effect::Visualizer { sensitivity },
+            ..Lighting::default()
+        };
         assert!(with(0.25).validate().is_ok() && with(4.0).validate().is_ok());
-        assert!(with(0.2).validate().is_err() && with(4.5).validate().is_err() && with(f32::NAN).validate().is_err());
+        assert!(
+            with(0.2).validate().is_err()
+                && with(4.5).validate().is_err()
+                && with(f32::NAN).validate().is_err()
+        );
     }
 
     #[test]
     fn the_mic_mute_light_defaults_off_on_pause_in_red_and_old_files_still_load() {
         let d = MicMuteLight::default();
-        assert_eq!((d.enabled, d.key, d.color), (false, 0x48, Rgb { r: 255, g: 0, b: 0 }));
+        assert_eq!(
+            (d.enabled, d.key, d.color),
+            (false, 0x48, Rgb { r: 255, g: 0, b: 0 })
+        );
         let old = r#"{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}"#;
         assert_eq!(serde_json::from_str::<Lighting>(old).unwrap().mic_mute, d);
     }
@@ -1276,7 +1614,10 @@ mod tests {
         }
         let state = ProfilesState {
             profiles: vec!["Night".into()],
-            rules: vec![GameRule { process: "RDR2.exe".into(), profile: "Night".into() }],
+            rules: vec![GameRule {
+                process: "RDR2.exe".into(),
+                profile: "Night".into(),
+            }],
             active: None,
             running: vec![],
         };
@@ -1288,14 +1629,43 @@ mod tests {
     #[test]
     fn clips_settings_default_off_validate_and_parse() {
         let d = ClipsSettings::default();
-        assert_eq!((d.enabled, d.seconds, d.fps, d.quality, d.desktop_audio, d.mic, d.dir.as_deref()),
-            (false, 30, 60, ClipQuality::High, true, false, None));
+        assert_eq!(
+            (
+                d.enabled,
+                d.seconds,
+                d.fps,
+                d.quality,
+                d.desktop_audio,
+                d.mic,
+                d.dir.as_deref()
+            ),
+            (false, 30, 60, ClipQuality::High, true, false, None)
+        );
         assert!(d.validate().is_ok());
-        assert!(ClipsSettings { seconds: 4, ..d.clone() }.validate().is_err());
-        assert!(ClipsSettings { fps: 241, ..d.clone() }.validate().is_err());
-        assert!(ClipsSettings { dir: Some("relative/dir".into()), ..d.clone() }.validate().is_err());
-        let partial: ClipsSettings = serde_json::from_str(r#"{"enabled":true,"quality":"very_high"}"#).unwrap();
-        assert_eq!((partial.enabled, partial.quality, partial.seconds), (true, ClipQuality::VeryHigh, 30));
+        assert!(ClipsSettings {
+            seconds: 4,
+            ..d.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(ClipsSettings {
+            fps: 241,
+            ..d.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(ClipsSettings {
+            dir: Some("relative/dir".into()),
+            ..d.clone()
+        }
+        .validate()
+        .is_err());
+        let partial: ClipsSettings =
+            serde_json::from_str(r#"{"enabled":true,"quality":"very_high"}"#).unwrap();
+        assert_eq!(
+            (partial.enabled, partial.quality, partial.seconds),
+            (true, ClipQuality::VeryHigh, 30)
+        );
         for line in [
             r#"{"id":1,"req":{"method":"get_clips_state"}}"#,
             r#"{"id":2,"req":{"method":"save_clip"}}"#,
@@ -1304,7 +1674,13 @@ mod tests {
         ] {
             serde_json::from_str::<RequestFrame>(line).unwrap_or_else(|e| panic!("{line}: {e}"));
         }
-        assert_eq!(serde_json::to_value(Event::ClipsChanged { state: ClipsState::default() }).unwrap()["event"], "clips_changed");
+        assert_eq!(
+            serde_json::to_value(Event::ClipsChanged {
+                state: ClipsState::default()
+            })
+            .unwrap()["event"],
+            "clips_changed"
+        );
     }
 
     #[test]
@@ -1315,13 +1691,22 @@ mod tests {
         match serde_json::from_str::<RequestFrame>(line).unwrap().req {
             Request::SetSmartVolume { channel, settings } => {
                 assert_eq!(channel, Channel::Game);
-                assert_eq!(settings, SmartVolume { enabled: true, level: SmartLevel::Loud });
+                assert_eq!(
+                    settings,
+                    SmartVolume {
+                        enabled: true,
+                        level: SmartLevel::Loud
+                    }
+                );
             }
             other => panic!("parsed as {other:?}"),
         }
         let partial: SmartVolume = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert_eq!(partial.level, SmartLevel::Balanced);
-        assert_eq!(serde_json::to_string(&SmartLevel::Quiet).unwrap(), r#""quiet""#);
+        assert_eq!(
+            serde_json::to_string(&SmartLevel::Quiet).unwrap(),
+            r#""quiet""#
+        );
     }
 
     #[test]
@@ -1329,10 +1714,14 @@ mod tests {
         assert!(!ClipsSettings::default().games_only);
         let old: ClipsSettings = serde_json::from_str(r#"{"enabled":true,"seconds":45}"#).unwrap();
         assert!(!old.games_only);
-        let on: ClipsSettings = serde_json::from_str(r#"{"enabled":true,"games_only":true}"#).unwrap();
+        let on: ClipsSettings =
+            serde_json::from_str(r#"{"enabled":true,"games_only":true}"#).unwrap();
         assert!(on.games_only);
         let s = serde_json::to_value(ClipsState::default()).unwrap();
-        assert_eq!((s["waiting"].as_bool(), s["game"].is_null()), (Some(false), true));
+        assert_eq!(
+            (s["waiting"].as_bool(), s["game"].is_null()),
+            (Some(false), true)
+        );
     }
 
     #[test]
@@ -1342,7 +1731,10 @@ mod tests {
         let path = dir.join("x.json");
         std::fs::write(&path, "{ nope").unwrap();
         let moved = set_aside(&path);
-        assert!(moved.starts_with(&*dir.join("x.json.unreadable-").to_string_lossy()), "{moved}");
+        assert!(
+            moved.starts_with(&*dir.join("x.json.unreadable-").to_string_lossy()),
+            "{moved}"
+        );
         assert_eq!(std::fs::read_to_string(&moved).unwrap(), "{ nope");
         assert!(!path.exists());
         assert!(set_aside(&path).starts_with("nowhere"), "nothing to move");

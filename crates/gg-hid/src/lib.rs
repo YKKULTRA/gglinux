@@ -91,8 +91,11 @@ pub fn scan(api: &HidApi) -> Vec<DeviceInfo> {
     let mut devices: Vec<DeviceInfo> = by_id.into_values().collect();
     // Stable ordering so equality comparisons in the monitor are deterministic.
     for dev in &mut devices {
-        dev.interfaces
-            .sort_by(|a, b| a.interface_number.cmp(&b.interface_number).then(a.path.cmp(&b.path)));
+        dev.interfaces.sort_by(|a, b| {
+            a.interface_number
+                .cmp(&b.interface_number)
+                .then(a.path.cmp(&b.path))
+        });
     }
     devices.sort_by(|a, b| a.id.cmp(&b.id));
     devices
@@ -116,8 +119,13 @@ fn diff(old: &[DeviceInfo], new: &[DeviceInfo]) -> Vec<Event> {
             events.push(Event::DeviceRemoved { id: d.id.clone() });
         }
     }
-    if new.iter().any(|d| old.iter().any(|o| o.id == d.id && o != d)) {
-        events.push(Event::DevicesChanged { devices: new.to_vec() });
+    if new
+        .iter()
+        .any(|d| old.iter().any(|o| o.id == d.id && o != d))
+    {
+        events.push(Event::DevicesChanged {
+            devices: new.to_vec(),
+        });
     }
     events
 }
@@ -147,11 +155,19 @@ pub fn run_monitor(mut on_change: impl FnMut(Vec<DeviceInfo>, Vec<Event>)) -> Re
         }
     };
     let fd = monitor.as_ref().map(|m| m.as_raw_fd()).unwrap_or(-1);
-    let timeout_ms = if monitor.is_some() { RESCAN_INTERVAL_MS } else { POLL_ONLY_INTERVAL_MS };
+    let timeout_ms = if monitor.is_some() {
+        RESCAN_INTERVAL_MS
+    } else {
+        POLL_ONLY_INTERVAL_MS
+    };
 
     loop {
         // Block until a udev event or the rescan interval elapses.
-        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let nfds = if fd >= 0 { 1 } else { 0 };
         let rc = unsafe { libc::poll(&mut pfd, nfds, timeout_ms) };
         if rc < 0 {
@@ -177,7 +193,11 @@ pub fn run_monitor(mut on_change: impl FnMut(Vec<DeviceInfo>, Vec<Event>)) -> Re
         let current = scan(&api);
         if current != known {
             let events = diff(&known, &current);
-            debug!(events = events.len(), count = current.len(), "device set changed");
+            debug!(
+                events = events.len(),
+                count = current.len(),
+                "device set changed"
+            );
             known = current.clone();
             on_change(current, events);
         }
@@ -269,7 +289,10 @@ mod tests {
             path: "/dev/hidraw3".into(),
         });
         let events = diff(&before, &[changed]);
-        assert!(added(&events).is_empty() && removed(&events).is_empty(), "{events:?}");
+        assert!(
+            added(&events).is_empty() && removed(&events).is_empty(),
+            "{events:?}"
+        );
     }
 
     /// A device that changed in place goes out as the whole list, even when

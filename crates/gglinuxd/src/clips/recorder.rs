@@ -26,14 +26,30 @@ pub fn argv(s: &ClipsSettings, dir: &Path, mixed: Option<&str>) -> Vec<String> {
         ClipQuality::Ultra => "ultra",
     };
     let mut v: Vec<String> = [
-        PROGRAM, "-w", "portal", "-restore-portal-session", "yes", "-c", "mp4",
-        "-f", &s.fps.to_string(), "-r", &s.seconds.to_string(), "-q", quality, "-o", &dir.to_string_lossy(),
+        PROGRAM,
+        "-w",
+        "portal",
+        "-restore-portal-session",
+        "yes",
+        "-c",
+        "mp4",
+        "-f",
+        &s.fps.to_string(),
+        "-r",
+        &s.seconds.to_string(),
+        "-q",
+        quality,
+        "-o",
+        &dir.to_string_lossy(),
     ]
     .iter()
     .map(|x| x.to_string())
     .collect();
     if s.desktop_audio {
-        let source = mixed.map_or_else(|| "default_output".to_string(), |output| format!("device:{output}.monitor"));
+        let source = mixed.map_or_else(
+            || "default_output".to_string(),
+            |output| format!("device:{output}.monitor"),
+        );
         v.extend(["-a".to_string(), source]);
     }
     if s.mic {
@@ -43,7 +59,10 @@ pub fn argv(s: &ClipsSettings, dir: &Path, mixed: Option<&str>) -> Vec<String> {
 }
 
 pub fn resolve_dir(s: &ClipsSettings, home: &Path) -> PathBuf {
-    s.dir.as_deref().map(PathBuf::from).unwrap_or_else(|| home.join("Videos/gglinux"))
+    s.dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("Videos/gglinux"))
 }
 
 /// How long to wait before restarting a recorder that ran for `ran_for` and died.
@@ -56,11 +75,16 @@ pub fn next_delay(ran_for: Duration, previous: Duration) -> Duration {
 }
 
 fn is_video(name: &str) -> bool {
-    Path::new(name).extension().and_then(OsStr::to_str).is_some_and(|e| VIDEO.iter().any(|v| v.eq_ignore_ascii_case(e)))
+    Path::new(name)
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|e| VIDEO.iter().any(|v| v.eq_ignore_ascii_case(e)))
 }
 
 pub fn list(dir: &Path) -> Vec<ClipInfo> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut clips: Vec<ClipInfo> = entries
         .flatten()
         .filter_map(|e| {
@@ -69,11 +93,19 @@ pub fn list(dir: &Path) -> Vec<ClipInfo> {
             (meta.is_file() && is_video(&name)).then(|| ClipInfo {
                 name,
                 bytes: meta.len(),
-                modified: meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs()),
+                modified: meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs()),
             })
         })
         .collect();
-    clips.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.name.cmp(&b.name)));
+    clips.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     clips.truncate(MAX_CLIPS);
     clips
 }
@@ -91,7 +123,9 @@ pub fn clip_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
 }
 
 pub fn find_program(path_var: Option<&OsStr>) -> Option<PathBuf> {
-    std::env::split_paths(path_var?).map(|d| d.join(PROGRAM)).find(|p| p.is_file())
+    std::env::split_paths(path_var?)
+        .map(|d| d.join(PROGRAM))
+        .find(|p| p.is_file())
 }
 
 pub fn load(path: &Path) -> ClipsSettings {
@@ -132,7 +166,10 @@ mod tests {
         use std::hash::BuildHasher;
         use std::os::unix::fs::DirBuilderExt;
         let random = std::collections::hash_map::RandomState::new().hash_one(tag);
-        let d = std::env::temp_dir().join(format!("gglinux-clips-{}-{tag}-{random:016x}", std::process::id()));
+        let d = std::env::temp_dir().join(format!(
+            "gglinux-clips-{}-{tag}-{random:016x}",
+            std::process::id()
+        ));
         std::fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
         d
     }
@@ -140,29 +177,77 @@ mod tests {
     #[test]
     fn the_command_line_follows_the_settings() {
         let s = ClipsSettings::default();
-        assert_eq!(argv(&s, Path::new("/v"), None), [
-            "gpu-screen-recorder", "-w", "portal", "-restore-portal-session", "yes", "-c", "mp4",
-            "-f", "60", "-r", "30", "-q", "high", "-o", "/v", "-a", "default_output",
-        ]);
-        let s = ClipsSettings { desktop_audio: false, mic: true, quality: ClipQuality::VeryHigh, fps: 30, seconds: 90, ..s };
+        assert_eq!(
+            argv(&s, Path::new("/v"), None),
+            [
+                "gpu-screen-recorder",
+                "-w",
+                "portal",
+                "-restore-portal-session",
+                "yes",
+                "-c",
+                "mp4",
+                "-f",
+                "60",
+                "-r",
+                "30",
+                "-q",
+                "high",
+                "-o",
+                "/v",
+                "-a",
+                "default_output",
+            ]
+        );
+        let s = ClipsSettings {
+            desktop_audio: false,
+            mic: true,
+            quality: ClipQuality::VeryHigh,
+            fps: 30,
+            seconds: 90,
+            ..s
+        };
         let a = argv(&s, Path::new("/v"), None);
         assert!(a.windows(2).any(|w| w == ["-a", "default_input"]));
         assert!(!a.iter().any(|x| x == "default_output"));
-        assert!(a.windows(2).any(|w| w == ["-q", "very_high"]) && a.windows(2).any(|w| w == ["-r", "90"]));
+        assert!(
+            a.windows(2).any(|w| w == ["-q", "very_high"])
+                && a.windows(2).any(|w| w == ["-r", "90"])
+        );
     }
 
     #[test]
     fn with_sonar_on_desktop_audio_is_the_output_its_channels_play_into() {
-        let a = argv(&ClipsSettings::default(), Path::new("/v"), Some("alsa_output.usb-SteelSeries"));
-        assert!(a.windows(2).any(|w| w == ["-a", "device:alsa_output.usb-SteelSeries.monitor"]), "{a:?}");
-        assert!(!a.iter().any(|x| x == "default_output"), "the default output is then the Game channel alone: {a:?}");
+        let a = argv(
+            &ClipsSettings::default(),
+            Path::new("/v"),
+            Some("alsa_output.usb-SteelSeries"),
+        );
+        assert!(
+            a.windows(2)
+                .any(|w| w == ["-a", "device:alsa_output.usb-SteelSeries.monitor"]),
+            "{a:?}"
+        );
+        assert!(
+            !a.iter().any(|x| x == "default_output"),
+            "the default output is then the Game channel alone: {a:?}"
+        );
     }
 
     #[test]
     fn the_folder_defaults_under_videos() {
-        assert_eq!(resolve_dir(&ClipsSettings::default(), Path::new("/home/u")), PathBuf::from("/home/u/Videos/gglinux"));
-        let s = ClipsSettings { dir: Some("/data/clips".into()), ..ClipsSettings::default() };
-        assert_eq!(resolve_dir(&s, Path::new("/home/u")), PathBuf::from("/data/clips"));
+        assert_eq!(
+            resolve_dir(&ClipsSettings::default(), Path::new("/home/u")),
+            PathBuf::from("/home/u/Videos/gglinux")
+        );
+        let s = ClipsSettings {
+            dir: Some("/data/clips".into()),
+            ..ClipsSettings::default()
+        };
+        assert_eq!(
+            resolve_dir(&s, Path::new("/home/u")),
+            PathBuf::from("/data/clips")
+        );
     }
 
     #[test]
@@ -177,11 +262,21 @@ mod tests {
     #[test]
     fn clips_are_video_files_newest_first() {
         let d = scratch("list");
-        for (name, age) in [("old.mp4", 30), ("new.MKV", 10), ("notes.txt", 0), ("mid.webm", 20)] {
+        for (name, age) in [
+            ("old.mp4", 30),
+            ("new.MKV", 10),
+            ("notes.txt", 0),
+            ("mid.webm", 20),
+        ] {
             let p = d.join(name);
             std::fs::write(&p, b"x").unwrap();
             let t = std::time::SystemTime::now() - Duration::from_secs(age);
-            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
         }
         std::fs::create_dir(d.join("folder.mp4")).unwrap();
         let names: Vec<String> = list(&d).into_iter().map(|c| c.name).collect();
@@ -196,7 +291,15 @@ mod tests {
         std::fs::write(d.join("a.mp4"), b"x").unwrap();
         std::fs::write(d.join("notes.txt"), b"x").unwrap();
         assert_eq!(clip_path(&d, "a.mp4").unwrap(), d.join("a.mp4"));
-        for bad in ["../a.mp4", "sub/a.mp4", "", ".", "..", "notes.txt", "missing.mp4"] {
+        for bad in [
+            "../a.mp4",
+            "sub/a.mp4",
+            "",
+            ".",
+            "..",
+            "notes.txt",
+            "missing.mp4",
+        ] {
             assert!(clip_path(&d, bad).is_err(), "{bad:?}");
         }
         std::fs::remove_dir_all(d).unwrap();
@@ -216,7 +319,11 @@ mod tests {
     fn settings_round_trip_and_garbage_means_defaults() {
         let d = scratch("settings");
         let p = d.join("clips.json");
-        let s = ClipsSettings { enabled: true, seconds: 45, ..ClipsSettings::default() };
+        let s = ClipsSettings {
+            enabled: true,
+            seconds: 45,
+            ..ClipsSettings::default()
+        };
         save(&p, &s);
         assert_eq!(load(&p), s);
         std::fs::write(&p, "{ nope").unwrap();

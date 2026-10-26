@@ -8,14 +8,14 @@
 
 pub mod config;
 pub mod eq;
-pub mod mix;
-pub mod rules;
-pub mod tools;
 pub mod graph;
 pub mod mic;
+pub mod mix;
+pub mod rules;
 pub mod settings;
 pub mod smart;
 pub mod sonar;
+pub mod tools;
 
 #[cfg(test)]
 pub(crate) mod testing {

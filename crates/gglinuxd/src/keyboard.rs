@@ -6,10 +6,10 @@
 //! lighting back to the keyboard's onboard profile. Off by default: a fresh
 //! install never touches the keyboard.
 
-mod effects;
-mod reader;
 mod audio;
+mod effects;
 mod mic;
+mod reader;
 mod spectrum;
 
 use std::collections::HashMap;
@@ -52,10 +52,16 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 pub enum Command {
     GetState(Reply<KeyboardState>),
-    SetLighting { lighting: Lighting, reply: Reply<()> },
+    SetLighting {
+        lighting: Lighting,
+        reply: Reply<()>,
+    },
     /// A key went down on the Apex, as the reader saw it: the code of its LED.
     /// Never logged.
-    Pressed { code: u8, at: Instant },
+    Pressed {
+        code: u8,
+        at: Instant,
+    },
     /// The reader ended by itself (keyboard gone, read error); it retries later.
     ReaderStopped,
     /// Something an overlay shows changed: draw soon. No reply.
@@ -163,7 +169,12 @@ struct State {
     mic_muted: bool,
 }
 
-fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sender<Event>, overlays: Vec<Arc<dyn Overlay>>) {
+fn worker(
+    rx: Receiver<Command>,
+    tx: Sender<Command>,
+    event_tx: broadcast::Sender<Event>,
+    overlays: Vec<Arc<dyn Overlay>>,
+) {
     let hid = gg_hid::lock();
     let api = match HidApi::new() {
         Ok(api) => api,
@@ -226,13 +237,20 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
             state.last_frame = None;
         }
         state.overlay_was_active = overlay_active;
-        if should_look_for(state.device.is_some(), drawing(state.lighting.enabled, !state.layers.is_empty())) {
+        if should_look_for(
+            state.device.is_some(),
+            drawing(state.lighting.enabled, !state.layers.is_empty()),
+        ) {
             look_for(&mut state);
         }
         sync_reader(&mut state);
         sync_audio(&mut state);
         sync_mic(&mut state);
-        if should_hand_back(state.taken, state.lighting.enabled, !state.layers.is_empty()) {
+        if should_hand_back(
+            state.taken,
+            state.lighting.enabled,
+            !state.layers.is_empty(),
+        ) {
             hand_back(&mut state);
         }
         render(&mut state);
@@ -256,7 +274,12 @@ fn next_wait(state: &State) -> Duration {
         return IDLE_WAIT;
     }
     state.last_frame.map_or(Duration::ZERO, |t| {
-        interval(&state.lighting, !state.hits.is_empty(), !state.layers.is_empty()).saturating_sub(t.elapsed())
+        interval(
+            &state.lighting,
+            !state.hits.is_empty(),
+            !state.layers.is_empty(),
+        )
+        .saturating_sub(t.elapsed())
     })
 }
 
@@ -308,21 +331,28 @@ fn wants_mic(lighting: &Lighting, connected: bool) -> bool {
 
 /// The mute light's colour for this key, if it's the mute key.
 fn mic_color(mic: Option<(u8, gg_ipc::Rgb)>, code: u8) -> Option<Rgb> {
-    mic.filter(|&(key, _)| key == code).map(|(_, c)| Rgb { r: c.r, g: c.g, b: c.b })
+    mic.filter(|&(key, _)| key == code).map(|(_, c)| Rgb {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+    })
 }
 
 /// Settings that name keys must name keys this keyboard has.
 fn check_keys(lighting: &Lighting) -> Result<(), String> {
     let key = lighting.mic_mute.key;
     if !ANSI_TKL.iter().any(|k| k.0 == key) {
-        return Err(format!("the mic-mute key {key:#04x} is not on this keyboard"));
+        return Err(format!(
+            "the mic-mute key {key:#04x} is not on this keyboard"
+        ));
     }
     Ok(())
 }
 
 /// Run the visualizer's audio capture exactly while it's drawn.
 fn sync_audio(state: &mut State) {
-    let on_screen = state.device.is_some() && drawing(state.lighting.enabled, !state.layers.is_empty());
+    let on_screen =
+        state.device.is_some() && drawing(state.lighting.enabled, !state.layers.is_empty());
     if !wants_audio(&state.lighting, on_screen) {
         if state.capture.take().is_some() {
             *state.levels.lock().unwrap_or_else(|e| e.into_inner()) = [0.0; BANDS];
@@ -333,7 +363,11 @@ fn sync_audio(state: &mut State) {
         return;
     }
     state.last_capture_attempt = Some(Instant::now());
-    match Capture::start(&audio::pw_record(state.listen_to.as_deref()), Arc::clone(&state.levels), state.tx.clone()) {
+    match Capture::start(
+        &audio::pw_record(state.listen_to.as_deref()),
+        Arc::clone(&state.levels),
+        state.tx.clone(),
+    ) {
         Ok(c) => {
             debug!("capturing audio for the visualizer");
             state.capture = Some(c);
@@ -491,7 +525,11 @@ fn look_for(state: &mut State) {
     if refreshed.is_err() {
         return;
     }
-    if state.device.as_ref().is_some_and(|d| !d.is_listed(&state.api)) {
+    if state
+        .device
+        .as_ref()
+        .is_some_and(|d| !d.is_listed(&state.api))
+    {
         info!("keyboard disconnected");
         state.device = None;
         state.taken = false;
@@ -502,7 +540,10 @@ fn look_for(state: &mut State) {
 fn render(state: &mut State) {
     let overlay_active = !state.layers.is_empty();
     if !drawing(state.lighting.enabled, overlay_active)
-        || !is_older_than(state.last_frame, interval(&state.lighting, !state.hits.is_empty(), overlay_active))
+        || !is_older_than(
+            state.last_frame,
+            interval(&state.lighting, !state.hits.is_empty(), overlay_active),
+        )
     {
         return;
     }
@@ -514,14 +555,17 @@ fn render(state: &mut State) {
     let bands = *state.levels.lock().unwrap_or_else(|e| e.into_inner());
     let m = &state.lighting.mic_mute;
     let mic = (state.lighting.enabled && m.enabled && state.mic_muted).then_some((m.key, m.color));
-    let Some(device) = state.device.as_ref() else { return };
-    let result = if state.taken { Ok(()) } else { device.init() }
-        .and_then(|()| {
-            device.show(|code| match mic_color(mic, code).or_else(|| overlay_color(layers, code)) {
+    let Some(device) = state.device.as_ref() else {
+        return;
+    };
+    let result = if state.taken { Ok(()) } else { device.init() }.and_then(|()| {
+        device.show(
+            |code| match mic_color(mic, code).or_else(|| overlay_color(layers, code)) {
                 Some(c) => effects::dim(c, state.lighting.brightness),
                 None => effects::color(&state.lighting, &state.positions, code, t, hits, &bands),
-            })
-        });
+            },
+        )
+    });
     match result {
         Ok(()) => {
             state.taken = true;
@@ -554,7 +598,13 @@ fn snapshot(state: &State) -> KeyboardState {
         connected: state.device.is_some(),
         layout: ANSI_TKL
             .iter()
-            .map(|&(code, label, x, y, w)| KeyInfo { code, label: label.to_owned(), x, y, w })
+            .map(|&(code, label, x, y, w)| KeyInfo {
+                code,
+                label: label.to_owned(),
+                x,
+                y,
+                w,
+            })
             .collect(),
         lighting: state.lighting.clone(),
         reactive: state.reactive,
@@ -604,22 +654,45 @@ mod tests {
     use gg_ipc::{Effect, Reactive};
 
     fn lighting(enabled: bool, reactive: bool, effect: Effect) -> Lighting {
-        Lighting { enabled, effect, reactive: Reactive { enabled: reactive, ..Reactive::default() }, ..Lighting::default() }
+        Lighting {
+            enabled,
+            effect,
+            reactive: Reactive {
+                enabled: reactive,
+                ..Reactive::default()
+            },
+            ..Lighting::default()
+        }
     }
 
     #[test]
     fn the_reader_runs_only_with_lighting_and_reactive_on_and_the_keyboard_here() {
         assert!(wants_reader(&lighting(true, true, Effect::Static), true));
-        assert!(!wants_reader(&lighting(false, true, Effect::Static), true), "lighting off");
-        assert!(!wants_reader(&lighting(true, false, Effect::Static), true), "reactive off");
-        assert!(!wants_reader(&lighting(true, true, Effect::Static), false), "keyboard away");
+        assert!(
+            !wants_reader(&lighting(false, true, Effect::Static), true),
+            "lighting off"
+        );
+        assert!(
+            !wants_reader(&lighting(true, false, Effect::Static), true),
+            "reactive off"
+        );
+        assert!(
+            !wants_reader(&lighting(true, true, Effect::Static), false),
+            "keyboard away"
+        );
     }
 
     #[test]
     fn at_most_32_presses_are_kept_oldest_dropped_first() {
         let mut hits = Vec::new();
         for i in 0..40u8 {
-            push_hit(&mut hits, effects::Hit { code: i, t: f64::from(i) });
+            push_hit(
+                &mut hits,
+                effects::Hit {
+                    code: i,
+                    t: f64::from(i),
+                },
+            );
         }
         assert_eq!(hits.len(), MAX_HITS);
         assert_eq!(hits[0].code, 8, "the eight oldest went");
@@ -631,7 +704,14 @@ mod tests {
         let still = lighting(true, true, Effect::Static);
         assert_eq!(interval(&still, false, false), STATIC_REFRESH);
         assert_eq!(interval(&still, true, false), FRAME);
-        assert_eq!(interval(&lighting(true, true, Effect::Wave { period_s: 4.0 }), false, false), FRAME);
+        assert_eq!(
+            interval(
+                &lighting(true, true, Effect::Wave { period_s: 4.0 }),
+                false,
+                false
+            ),
+            FRAME
+        );
     }
 
     #[test]
@@ -639,24 +719,42 @@ mod tests {
         assert!(drawing(true, false));
         assert!(drawing(false, true), "a game takes the keyboard over");
         assert!(!drawing(false, false));
-        assert!(should_hand_back(true, false, false), "held, but nothing wants it");
+        assert!(
+            should_hand_back(true, false, false),
+            "held, but nothing wants it"
+        );
         assert!(!should_hand_back(true, false, true), "a game still draws");
-        assert!(!should_hand_back(true, true, false), "gglinux lighting still draws");
+        assert!(
+            !should_hand_back(true, true, false),
+            "gglinux lighting still draws"
+        );
         assert!(!should_hand_back(false, false, false), "not held");
     }
 
     #[test]
     fn an_open_keyboard_is_looked_for_while_nothing_is_drawn_since_no_write_would_fail() {
-        assert!(should_look_for(true, false), "open and idle: only the device list can tell it went");
-        assert!(!should_look_for(true, true), "drawing: a failed frame tells");
-        assert!(!should_look_for(false, false), "not open: opening looks already");
+        assert!(
+            should_look_for(true, false),
+            "open and idle: only the device list can tell it went"
+        );
+        assert!(
+            !should_look_for(true, true),
+            "drawing: a failed frame tells"
+        );
+        assert!(
+            !should_look_for(false, false),
+            "not open: opening looks already"
+        );
     }
 
     #[test]
     fn the_last_active_overlay_that_paints_a_key_wins() {
         let red = gg_device_keyboard::Rgb { r: 255, g: 0, b: 0 };
         let blue = gg_device_keyboard::Rgb { r: 0, g: 0, b: 255 };
-        let layers = vec![Layer::from([(0x04, red), (0x05, red)]), Layer::from([(0x05, blue)])];
+        let layers = vec![
+            Layer::from([(0x04, red), (0x05, red)]),
+            Layer::from([(0x05, blue)]),
+        ];
         assert_eq!(overlay_color(&layers, 0x04), Some(red));
         assert_eq!(overlay_color(&layers, 0x05), Some(blue));
         assert_eq!(overlay_color(&layers, 0x06), None);
@@ -671,25 +769,43 @@ mod tests {
 
     #[test]
     fn the_lighting_under_an_overlay_is_drawn_at_once_when_it_ends() {
-        assert!(overlay_ended(true, false), "a static effect would otherwise wait out its slow refresh");
-        assert!(!overlay_ended(true, true), "still painting: frames are due 30 times a second");
-        assert!(!overlay_ended(false, true), "starting: its frames are due at once anyway");
+        assert!(
+            overlay_ended(true, false),
+            "a static effect would otherwise wait out its slow refresh"
+        );
+        assert!(
+            !overlay_ended(true, true),
+            "still painting: frames are due 30 times a second"
+        );
+        assert!(
+            !overlay_ended(false, true),
+            "starting: its frames are due at once anyway"
+        );
         assert!(!overlay_ended(false, false));
     }
 
     #[test]
     fn wake_forces_a_frame_at_most_once_per_frame_interval() {
         assert!(wake_forces_frame(None));
-        assert!(!wake_forces_frame(Some(Instant::now())), "a frame just went out: wait for the cadence");
+        assert!(
+            !wake_forces_frame(Some(Instant::now())),
+            "a frame just went out: wait for the cadence"
+        );
         assert!(wake_forces_frame(Some(Instant::now() - FRAME)));
     }
 
     #[test]
     fn the_capture_and_the_mic_watch_run_only_when_wanted() {
-        let viz = Lighting { effect: Effect::Visualizer { sensitivity: 1.0 }, ..lighting(true, false, Effect::Static) };
+        let viz = Lighting {
+            effect: Effect::Visualizer { sensitivity: 1.0 },
+            ..lighting(true, false, Effect::Static)
+        };
         assert!(wants_audio(&viz, true));
         assert!(!wants_audio(&viz, false), "not drawing");
-        assert!(!wants_audio(&lighting(true, false, Effect::Static), true), "another effect");
+        assert!(
+            !wants_audio(&lighting(true, false, Effect::Static), true),
+            "another effect"
+        );
         let mut m = lighting(true, false, Effect::Static);
         m.mic_mute.enabled = true;
         assert!(wants_mic(&m, true));
@@ -701,7 +817,10 @@ mod tests {
     #[test]
     fn the_mute_light_wins_over_overlays() {
         let red = gg_ipc::Rgb { r: 255, g: 0, b: 0 };
-        assert_eq!(mic_color(Some((0x48, red)), 0x48), Some(gg_device_keyboard::Rgb { r: 255, g: 0, b: 0 }));
+        assert_eq!(
+            mic_color(Some((0x48, red)), 0x48),
+            Some(gg_device_keyboard::Rgb { r: 255, g: 0, b: 0 })
+        );
         assert_eq!(mic_color(Some((0x48, red)), 0x47), None);
         assert_eq!(mic_color(None, 0x48), None);
     }

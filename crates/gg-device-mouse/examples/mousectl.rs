@@ -18,8 +18,7 @@ use hidapi::HidApi;
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -43,7 +42,11 @@ fn main() -> Result<()> {
                 .transpose()?
                 .unwrap_or(0);
             mouse.set_dpi(&stages, selected)?;
-            println!("set {} DPI stage(s), stage {} active", stages.len(), selected + 1);
+            println!(
+                "set {} DPI stage(s), stage {} active",
+                stages.len(),
+                selected + 1
+            );
         }
         Some((&"polling", rest)) => {
             let hz: u16 = rest
@@ -154,7 +157,10 @@ mod tests {
 
     #[test]
     fn the_select_value_is_not_read_as_the_dpi_list() {
-        for line in ["dpi --select 0 800,1600 --save", "dpi 800,1600 --select 0 --save"] {
+        for line in [
+            "dpi --select 0 800,1600 --save",
+            "dpi 800,1600 --select 0 --save",
+        ] {
             assert_eq!(positional(&args(line)), ["dpi", "800,1600"], "{line}");
         }
     }

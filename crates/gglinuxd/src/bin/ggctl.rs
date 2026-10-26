@@ -45,7 +45,11 @@ fn main() -> Result<()> {
                 "connected: {}\nbattery:   {}",
                 state.connected,
                 match state.battery {
-                    Some(b) => format!("{}%{}", b.level, if b.charging { " (charging)" } else { "" }),
+                    Some(b) => format!(
+                        "{}%{}",
+                        b.level,
+                        if b.charging { " (charging)" } else { "" }
+                    ),
                     None => "unknown (asleep — move the mouse and retry)".into(),
                 }
             );
@@ -63,7 +67,9 @@ fn main() -> Result<()> {
                 }
                 // The mouse protocol is write-only, so an unwritten setting is
                 // genuinely unknown rather than assumed to be the default.
-                None => println!("applied:   nothing yet this session (mouse is on its onboard settings)"),
+                None => println!(
+                    "applied:   nothing yet this session (mouse is on its onboard settings)"
+                ),
             }
         }
         ResponseData::Profiles { state } => {
@@ -75,7 +81,9 @@ fn main() -> Result<()> {
             println!("ok");
             // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.
             let save = args.iter().any(|a| a == "--save");
-            if !save && matches!(positional(&args)?.as_slice(), ["mouse", command, ..] if *command != "save") {
+            if !save
+                && matches!(positional(&args)?.as_slice(), ["mouse", command, ..] if *command != "save")
+            {
                 println!("note: not saved — pass --save to keep this across a power cycle");
             }
         }
@@ -105,9 +113,9 @@ fn parse(args: &[String]) -> Result<Action> {
         Some((&"clip", _)) => bail!("usage: ggctl clip save"),
         Some((&"profile", ["list"])) => Request::GetProfiles,
         // Names may have spaces, so `profile apply Late Night` needs no quotes.
-        Some((&"profile", ["apply", name @ ..])) if !name.is_empty() => {
-            Request::ApplyProfile { name: name.join(" ") }
-        }
+        Some((&"profile", ["apply", name @ ..])) if !name.is_empty() => Request::ApplyProfile {
+            name: name.join(" "),
+        },
         Some((&"profile", _)) => bail!("usage: ggctl profile list | ggctl profile apply <name>"),
         Some((&"gamesense", ["test"])) => Request::GamesenseTest,
         Some((&"gamesense", ["on"])) => Request::SetGamesenseEnabled { enabled: true },
@@ -134,7 +142,9 @@ fn positional(args: &[String]) -> Result<Vec<&str>> {
             }
             "--save" => {}
             a if a.starts_with("--select=") => {}
-            a if a.starts_with("--") => bail!("unknown option '{a}' (try: --save, --select N, --help)"),
+            a if a.starts_with("--") => {
+                bail!("unknown option '{a}' (try: --save, --select N, --help)")
+            }
             a => words.push(a),
         }
     }
@@ -171,13 +181,16 @@ fn mouse_request(rest: &[&str], args: &[String], save: bool) -> Result<Request> 
         Some((&"buttons", _)) => bail!("usage: ggctl mouse buttons button1,...,dpi [--save]"),
         Some((&"save", [])) => Request::SaveMouse,
         Some((&"save", _)) => bail!("usage: ggctl mouse save"),
-        Some((other, _)) => bail!("unknown mouse command '{other}' (try: dpi, polling, buttons, save)"),
+        Some((other, _)) => {
+            bail!("unknown mouse command '{other}' (try: dpi, polling, buttons, save)")
+        }
     })
 }
 
 fn connect() -> Result<UnixStream> {
     let path = gg_ipc::socket_path();
-    UnixStream::connect(&path).with_context(|| format!("connecting to {} — is gglinuxd running?", path.display()))
+    UnixStream::connect(&path)
+        .with_context(|| format!("connecting to {} — is gglinuxd running?", path.display()))
 }
 
 /// Send one request and return its response, ignoring events that arrive first.
@@ -221,10 +234,12 @@ fn watch(stream: UnixStream) -> Result<()> {
 
 /// The value given as `--flag N` or `--flag=N`.
 fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter().enumerate().find_map(|(i, a)| match a.strip_prefix(flag)? {
-        "" => args.get(i + 1).map(String::as_str),
-        rest => rest.strip_prefix('='),
-    })
+    args.iter()
+        .enumerate()
+        .find_map(|(i, a)| match a.strip_prefix(flag)? {
+            "" => args.get(i + 1).map(String::as_str),
+            rest => rest.strip_prefix('='),
+        })
 }
 
 /// The applied DPI stages, and which one is active.
@@ -235,9 +250,19 @@ fn dpi_summary(dpi: &MouseDpi) -> String {
     let stages: Vec<String> = dpi
         .stages
         .iter()
-        .map(|d| if d.x == d.y { d.x.to_string() } else { format!("{}:{}", d.x, d.y) })
+        .map(|d| {
+            if d.x == d.y {
+                d.x.to_string()
+            } else {
+                format!("{}:{}", d.x, d.y)
+            }
+        })
         .collect();
-    format!("{} (stage {} active, counting from 0)", stages.join(","), dpi.active)
+    format!(
+        "{} (stage {} active, counting from 0)",
+        stages.join(","),
+        dpi.active
+    )
 }
 
 /// Parse `800,1600` or `400:800,1600:1600` into DPI stages.
@@ -286,10 +311,22 @@ mod tests {
         assert!(matches!(sends("clip save"), Request::SaveClip));
         assert!(matches!(sends("profile list"), Request::GetProfiles));
         assert!(matches!(sends("gamesense test"), Request::GamesenseTest));
-        assert!(matches!(sends("gamesense on"), Request::SetGamesenseEnabled { enabled: true }));
-        assert!(matches!(sends("gamesense off"), Request::SetGamesenseEnabled { enabled: false }));
+        assert!(matches!(
+            sends("gamesense on"),
+            Request::SetGamesenseEnabled { enabled: true }
+        ));
+        assert!(matches!(
+            sends("gamesense off"),
+            Request::SetGamesenseEnabled { enabled: false }
+        ));
         assert!(matches!(sends("mouse"), Request::GetMouseState));
-        assert!(matches!(sends("mouse polling 1000"), Request::SetMousePolling { hz: 1000, save: false }));
+        assert!(matches!(
+            sends("mouse polling 1000"),
+            Request::SetMousePolling {
+                hz: 1000,
+                save: false
+            }
+        ));
     }
 
     #[test]
@@ -302,10 +339,21 @@ mod tests {
 
     #[test]
     fn the_select_value_is_not_read_as_the_dpi_list() {
-        for line in ["mouse dpi --select 1 800,1600 --save", "mouse dpi 800,1600 --select 1 --save"] {
+        for line in [
+            "mouse dpi --select 1 800,1600 --save",
+            "mouse dpi 800,1600 --select 1 --save",
+        ] {
             match sends(line) {
-                Request::SetMouseDpi { stages, active, save } => {
-                    assert_eq!(stages, [DpiStage { x: 800, y: 800 }, DpiStage { x: 1600, y: 1600 }], "{line}");
+                Request::SetMouseDpi {
+                    stages,
+                    active,
+                    save,
+                } => {
+                    assert_eq!(
+                        stages,
+                        [DpiStage { x: 800, y: 800 }, DpiStage { x: 1600, y: 1600 }],
+                        "{line}"
+                    );
                     assert_eq!((active, save), (1, true), "{line}");
                 }
                 other => panic!("{line}: {other:?}"),
@@ -320,7 +368,11 @@ mod tests {
             active: 1,
         };
         let shown = dpi_summary(&applied);
-        let n = shown.split("stage ").nth(1).and_then(|s| s.split(' ').next()).unwrap();
+        let n = shown
+            .split("stage ")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .unwrap();
         // Passing back the number `ggctl mouse` shows keeps that stage active.
         match sends(&format!("mouse dpi 400,800,1600 --select {n}")) {
             Request::SetMouseDpi { active, .. } => assert_eq!(active, applied.active, "{shown}"),
@@ -330,7 +382,14 @@ mod tests {
 
     #[test]
     fn mistakes_are_errors() {
-        for bad in ["clip", "clip delete", "profile", "profile apply", "gamesense maybe", "frobnicate"] {
+        for bad in [
+            "clip",
+            "clip delete",
+            "profile",
+            "profile apply",
+            "gamesense maybe",
+            "frobnicate",
+        ] {
             assert!(parse(&args(bad)).is_err(), "{bad}");
         }
     }

@@ -45,7 +45,9 @@ impl Keyboard {
             .device_list()
             .find(|d| is_lighting(d))
             .map(|d| d.path().to_owned())
-            .ok_or_else(|| anyhow!("Apex Pro TKL Gen 3 lighting interface not found — is it plugged in?"))?;
+            .ok_or_else(|| {
+                anyhow!("Apex Pro TKL Gen 3 lighting interface not found — is it plugged in?")
+            })?;
         let device = api
             .open_path(&path)
             .with_context(|| format!("opening {}", path.to_string_lossy()))?;
@@ -56,7 +58,8 @@ impl Keyboard {
     /// Whether `api`'s device list, as last refreshed, still has this
     /// keyboard's lighting interface.
     pub fn is_listed(&self, api: &HidApi) -> bool {
-        api.device_list().any(|d| is_lighting(d) && d.path() == self.path.as_c_str())
+        api.device_list()
+            .any(|d| is_lighting(d) && d.path() == self.path.as_c_str())
     }
 
     /// Take over the lighting; send before the first frame.

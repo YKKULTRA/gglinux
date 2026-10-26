@@ -84,17 +84,23 @@ impl Graph {
 
     /// Real output devices: sinks that are not ours.
     pub fn physical_sinks(&self) -> impl Iterator<Item = &Node> {
-        self.nodes.iter().filter(|n| n.media_class == SINK && !config::is_ours(&n.name))
+        self.nodes
+            .iter()
+            .filter(|n| n.media_class == SINK && !config::is_ours(&n.name))
     }
 
     /// Real inputs: sources that are not ours.
     pub fn physical_sources(&self) -> impl Iterator<Item = &Node> {
-        self.nodes.iter().filter(|n| n.media_class == SOURCE && !config::is_ours(&n.name))
+        self.nodes
+            .iter()
+            .filter(|n| n.media_class == SOURCE && !config::is_ours(&n.name))
     }
 
     /// Apps playing audio. Our outlets are streams too, and are left out.
     pub fn app_streams(&self) -> impl Iterator<Item = &Node> {
-        self.nodes.iter().filter(|n| n.media_class == APP_STREAM && !config::is_ours(&n.name))
+        self.nodes
+            .iter()
+            .filter(|n| n.media_class == APP_STREAM && !config::is_ours(&n.name))
     }
 }
 
@@ -116,7 +122,10 @@ fn parse_node(object: &Value) -> Option<Node> {
 /// The loudest channel's volume, converted from PipeWire's linear amplitude to
 /// the cubic scale the mixer shows.
 fn volume(props: &Value) -> Option<f32> {
-    let channels = props.as_array()?.iter().find_map(|p| p["channelVolumes"].as_array())?;
+    let channels = props
+        .as_array()?
+        .iter()
+        .find_map(|p| p["channelVolumes"].as_array())?;
     let loudest = channels.iter().filter_map(Value::as_f64).reduce(f64::max)?;
     Some(loudest.cbrt() as f32)
 }
@@ -140,7 +149,9 @@ fn metadata_node(object: &Value, key: &str) -> Option<String> {
 fn node_name_of(value: &Value) -> Option<String> {
     match value {
         Value::Object(_) => value["name"].as_str().map(str::to_owned),
-        Value::String(s) => serde_json::from_str::<Value>(s).ok()?["name"].as_str().map(str::to_owned),
+        Value::String(s) => serde_json::from_str::<Value>(s).ok()?["name"]
+            .as_str()
+            .map(str::to_owned),
         _ => None,
     }
 }
@@ -161,7 +172,9 @@ mod tests {
         assert_eq!(arctis.media_class, "Audio/Sink");
         assert!(arctis.volume.is_some());
         assert!(g.physical_sinks().count() >= 4);
-        assert!(g.app_streams().any(|s| s.app_binary.as_deref() == Some("firefox")));
+        assert!(g
+            .app_streams()
+            .any(|s| s.app_binary.as_deref() == Some("firefox")));
         assert!(g.default_sink.is_some(), "the capture names a default sink");
     }
 
@@ -193,10 +206,15 @@ mod tests {
     #[test]
     fn apps_without_a_binary_are_keyed_by_their_alsa_name() {
         let g = Graph::parse(CAPTURE).unwrap();
-        let elisa = g.node("alsa_playback.elisa").expect("the capture has Elisa via PipeWire ALSA");
+        let elisa = g
+            .node("alsa_playback.elisa")
+            .expect("the capture has Elisa via PipeWire ALSA");
         assert_eq!(elisa.app_binary, None);
         assert_eq!(elisa.route_key().as_deref(), Some("elisa"));
-        let firefox = g.app_streams().find(|s| s.app_binary.as_deref() == Some("firefox")).unwrap();
+        let firefox = g
+            .app_streams()
+            .find(|s| s.app_binary.as_deref() == Some("firefox"))
+            .unwrap();
         assert_eq!(firefox.route_key().as_deref(), Some("firefox"));
     }
 
@@ -204,7 +222,11 @@ mod tests {
     fn the_cookie_tells_pipewire_starts_apart() {
         let json = r#"[{"id":0,"type":"PipeWire:Interface:Core","info":{"cookie":3377742783,"name":"pipewire-0"}}]"#;
         assert_eq!(Graph::parse(json).unwrap().cookie, Some(3377742783));
-        assert_eq!(Graph::parse(CAPTURE).unwrap().cookie, None, "a dump without the core has none");
+        assert_eq!(
+            Graph::parse(CAPTURE).unwrap().cookie,
+            None,
+            "a dump without the core has none"
+        );
     }
 
     #[test]
@@ -214,9 +236,21 @@ mod tests {
                         {"subject":0,"key":"default.audio.sink","value":{"name":"alsa_output.y"}},
                         {"subject":0,"key":"default.audio.source","value":{"name":"alsa_input.y"}}]}]"#;
         let g = Graph::parse(json).unwrap();
-        assert_eq!(g.default_sink.as_deref(), Some("bluez_output.away"), "the user's choice");
-        assert_eq!(g.current_sink.as_deref(), Some("alsa_output.y"), "what plays meanwhile");
-        assert_eq!(g.default_source.as_deref(), Some("alsa_input.y"), "nothing configured: the one in use");
+        assert_eq!(
+            g.default_sink.as_deref(),
+            Some("bluez_output.away"),
+            "the user's choice"
+        );
+        assert_eq!(
+            g.current_sink.as_deref(),
+            Some("alsa_output.y"),
+            "what plays meanwhile"
+        );
+        assert_eq!(
+            g.default_source.as_deref(),
+            Some("alsa_input.y"),
+            "nothing configured: the one in use"
+        );
         assert_eq!(g.current_source.as_deref(), Some("alsa_input.y"));
     }
 
@@ -224,7 +258,10 @@ mod tests {
     fn default_sink_may_be_a_json_string() {
         let json = r#"[{"id":39,"type":"PipeWire:Interface:Metadata","props":{"metadata.name":"default"},
             "metadata":[{"subject":0,"key":"default.audio.sink","type":"Spa:String:JSON","value":"{\"name\":\"alsa_output.y\"}"}]}]"#;
-        assert_eq!(Graph::parse(json).unwrap().default_sink.as_deref(), Some("alsa_output.y"));
+        assert_eq!(
+            Graph::parse(json).unwrap().default_sink.as_deref(),
+            Some("alsa_output.y")
+        );
     }
 
     #[test]
@@ -234,12 +271,19 @@ mod tests {
         assert!(g.physical_sources().any(|n| n.name == arctis));
         assert_eq!(g.default_source.as_deref(), Some(arctis));
         let ours = Graph::parse(&crate::testing::dump_with_source(
-            &[(1, "alsa_input.x", "Audio/Source", None), (2, "gglinux_mic", "Audio/Source", None)],
+            &[
+                (1, "alsa_input.x", "Audio/Source", None),
+                (2, "gglinux_mic", "Audio/Source", None),
+            ],
             "alsa_output.x",
             Some("alsa_input.x"),
         ))
         .unwrap();
-        assert_eq!(ours.physical_sources().map(|n| n.id).collect::<Vec<_>>(), [1], "the virtual mic is not an input");
+        assert_eq!(
+            ours.physical_sources().map(|n| n.id).collect::<Vec<_>>(),
+            [1],
+            "the virtual mic is not an input"
+        );
         assert_eq!(ours.default_source.as_deref(), Some("alsa_input.x"));
     }
 }

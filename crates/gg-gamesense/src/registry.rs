@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::paint::{paint, Reading};
-use crate::proto::{parse_rgb, valid_name, BindEvent, GameEvent, GameMetadata, Handler, MultipleEvents, RegisterEvent, Rgb};
+use crate::proto::{
+    parse_rgb, valid_name, BindEvent, GameEvent, GameMetadata, Handler, MultipleEvents,
+    RegisterEvent, Rgb,
+};
 
 /// Colours by HID code: what a game paints over the lighting.
 pub type Layer = HashMap<u8, Rgb>;
@@ -99,30 +102,65 @@ impl Registry {
     }
 
     pub fn register_event(&mut self, r: RegisterEvent) -> Result<(), String> {
-        self.define(&r.game, &r.event, r.min_value, r.max_value, r.icon_id, r.value_optional, None)
+        self.define(
+            &r.game,
+            &r.event,
+            r.min_value,
+            r.max_value,
+            r.icon_id,
+            r.value_optional,
+            None,
+        )
     }
 
     pub fn bind_event(&mut self, b: BindEvent) -> Result<(), String> {
         if b.handlers.len() > MAX_HANDLERS {
             return Err(format!("at most {MAX_HANDLERS} handlers per event"));
         }
-        let parsed = b.handlers.iter().map(Handler::parse).collect::<Result<Vec<_>, _>>()?;
+        let parsed = b
+            .handlers
+            .iter()
+            .map(Handler::parse)
+            .collect::<Result<Vec<_>, _>>()?;
         let bytes = json_bytes(&b.handlers);
-        let replaced = self.games.get(&b.game).and_then(|g| g.events.get(&b.event)).map_or(0, |e| e.bytes);
+        let replaced = self
+            .games
+            .get(&b.game)
+            .and_then(|g| g.events.get(&b.event))
+            .map_or(0, |e| e.bytes);
         if self.handler_bytes() - replaced + bytes > MAX_HANDLER_BYTES {
-            return Err(format!("at most {} KiB of handlers in all; remove a game to make room", MAX_HANDLER_BYTES / 1024));
+            return Err(format!(
+                "at most {} KiB of handlers in all; remove a game to make room",
+                MAX_HANDLER_BYTES / 1024
+            ));
         }
-        self.define(&b.game, &b.event, b.min_value, b.max_value, b.icon_id, b.value_optional, Some((b.handlers, parsed, bytes)))
+        self.define(
+            &b.game,
+            &b.event,
+            b.min_value,
+            b.max_value,
+            b.icon_id,
+            b.value_optional,
+            Some((b.handlers, parsed, bytes)),
+        )
     }
 
     pub fn game_event(&mut self, e: GameEvent, now: f64) -> Result<(), String> {
-        let game = self.games.get_mut(&e.game).ok_or_else(|| format!("unknown game {}", e.game))?;
+        let game = self
+            .games
+            .get_mut(&e.game)
+            .ok_or_else(|| format!("unknown game {}", e.game))?;
         apply(game, &e.event, e.data, now)
     }
 
     pub fn multiple_events(&mut self, m: MultipleEvents, now: f64) -> Result<(), String> {
-        let game = self.games.get_mut(&m.game).ok_or_else(|| format!("unknown game {}", m.game))?;
-        m.events.into_iter().try_for_each(|item| apply(game, &item.event, item.data, now))
+        let game = self
+            .games
+            .get_mut(&m.game)
+            .ok_or_else(|| format!("unknown game {}", m.game))?;
+        m.events
+            .into_iter()
+            .try_for_each(|item| apply(game, &item.event, item.data, now))
     }
 
     pub fn heartbeat(&mut self, game: &str, now: f64) -> Result<(), String> {
@@ -138,11 +176,18 @@ impl Registry {
     }
 
     pub fn remove_game(&mut self, game: &str) -> Result<(), String> {
-        self.games.remove(game).map(|_| ()).ok_or_else(|| format!("unknown game {game}"))
+        self.games
+            .remove(game)
+            .map(|_| ())
+            .ok_or_else(|| format!("unknown game {game}"))
     }
 
     pub fn remove_event(&mut self, game: &str, event: &str) -> Result<(), String> {
-        self.game_mut(game)?.events.remove(event).map(|_| ()).ok_or_else(|| format!("unknown event {event}"))
+        self.game_mut(game)?
+            .events
+            .remove(event)
+            .map(|_| ())
+            .ok_or_else(|| format!("unknown event {event}"))
     }
 
     pub fn set_enabled(&mut self, game: &str, enabled: bool) -> Result<(), String> {
@@ -155,7 +200,11 @@ impl Registry {
         self.games
             .iter()
             .filter(|(_, g)| g.enabled && !g.stopped)
-            .filter_map(|(name, g)| g.last_activity.filter(|&t| now - t <= f64::from(g.timer_ms) / 1000.0).map(|t| (name, t)))
+            .filter_map(|(name, g)| {
+                g.last_activity
+                    .filter(|&t| now - t <= f64::from(g.timer_ms) / 1000.0)
+                    .map(|t| (name, t))
+            })
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(name, _)| name.as_str())
     }
@@ -163,8 +212,11 @@ impl Registry {
     /// What the active game paints now; `None` when no game is active or it paints nothing.
     pub fn paint(&self, now: f64) -> Option<Layer> {
         let game = &self.games[self.active_game(now)?];
-        let mut events: Vec<&Event> =
-            game.events.values().filter(|e| e.received && (e.value.is_some() || e.saved.value_optional)).collect();
+        let mut events: Vec<&Event> = game
+            .events
+            .values()
+            .filter(|e| e.received && (e.value.is_some() || e.saved.value_optional))
+            .collect();
         events.sort_by(|a, b| a.changed_at.total_cmp(&b.changed_at)); // later changes paint over earlier ones
         let mut layer = Layer::new();
         for e in events {
@@ -225,15 +277,32 @@ impl Registry {
                     .filter(|e| valid_name(&e.name))
                     .take(MAX_EVENTS)
                     .map(|e| {
-                        let handlers = e.handlers.iter().filter_map(|h| Handler::parse(h).ok()).collect();
+                        let handlers = e
+                            .handlers
+                            .iter()
+                            .filter_map(|h| Handler::parse(h).ok())
+                            .collect();
                         let bytes = json_bytes(&e.handlers);
-                        (e.name.clone(), Event { saved: e, handlers, bytes, value: None, frame: None, received: false, changed_at: 0.0 })
+                        (
+                            e.name.clone(),
+                            Event {
+                                saved: e,
+                                handlers,
+                                bytes,
+                                value: None,
+                                frame: None,
+                                received: false,
+                                changed_at: 0.0,
+                            },
+                        )
                     })
                     .collect();
                 let game = Game {
                     display_name: g.display_name,
                     developer: g.developer,
-                    timer_ms: g.deinitialize_timer_length_ms.clamp(*TIMER_MS.start(), *TIMER_MS.end()),
+                    timer_ms: g
+                        .deinitialize_timer_length_ms
+                        .clamp(*TIMER_MS.start(), *TIMER_MS.end()),
                     enabled: g.enabled,
                     events,
                     last_activity: None,
@@ -247,11 +316,17 @@ impl Registry {
 
     /// Handler JSON kept across every game.
     fn handler_bytes(&self) -> usize {
-        self.games.values().flat_map(|g| g.events.values()).map(|e| e.bytes).sum()
+        self.games
+            .values()
+            .flat_map(|g| g.events.values())
+            .map(|e| e.bytes)
+            .sum()
     }
 
     fn game_mut(&mut self, game: &str) -> Result<&mut Game, String> {
-        self.games.get_mut(game).ok_or_else(|| format!("unknown game {game}"))
+        self.games
+            .get_mut(game)
+            .ok_or_else(|| format!("unknown game {game}"))
     }
 
     fn game_or_new(&mut self, name: &str) -> Result<&mut Game, String> {
@@ -296,7 +371,14 @@ impl Registry {
             return Err(format!("at most {MAX_EVENTS} events per game"));
         }
         let e = g.events.entry(event.to_owned()).or_insert_with(|| Event {
-            saved: SavedEvent { name: event.to_owned(), min_value: 0, max_value: 100, icon_id: 0, value_optional: false, handlers: Vec::new() },
+            saved: SavedEvent {
+                name: event.to_owned(),
+                min_value: 0,
+                max_value: 100,
+                icon_id: 0,
+                value_optional: false,
+                handlers: Vec::new(),
+            },
             handlers: Vec::new(),
             bytes: 0,
             value: None,
@@ -318,9 +400,20 @@ impl Registry {
 }
 
 /// Record one event's data on its game.
-fn apply(game: &mut Game, event: &str, data: crate::proto::EventData, now: f64) -> Result<(), String> {
-    let e = game.events.get_mut(event).ok_or_else(|| format!("unknown event {event}; register or bind it first"))?;
-    let value = data.value.filter(|v| v.is_finite()).map(|v| v.round() as i64);
+fn apply(
+    game: &mut Game,
+    event: &str,
+    data: crate::proto::EventData,
+    now: f64,
+) -> Result<(), String> {
+    let e = game
+        .events
+        .get_mut(event)
+        .ok_or_else(|| format!("unknown event {event}; register or bind it first"))?;
+    let value = data
+        .value
+        .filter(|v| v.is_finite())
+        .map(|v| v.round() as i64);
     if value.is_none() && !e.saved.value_optional {
         return Err(format!("event {event} needs data.value"));
     }
@@ -361,7 +454,8 @@ mod tests {
     use serde_json::json;
 
     fn bind(game: &str, event: &str, handlers: Value) -> BindEvent {
-        serde_json::from_value(json!({ "game": game, "event": event, "handlers": handlers })).unwrap()
+        serde_json::from_value(json!({ "game": game, "event": event, "handlers": handlers }))
+            .unwrap()
     }
 
     fn fkeys_bar() -> Value {
@@ -370,7 +464,13 @@ mod tests {
     }
 
     fn send(r: &mut Registry, game: &str, event: &str, value: f64, now: f64) -> Result<(), String> {
-        r.game_event(serde_json::from_value(json!({ "game": game, "event": event, "data": { "value": value } })).unwrap(), now)
+        r.game_event(
+            serde_json::from_value(
+                json!({ "game": game, "event": event, "data": { "value": value } }),
+            )
+            .unwrap(),
+            now,
+        )
     }
 
     fn with_bar() -> Registry {
@@ -396,9 +496,16 @@ mod tests {
         assert!(send(&mut r, "G", "NOPE", 1.0, 0.0).is_err());
         assert!(r.bind_event(bind("lower", "E", fkeys_bar())).is_err());
         assert!(r.heartbeat("NOPE", 0.0).is_err());
-        let missing = serde_json::from_value(json!({ "game": "G", "event": "HEALTH", "data": {} })).unwrap();
-        assert!(r.game_event(missing, 0.0).is_err(), "value required unless value_optional");
-        let min_over_max = serde_json::from_value(json!({ "game": "G", "event": "E", "min_value": 5, "max_value": 1 })).unwrap();
+        let missing =
+            serde_json::from_value(json!({ "game": "G", "event": "HEALTH", "data": {} })).unwrap();
+        assert!(
+            r.game_event(missing, 0.0).is_err(),
+            "value required unless value_optional"
+        );
+        let min_over_max = serde_json::from_value(
+            json!({ "game": "G", "event": "E", "min_value": 5, "max_value": 1 }),
+        )
+        .unwrap();
         assert!(r.register_event(min_over_max).is_err());
     }
 
@@ -406,16 +513,28 @@ mod tests {
     fn limits_are_enforced() {
         let mut r = Registry::default();
         for i in 0..MAX_GAMES {
-            r.game_metadata(serde_json::from_value(json!({ "game": format!("G{i}") })).unwrap()).unwrap();
+            r.game_metadata(serde_json::from_value(json!({ "game": format!("G{i}") })).unwrap())
+                .unwrap();
         }
-        assert!(r.game_metadata(serde_json::from_value(json!({ "game": "ONE_MORE" })).unwrap()).is_err());
+        assert!(r
+            .game_metadata(serde_json::from_value(json!({ "game": "ONE_MORE" })).unwrap())
+            .is_err());
         let mut r = Registry::default();
         for i in 0..MAX_EVENTS {
-            r.register_event(serde_json::from_value(json!({ "game": "G", "event": format!("E{i}") })).unwrap()).unwrap();
+            r.register_event(
+                serde_json::from_value(json!({ "game": "G", "event": format!("E{i}") })).unwrap(),
+            )
+            .unwrap();
         }
-        assert!(r.register_event(serde_json::from_value(json!({ "game": "G", "event": "ONE_MORE" })).unwrap()).is_err());
+        assert!(r
+            .register_event(
+                serde_json::from_value(json!({ "game": "G", "event": "ONE_MORE" })).unwrap()
+            )
+            .is_err());
         let many = Value::Array(vec![fkeys_bar()[0].clone(); MAX_HANDLERS + 1]);
-        assert!(Registry::default().bind_event(bind("G", "E", many)).is_err());
+        assert!(Registry::default()
+            .bind_event(bind("G", "E", many))
+            .is_err());
     }
 
     #[test]
@@ -424,25 +543,42 @@ mod tests {
         let big = json!([{ "device-type": "tactile", "pattern": vec![0; 8_000] }]);
         let mut r = Registry::default();
         let full = (0..MAX_EVENTS)
-            .find(|i| r.bind_event(bind("G", &format!("E{i}"), big.clone())).is_err())
+            .find(|i| {
+                r.bind_event(bind("G", &format!("E{i}"), big.clone()))
+                    .is_err()
+            })
             .expect("refused before every event is bound");
-        assert!(full > 1 && r.handler_bytes() <= MAX_HANDLER_BYTES, "{full} fit");
-        r.bind_event(bind("G", "E1", big.clone())).expect("a rebind counts its new handlers, not both");
+        assert!(
+            full > 1 && r.handler_bytes() <= MAX_HANDLER_BYTES,
+            "{full} fit"
+        );
+        r.bind_event(bind("G", "E1", big.clone()))
+            .expect("a rebind counts its new handlers, not both");
         r.remove_event("G", "E0").unwrap();
-        r.bind_event(bind("G", &format!("E{full}"), big)).expect("a removed event makes room");
+        r.bind_event(bind("G", &format!("E{full}"), big))
+            .expect("a removed event makes room");
     }
 
     #[test]
     fn a_frame_keeps_only_the_colours_its_handlers_read() {
         let mut r = Registry::default();
-        r.bind_event(bind("G", "TINT", json!([{ "device-type": "keyboard", "zone": "w", "mode": "context-color",
-            "context-frame-key": "tint" }]))).unwrap();
+        r.bind_event(bind(
+            "G",
+            "TINT",
+            json!([{ "device-type": "keyboard", "zone": "w", "mode": "context-color",
+            "context-frame-key": "tint" }]),
+        ))
+        .unwrap();
         let event = json!({ "game": "G", "event": "TINT", "data": { "value": 1, "frame": {
             "tint": { "red": 1, "green": 2, "blue": 3, "padding": vec![0; 16] }, "unread": vec![0; 16] } } });
-        r.game_event(serde_json::from_value(event).unwrap(), 0.0).unwrap();
+        r.game_event(serde_json::from_value(event).unwrap(), 0.0)
+            .unwrap();
         assert_eq!(r.paint(0.0).unwrap()[&0x1A], Rgb { r: 1, g: 2, b: 3 });
         let kept = r.games["G"].events["TINT"].frame.clone().map(Value::Object);
-        assert_eq!(kept, Some(json!({ "tint": { "red": 1, "green": 2, "blue": 3 } })));
+        assert_eq!(
+            kept,
+            Some(json!({ "tint": { "red": 1, "green": 2, "blue": 3 } }))
+        );
     }
 
     #[test]
@@ -453,8 +589,16 @@ mod tests {
         assert_eq!(r.active_game(15.1), None, "the default timer is 15 s");
         r.heartbeat("G", 14.0).unwrap();
         assert_eq!(r.active_game(28.0), Some("G"));
-        r.game_metadata(serde_json::from_value(json!({ "game": "G", "deinitialize_timer_length_ms": 100 })).unwrap()).unwrap();
-        assert_eq!(r.active_game(15.2), None, "clamped up to 1 s: 14 + 1 < 15.2");
+        r.game_metadata(
+            serde_json::from_value(json!({ "game": "G", "deinitialize_timer_length_ms": 100 }))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            r.active_game(15.2),
+            None,
+            "clamped up to 1 s: 14 + 1 < 15.2"
+        );
         assert_eq!(r.active_game(14.9), Some("G"));
     }
 
@@ -480,8 +624,13 @@ mod tests {
     #[test]
     fn the_most_recently_active_game_is_shown() {
         let mut r = with_bar();
-        r.bind_event(bind("H", "AMMO", json!([{ "device-type": "keyboard", "zone": "function-keys",
-            "color": { "red": 0, "green": 0, "blue": 255 } }]))).unwrap();
+        r.bind_event(bind(
+            "H",
+            "AMMO",
+            json!([{ "device-type": "keyboard", "zone": "function-keys",
+            "color": { "red": 0, "green": 0, "blue": 255 } }]),
+        ))
+        .unwrap();
         send(&mut r, "G", "HEALTH", 100.0, 0.0).unwrap();
         send(&mut r, "H", "AMMO", 1.0, 1.0).unwrap();
         assert_eq!(r.active_game(2.0), Some("H"));
@@ -491,13 +640,26 @@ mod tests {
     #[test]
     fn the_most_recently_changed_event_wins_and_repeats_do_not_count_as_changes() {
         let mut r = with_bar();
-        r.bind_event(bind("G", "AMMO", json!([{ "device-type": "keyboard", "zone": "f1",
-            "color": { "red": 0, "green": 0, "blue": 255 } }]))).unwrap();
+        r.bind_event(bind(
+            "G",
+            "AMMO",
+            json!([{ "device-type": "keyboard", "zone": "f1",
+            "color": { "red": 0, "green": 0, "blue": 255 } }]),
+        ))
+        .unwrap();
         send(&mut r, "G", "HEALTH", 100.0, 0.0).unwrap();
         send(&mut r, "G", "AMMO", 5.0, 1.0).unwrap();
-        assert_eq!(r.paint(1.5).unwrap()[&0x3A], Rgb { r: 0, g: 0, b: 255 }, "AMMO changed last");
+        assert_eq!(
+            r.paint(1.5).unwrap()[&0x3A],
+            Rgb { r: 0, g: 0, b: 255 },
+            "AMMO changed last"
+        );
         send(&mut r, "G", "HEALTH", 100.0, 2.0).unwrap();
-        assert_eq!(r.paint(2.5).unwrap()[&0x3A], Rgb { r: 0, g: 0, b: 255 }, "same HEALTH value: not a change");
+        assert_eq!(
+            r.paint(2.5).unwrap()[&0x3A],
+            Rgb { r: 0, g: 0, b: 255 },
+            "same HEALTH value: not a change"
+        );
         send(&mut r, "G", "HEALTH", 99.0, 3.0).unwrap();
         assert_eq!(r.paint(3.5).unwrap()[&0x3A], Rgb { r: 255, g: 0, b: 0 });
     }
@@ -506,8 +668,13 @@ mod tests {
     fn a_value_newer_than_the_frame_starts_its_flash_lit() {
         // The keyboard reads the clock before it takes the lock, so a value can land in between.
         let mut r = Registry::default();
-        r.bind_event(bind("G", "HEALTH", json!([{ "device-type": "keyboard", "zone": "f1",
-            "color": { "red": 255, "green": 0, "blue": 0 }, "rate": { "frequency": 4 } }]))).unwrap();
+        r.bind_event(bind(
+            "G",
+            "HEALTH",
+            json!([{ "device-type": "keyboard", "zone": "f1",
+            "color": { "red": 255, "green": 0, "blue": 0 }, "rate": { "frequency": 4 } }]),
+        ))
+        .unwrap();
         send(&mut r, "G", "HEALTH", 10.0, 1.0).unwrap();
         assert_eq!(r.paint(0.999).unwrap()[&0x3A], Rgb { r: 255, g: 0, b: 0 });
     }
@@ -515,10 +682,19 @@ mod tests {
     #[test]
     fn a_game_with_only_unsupported_handlers_is_not_an_overlay() {
         let mut r = Registry::default();
-        r.bind_event(bind("G", "SCREEN", json!([{ "device-type": "screened", "zone": "one", "mode": "screen" }]))).unwrap();
+        r.bind_event(bind(
+            "G",
+            "SCREEN",
+            json!([{ "device-type": "screened", "zone": "one", "mode": "screen" }]),
+        ))
+        .unwrap();
         send(&mut r, "G", "SCREEN", 1.0, 0.0).unwrap();
         assert_eq!(r.active_game(0.1), Some("G"));
-        assert_eq!(r.paint(0.1), None, "an empty layer would take the keyboard for nothing");
+        assert_eq!(
+            r.paint(0.1),
+            None,
+            "an empty layer would take the keyboard for nothing"
+        );
     }
 
     #[test]
@@ -527,14 +703,22 @@ mod tests {
         let handlers = json!([{ "device-type": "rgb-per-key-zones", "mode": "bitmap" }, fkeys_bar()[0].clone()]);
         r.bind_event(bind("G", "HEALTH", handlers)).unwrap();
         send(&mut r, "G", "HEALTH", 100.0, 0.0).unwrap();
-        assert_eq!(r.paint(0.5).unwrap().len(), 12, "the F-key bar still paints");
+        assert_eq!(
+            r.paint(0.5).unwrap().len(),
+            12,
+            "the F-key bar still paints"
+        );
     }
 
     #[test]
     fn saved_games_restore_with_their_bindings_but_not_their_values() {
         let mut r = with_bar();
-        r.game_metadata(serde_json::from_value(json!({ "game": "G", "game_display_name": "Game",
-            "developer": "Dev", "deinitialize_timer_length_ms": 5000 })).unwrap()).unwrap();
+        r.game_metadata(
+            serde_json::from_value(json!({ "game": "G", "game_display_name": "Game",
+            "developer": "Dev", "deinitialize_timer_length_ms": 5000 }))
+            .unwrap(),
+        )
+        .unwrap();
         r.set_enabled("G", false).unwrap();
         send(&mut r, "G", "HEALTH", 70.0, 0.0).unwrap();
         let saved = r.saved();
@@ -542,7 +726,15 @@ mod tests {
         let mut back = Registry::restore(serde_json::from_str(&json).unwrap());
         assert_eq!(back.saved(), saved);
         let s = &back.summaries(0.0)[0];
-        assert_eq!((s.display_name.as_deref(), s.developer.as_deref(), s.enabled, s.active), (Some("Game"), Some("Dev"), false, false));
+        assert_eq!(
+            (
+                s.display_name.as_deref(),
+                s.developer.as_deref(),
+                s.enabled,
+                s.active
+            ),
+            (Some("Game"), Some("Dev"), false, false)
+        );
         back.set_enabled("G", true).unwrap();
         assert_eq!(back.paint(0.0), None, "values are not saved");
         send(&mut back, "G", "HEALTH", 70.0, 1.0).unwrap();

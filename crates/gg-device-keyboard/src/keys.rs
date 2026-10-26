@@ -56,7 +56,10 @@ pub fn boot_keys(report: &[u8]) -> Option<KeySet> {
             set.insert(FIRST_MODIFIER + bit);
         }
     }
-    slots.iter().filter(|&&c| c != 0).for_each(|&c| set.insert(c));
+    slots
+        .iter()
+        .filter(|&&c| c != 0)
+        .for_each(|&c| set.insert(c));
     Some(set)
 }
 
@@ -90,7 +93,11 @@ const MENU_LED: u8 = 0xE7;
 /// The HID code of the LED on the key that typed `usage`: the same code for
 /// every key but Menu.
 pub fn led(usage: u8) -> u8 {
-    if usage == APPLICATION { MENU_LED } else { usage }
+    if usage == APPLICATION {
+        MENU_LED
+    } else {
+        usage
+    }
 }
 
 #[cfg(test)]
@@ -112,13 +119,23 @@ mod tests {
     fn boot_reports_give_modifiers_and_keys() {
         // Left Ctrl + Right Shift held, A and Enter pressed.
         let report = [0b0010_0001, 0, 0x04, 0x28, 0, 0, 0, 0];
-        assert_eq!(codes(boot_keys(&report).unwrap()), vec![0x04, 0x28, 0xE0, 0xE5]);
-        assert_eq!(codes(boot_keys(&[0; 8]).unwrap()), Vec::<u8>::new(), "all released");
+        assert_eq!(
+            codes(boot_keys(&report).unwrap()),
+            vec![0x04, 0x28, 0xE0, 0xE5]
+        );
+        assert_eq!(
+            codes(boot_keys(&[0; 8]).unwrap()),
+            Vec::<u8>::new(),
+            "all released"
+        );
     }
 
     #[test]
     fn boot_rollover_errors_and_wrong_lengths_are_not_a_state() {
-        assert!(boot_keys(&[0, 0, 1, 1, 1, 1, 1, 1]).is_none(), "ErrorRollOver says nothing about which keys");
+        assert!(
+            boot_keys(&[0, 0, 1, 1, 1, 1, 1, 1]).is_none(),
+            "ErrorRollOver says nothing about which keys"
+        );
         assert!(boot_keys(&[0; 7]).is_none());
         assert!(boot_keys(&[0; 9]).is_none());
     }
@@ -135,9 +152,20 @@ mod tests {
 
     #[test]
     fn pressed_reports_only_new_keys() {
-        assert_eq!(pressed(set(&[]), set(&[0x04])).collect::<Vec<_>>(), vec![0x04]);
-        assert_eq!(pressed(set(&[0x04]), set(&[0x04, 0x05])).collect::<Vec<_>>(), vec![0x05], "a held key does not fire again");
-        assert_eq!(pressed(set(&[0x04, 0x05]), set(&[0x05])).count(), 0, "releases are not presses");
+        assert_eq!(
+            pressed(set(&[]), set(&[0x04])).collect::<Vec<_>>(),
+            vec![0x04]
+        );
+        assert_eq!(
+            pressed(set(&[0x04]), set(&[0x04, 0x05])).collect::<Vec<_>>(),
+            vec![0x05],
+            "a held key does not fire again"
+        );
+        assert_eq!(
+            pressed(set(&[0x04, 0x05]), set(&[0x05])).count(),
+            0,
+            "releases are not presses"
+        );
     }
 
     #[test]
@@ -148,7 +176,10 @@ mod tests {
             .chain(0xE0..=0xE6); // the modifiers; there's no Right GUI, and Fn types nothing
         for usage in typed {
             let led = led(usage);
-            assert!(ANSI_TKL.iter().any(|k| k.0 == led), "usage {usage:#04x} lights nothing");
+            assert!(
+                ANSI_TKL.iter().any(|k| k.0 == led),
+                "usage {usage:#04x} lights nothing"
+            );
         }
         let menu = ANSI_TKL.iter().find(|k| k.1 == "Menu").unwrap().0;
         assert_eq!(led(APPLICATION), menu, "the key the layout calls Menu");

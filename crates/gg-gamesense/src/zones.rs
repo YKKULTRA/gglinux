@@ -44,7 +44,10 @@ fn key(name: &str) -> Option<u8> {
             return Some(0x04 + (b - b'a'));
         }
     }
-    if let Some(digit) = name.strip_prefix("keyboard-").and_then(|d| d.parse::<u8>().ok()) {
+    if let Some(digit) = name
+        .strip_prefix("keyboard-")
+        .and_then(|d| d.parse::<u8>().ok())
+    {
         return match digit {
             0 => Some(0x27),
             1..=9 => Some(0x1E + digit - 1),
@@ -106,15 +109,31 @@ mod tests {
     use gg_device_keyboard::layout::ANSI_TKL;
 
     const GROUPS: [&str; 15] = [
-        "function-keys", "number-keys", "q-row", "a-row", "z-row", "main-keyboard", "nav-cluster",
-        "arrows", "all", "keypad", "keypad-nums", "macro-keys", "all-macro-keys", "logo", "esc-not-a-zone",
+        "function-keys",
+        "number-keys",
+        "q-row",
+        "a-row",
+        "z-row",
+        "main-keyboard",
+        "nav-cluster",
+        "arrows",
+        "all",
+        "keypad",
+        "keypad-nums",
+        "macro-keys",
+        "all-macro-keys",
+        "logo",
+        "esc-not-a-zone",
     ];
 
     #[test]
     fn every_zone_is_on_the_board_without_repeats() {
         for zone in GROUPS {
             let keys = named(zone);
-            assert!(keys.iter().all(|&c| on_board(c)), "{zone} has a key the TKL lacks");
+            assert!(
+                keys.iter().all(|&c| on_board(c)),
+                "{zone} has a key the TKL lacks"
+            );
             let mut sorted = keys.clone();
             sorted.sort_unstable();
             sorted.dedup();
@@ -126,27 +145,61 @@ mod tests {
     fn groups_hold_their_keys_in_reading_order() {
         assert_eq!(named("function-keys"), (0x3A..=0x45).collect::<Vec<u8>>());
         assert_eq!(named("number-keys"), (0x1E..=0x27).collect::<Vec<u8>>());
-        assert_eq!(named("q-row"), vec![0x14, 0x1A, 0x08, 0x15, 0x17, 0x1C, 0x18, 0x0C, 0x12, 0x13]);
-        assert_eq!(named("a-row"), vec![0x04, 0x16, 0x07, 0x09, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F]);
-        assert_eq!(named("z-row"), vec![0x1D, 0x1B, 0x06, 0x19, 0x05, 0x11, 0x10]);
-        assert_eq!(named("nav-cluster"), vec![0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E]);
-        assert_eq!(named("arrows"), vec![0x52, 0x50, 0x51, 0x4F], "↑ first: it's the higher row");
+        assert_eq!(
+            named("q-row"),
+            vec![0x14, 0x1A, 0x08, 0x15, 0x17, 0x1C, 0x18, 0x0C, 0x12, 0x13]
+        );
+        assert_eq!(
+            named("a-row"),
+            vec![0x04, 0x16, 0x07, 0x09, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F]
+        );
+        assert_eq!(
+            named("z-row"),
+            vec![0x1D, 0x1B, 0x06, 0x19, 0x05, 0x11, 0x10]
+        );
+        assert_eq!(
+            named("nav-cluster"),
+            vec![0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E]
+        );
+        assert_eq!(
+            named("arrows"),
+            vec![0x52, 0x50, 0x51, 0x4F],
+            "↑ first: it's the higher row"
+        );
         assert_eq!(named("all").len(), ANSI_TKL.len());
     }
 
     #[test]
     fn main_keyboard_is_the_alphanumeric_block() {
         let main = named("main-keyboard");
-        assert!(main.contains(&0x1A) && main.contains(&0x2C) && main.contains(&0xE0), "W, Space, Ctrl");
+        assert!(
+            main.contains(&0x1A) && main.contains(&0x2C) && main.contains(&0xE0),
+            "W, Space, Ctrl"
+        );
         for not_main in [0x29, 0x3A, 0x49, 0x52] {
-            assert!(!main.contains(&not_main), "Esc, F1, Ins and ↑ are outside it: {not_main:#04x}");
+            assert!(
+                !main.contains(&not_main),
+                "Esc, F1, Ins and ↑ are outside it: {not_main:#04x}"
+            );
         }
         assert_eq!(main[0], 0x35, "starts at ` on the number row");
     }
 
     #[test]
     fn zones_this_keyboard_lacks_are_empty() {
-        for zone in ["keypad", "keypad-nums", "macro-keys", "all-macro-keys", "logo", "keypad-5", "m0", "pound", "ss-key", "r-win", "no-such-zone"] {
+        for zone in [
+            "keypad",
+            "keypad-nums",
+            "macro-keys",
+            "all-macro-keys",
+            "logo",
+            "keypad-5",
+            "m0",
+            "pound",
+            "ss-key",
+            "r-win",
+            "no-such-zone",
+        ] {
             assert!(named(zone).is_empty(), "{zone}");
         }
     }
@@ -162,6 +215,10 @@ mod tests {
         assert_eq!(named("l-shift"), vec![0xE1]);
         assert_eq!(named("uparrow"), vec![0x52]);
         let menu = ANSI_TKL.iter().find(|k| k.1 == "Menu").unwrap().0;
-        assert_eq!(named("win-menu"), vec![menu], "the key the layout calls Menu");
+        assert_eq!(
+            named("win-menu"),
+            vec![menu],
+            "the key the layout calls Menu"
+        );
     }
 }

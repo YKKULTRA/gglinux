@@ -22,21 +22,72 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 pub enum Command {
     GetState(Reply<SonarState>),
-    SetEnabled { enabled: bool, reply: Reply<()> },
-    SetOutput { name: String, reply: Reply<()> },
-    SetVolume { channel: Channel, volume: f32, reply: Reply<()> },
-    SetChatMix { balance: f32, reply: Reply<()> },
-    SetAppChannel { binary: String, channel: Channel, reply: Reply<()> },
-    SetChannelEq { channel: Channel, bands: Vec<EqBand>, reply: Reply<()> },
-    SetHeadphoneEq { eq: HeadphoneEq, reply: Reply<()> },
-    ImportAutoEq { text: String, name: Option<String>, reply: Reply<()> },
-    SetMicInput { name: String, reply: Reply<()> },
-    SetMicSettings { settings: MicSettings, reply: Reply<()> },
-    SetMicVolume { volume: f32, reply: Reply<()> },
-    SetStreamer { enabled: bool, reply: Reply<()> },
-    SetStreamVolume { channel: Channel, volume: f32, reply: Reply<()> },
-    SetStreamMaster { volume: f32, reply: Reply<()> },
-    SetSmartVolume { channel: Channel, settings: SmartVolume, reply: Reply<()> },
+    SetEnabled {
+        enabled: bool,
+        reply: Reply<()>,
+    },
+    SetOutput {
+        name: String,
+        reply: Reply<()>,
+    },
+    SetVolume {
+        channel: Channel,
+        volume: f32,
+        reply: Reply<()>,
+    },
+    SetChatMix {
+        balance: f32,
+        reply: Reply<()>,
+    },
+    SetAppChannel {
+        binary: String,
+        channel: Channel,
+        reply: Reply<()>,
+    },
+    SetChannelEq {
+        channel: Channel,
+        bands: Vec<EqBand>,
+        reply: Reply<()>,
+    },
+    SetHeadphoneEq {
+        eq: HeadphoneEq,
+        reply: Reply<()>,
+    },
+    ImportAutoEq {
+        text: String,
+        name: Option<String>,
+        reply: Reply<()>,
+    },
+    SetMicInput {
+        name: String,
+        reply: Reply<()>,
+    },
+    SetMicSettings {
+        settings: MicSettings,
+        reply: Reply<()>,
+    },
+    SetMicVolume {
+        volume: f32,
+        reply: Reply<()>,
+    },
+    SetStreamer {
+        enabled: bool,
+        reply: Reply<()>,
+    },
+    SetStreamVolume {
+        channel: Channel,
+        volume: f32,
+        reply: Reply<()>,
+    },
+    SetStreamMaster {
+        volume: f32,
+        reply: Reply<()>,
+    },
+    SetSmartVolume {
+        channel: Channel,
+        settings: SmartVolume,
+        reply: Reply<()>,
+    },
 }
 
 #[derive(Clone)]
@@ -75,7 +126,11 @@ fn worker(
     keyboard: keyboard::Handle,
     mixed_tx: watch::Sender<Option<String>>,
 ) {
-    let mut sonar = Sonar::new(SystemTools, gg_audio::settings::path(), gg_audio::config::dropin_path());
+    let mut sonar = Sonar::new(
+        SystemTools,
+        gg_audio::settings::path(),
+        gg_audio::config::dropin_path(),
+    );
     let mut published: Option<SonarState> = None;
     // What the keyboard's visualizer and clips were last told to listen to;
     // they start on the default output.
@@ -121,28 +176,48 @@ fn handle(command: Command, sonar: &mut Sonar<SystemTools>) {
             let _ = reply.send(Ok(sonar.state()));
         }
         Command::SetEnabled { enabled, reply } => {
-            let result = if enabled { sonar.enable() } else { sonar.disable() };
+            let result = if enabled {
+                sonar.enable()
+            } else {
+                sonar.disable()
+            };
             let _ = reply.send(result.map_err(text));
         }
         Command::SetOutput { name, reply } => {
             let _ = reply.send(sonar.set_output(&name).map_err(text));
         }
-        Command::SetVolume { channel, volume, reply } => {
+        Command::SetVolume {
+            channel,
+            volume,
+            reply,
+        } => {
             let _ = reply.send(sonar.set_volume(channel, volume).map_err(text));
         }
         Command::SetChatMix { balance, reply } => {
             let _ = reply.send(sonar.set_chatmix(balance).map_err(text));
         }
-        Command::SetAppChannel { binary, channel, reply } => {
+        Command::SetAppChannel {
+            binary,
+            channel,
+            reply,
+        } => {
             let _ = reply.send(sonar.set_app_channel(&binary, channel).map_err(text));
         }
-        Command::SetChannelEq { channel, bands, reply } => {
+        Command::SetChannelEq {
+            channel,
+            bands,
+            reply,
+        } => {
             let _ = reply.send(sonar.set_channel_eq(channel, bands).map_err(text));
         }
         Command::SetHeadphoneEq { eq, reply } => {
             let _ = reply.send(sonar.set_headphone_eq(eq).map_err(text));
         }
-        Command::ImportAutoEq { text: eq_text, name, reply } => {
+        Command::ImportAutoEq {
+            text: eq_text,
+            name,
+            reply,
+        } => {
             let _ = reply.send(sonar.import_autoeq(&eq_text, name).map_err(text));
         }
         Command::SetMicInput { name, reply } => {
@@ -157,13 +232,21 @@ fn handle(command: Command, sonar: &mut Sonar<SystemTools>) {
         Command::SetStreamer { enabled, reply } => {
             let _ = reply.send(sonar.set_streamer(enabled).map_err(text));
         }
-        Command::SetStreamVolume { channel, volume, reply } => {
+        Command::SetStreamVolume {
+            channel,
+            volume,
+            reply,
+        } => {
             let _ = reply.send(sonar.set_stream_volume(channel, volume).map_err(text));
         }
         Command::SetStreamMaster { volume, reply } => {
             let _ = reply.send(sonar.set_stream_master(volume).map_err(text));
         }
-        Command::SetSmartVolume { channel, settings, reply } => {
+        Command::SetSmartVolume {
+            channel,
+            settings,
+            reply,
+        } => {
             let _ = reply.send(sonar.set_smart_volume(channel, settings).map_err(text));
         }
     }
@@ -176,7 +259,15 @@ mod tests {
     #[test]
     fn the_visualizer_hears_sonars_output_only_while_sonar_is_on() {
         let output = Some("alsa_output.usb-SteelSeries".to_owned());
-        assert_eq!(mixed_output(true, &output), output, "the default output is only the Game channel then");
-        assert_eq!(mixed_output(false, &output), None, "Sonar off: the default output has it all");
+        assert_eq!(
+            mixed_output(true, &output),
+            output,
+            "the default output is only the Game channel then"
+        );
+        assert_eq!(
+            mixed_output(false, &output),
+            None,
+            "Sonar off: the default output has it all"
+        );
     }
 }

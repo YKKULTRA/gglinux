@@ -13,8 +13,16 @@ pub struct Rules(BTreeMap<String, Channel>);
 
 impl Default for Rules {
     fn default() -> Self {
-        let chat = ["discord", "vesktop", "teamspeak", "ts3client_linux_amd64", "mumble"];
-        let media = ["firefox", "chromium", "chrome", "brave", "spotify", "mpv", "vlc"];
+        let chat = [
+            "discord",
+            "vesktop",
+            "teamspeak",
+            "ts3client_linux_amd64",
+            "mumble",
+        ];
+        let media = [
+            "firefox", "chromium", "chrome", "brave", "spotify", "mpv", "vlc",
+        ];
         Rules(
             chat.iter()
                 .map(|b| (b.to_string(), Channel::Chat))
@@ -44,7 +52,11 @@ mod tests {
     fn defaults_send_chat_apps_to_chat_and_players_to_media() {
         let rules = Rules::default();
         assert_eq!(rules.channel_for(Some("discord")), Channel::Chat);
-        assert_eq!(rules.channel_for(Some("Discord")), Channel::Chat, "case-insensitive");
+        assert_eq!(
+            rules.channel_for(Some("Discord")),
+            Channel::Chat,
+            "case-insensitive"
+        );
         assert_eq!(rules.channel_for(Some("firefox")), Channel::Media);
         assert_eq!(rules.channel_for(Some("some-game.x86_64")), Channel::Game);
         assert_eq!(rules.channel_for(None), Channel::Game);

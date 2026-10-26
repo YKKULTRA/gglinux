@@ -20,9 +20,7 @@ use tracing::debug;
 pub mod proto;
 pub mod tables;
 
-pub use proto::{
-    Battery, ButtonAction, DpiStage, PollingRate, BUTTON_COUNT, MAX_PRESETS,
-};
+pub use proto::{Battery, ButtonAction, DpiStage, PollingRate, BUTTON_COUNT, MAX_PRESETS};
 
 pub const VENDOR_ID: u16 = 0x1038;
 pub const PRODUCT_ID: u16 = 0x1872;

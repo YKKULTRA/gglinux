@@ -45,7 +45,10 @@ impl Store {
 
     pub fn delete_profile(&mut self, name: &str) -> Result<(), String> {
         if let Some(r) = self.rules.iter().find(|r| r.profile == name) {
-            return Err(format!("\"{name}\" is used by the rule for {}; remove that rule first", r.process));
+            return Err(format!(
+                "\"{name}\" is used by the rule for {}; remove that rule first",
+                r.process
+            ));
         }
         let before = self.profiles.len();
         self.profiles.retain(|p| p.name != name);
@@ -61,9 +64,15 @@ impl Store {
             .map(|r| {
                 let process = clean(&r.process, "process name")?;
                 if self.profile(&r.profile).is_none() {
-                    return Err(format!("the rule for {process} names a missing profile \"{}\"", r.profile));
+                    return Err(format!(
+                        "the rule for {process} names a missing profile \"{}\"",
+                        r.profile
+                    ));
                 }
-                Ok(GameRule { process, profile: r.profile })
+                Ok(GameRule {
+                    process,
+                    profile: r.profile,
+                })
             })
             .collect::<Result<Vec<_>, String>>()?;
         self.rules = rules;
@@ -102,10 +111,9 @@ pub fn save(path: &Path, store: &Store) {
 
 /// The first rule whose program is running and whose profile exists.
 pub fn pick<'a>(store: &'a Store, running: &HashSet<String>) -> Option<&'a GameRule> {
-    store
-        .rules
-        .iter()
-        .find(|r| running.contains(&r.process.to_lowercase()) && store.profile(&r.profile).is_some())
+    store.rules.iter().find(|r| {
+        running.contains(&r.process.to_lowercase()) && store.profile(&r.profile).is_some()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,13 +138,23 @@ mod tests {
 
     fn store() -> Store {
         let mut s = Store::default();
-        s.save_profile("Night", Lighting { effect: Effect::Static, ..Lighting::default() }).unwrap();
+        s.save_profile(
+            "Night",
+            Lighting {
+                effect: Effect::Static,
+                ..Lighting::default()
+            },
+        )
+        .unwrap();
         s.save_profile("Rainbow", Lighting::default()).unwrap();
         s
     }
 
     fn rule(process: &str, profile: &str) -> GameRule {
-        GameRule { process: process.into(), profile: profile.into() }
+        GameRule {
+            process: process.into(),
+            profile: profile.into(),
+        }
     }
 
     fn running(names: &[&str]) -> HashSet<String> {
@@ -150,7 +168,9 @@ mod tests {
         assert_eq!(s.profiles.len(), 2, "trimmed, replaced");
         assert_eq!(s.profile("Night").unwrap().lighting, Lighting::default());
         assert!(s.save_profile("   ", Lighting::default()).is_err());
-        assert!(s.save_profile(&"x".repeat(65), Lighting::default()).is_err());
+        assert!(s
+            .save_profile(&"x".repeat(65), Lighting::default())
+            .is_err());
     }
 
     #[test]
@@ -175,9 +195,16 @@ mod tests {
     #[test]
     fn the_first_matching_rule_wins_ignoring_case() {
         let mut s = store();
-        s.set_rules(vec![rule("RDR2.exe", "Night"), rule("kate", "Rainbow")]).unwrap();
-        assert_eq!(pick(&s, &running(&["KATE", "rdr2.EXE"])), Some(&rule("RDR2.exe", "Night")));
-        assert_eq!(pick(&s, &running(&["kate"])), Some(&rule("kate", "Rainbow")));
+        s.set_rules(vec![rule("RDR2.exe", "Night"), rule("kate", "Rainbow")])
+            .unwrap();
+        assert_eq!(
+            pick(&s, &running(&["KATE", "rdr2.EXE"])),
+            Some(&rule("RDR2.exe", "Night"))
+        );
+        assert_eq!(
+            pick(&s, &running(&["kate"])),
+            Some(&rule("kate", "Rainbow"))
+        );
         assert_eq!(pick(&s, &running(&["firefox"])), None);
     }
 
@@ -202,7 +229,9 @@ mod tests {
         std::fs::write(&path, "{ nope").unwrap();
         assert_eq!(load(&path), Store::default());
         save(&path, &Store::default()); // the next change
-        let aside: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+        let aside: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
             .filter(|e| e.file_name() != "profiles.json")
             .map(|e| std::fs::read_to_string(e.path()).unwrap())
             .collect();
@@ -212,17 +241,24 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_utf8_is_garbage_too() {
-        let dir = std::env::temp_dir().join(format!("gglinux-profiles-latin1-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("gglinux-profiles-latin1-{}", std::process::id()));
         let path = dir.join("profiles.json");
         let mut s = Store::default();
         s.save_profile("Café", Lighting::default()).unwrap();
         save(&path, &s);
         // The same file hand-edited and saved as Latin-1, where é is one byte that isn't UTF-8.
-        let latin1: Vec<u8> = std::fs::read_to_string(&path).unwrap().chars().map(|c| c as u8).collect();
+        let latin1: Vec<u8> = std::fs::read_to_string(&path)
+            .unwrap()
+            .chars()
+            .map(|c| c as u8)
+            .collect();
         std::fs::write(&path, &latin1).unwrap();
         assert_eq!(load(&path), Store::default());
         save(&path, &Store::default()); // the next change
-        let aside: Vec<Vec<u8>> = std::fs::read_dir(&dir).unwrap().flatten()
+        let aside: Vec<Vec<u8>> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
             .filter(|e| e.file_name() != "profiles.json")
             .map(|e| std::fs::read(e.path()).unwrap())
             .collect();

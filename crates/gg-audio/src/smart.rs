@@ -81,40 +81,85 @@ mod tests {
     #[test]
     fn off_is_an_exact_passthrough() {
         for level in [SmartLevel::Quiet, SmartLevel::Balanced, SmartLevel::Loud] {
-            let p = props(&SmartVolume { enabled: false, level });
+            let p = props(&SmartVolume {
+                enabled: false,
+                level,
+            });
             // PipeWire's mixer skips an input at gain 0 and copies a lone input at gain 1.
-            assert!(p.contains("\"sv_mix:Gain 1\" 1.0 \"sv_mix:Gain 2\" 0.0"), "{p}");
+            assert!(
+                p.contains("\"sv_mix:Gain 1\" 1.0 \"sv_mix:Gain 2\" 0.0"),
+                "{p}"
+            );
         }
-        assert!(NODES[1].contains(r#""Gain 1" = 1.0 "Gain 2" = 0.0"#), "the stage starts off");
+        assert!(
+            NODES[1].contains(r#""Gain 1" = 1.0 "Gain 2" = 0.0"#),
+            "the stage starts off"
+        );
     }
 
     #[test]
     fn each_level_sets_its_threshold_and_makeup() {
-        let p = props(&SmartVolume { enabled: true, level: SmartLevel::Balanced });
+        let p = props(&SmartVolume {
+            enabled: true,
+            level: SmartLevel::Balanced,
+        });
         assert!(p.starts_with("{ params = [ ") && p.ends_with(" ] }"), "{p}");
-        assert!(p.contains("\"sv_comp:Threshold level (dB)\" -24.0 \"sv_comp:Makeup gain (dB)\" 6.0"), "{p}");
-        assert!(p.contains("\"sv_mix:Gain 1\" 0.0 \"sv_mix:Gain 2\" 1.0"), "on hears the compressor: {p}");
-        let quiet = props(&SmartVolume { enabled: true, level: SmartLevel::Quiet });
-        assert!(quiet.contains("(dB)\" -30.0 ") && quiet.contains("(dB)\" 3.0 "), "{quiet}");
-        let loud = props(&SmartVolume { enabled: false, level: SmartLevel::Loud });
-        assert!(loud.contains("(dB)\" -22.0 ") && loud.contains("(dB)\" 9.0 "), "off keeps the level: {loud}");
+        assert!(
+            p.contains("\"sv_comp:Threshold level (dB)\" -24.0 \"sv_comp:Makeup gain (dB)\" 6.0"),
+            "{p}"
+        );
+        assert!(
+            p.contains("\"sv_mix:Gain 1\" 0.0 \"sv_mix:Gain 2\" 1.0"),
+            "on hears the compressor: {p}"
+        );
+        let quiet = props(&SmartVolume {
+            enabled: true,
+            level: SmartLevel::Quiet,
+        });
+        assert!(
+            quiet.contains("(dB)\" -30.0 ") && quiet.contains("(dB)\" 3.0 "),
+            "{quiet}"
+        );
+        let loud = props(&SmartVolume {
+            enabled: false,
+            level: SmartLevel::Loud,
+        });
+        assert!(
+            loud.contains("(dB)\" -22.0 ") && loud.contains("(dB)\" 9.0 "),
+            "off keeps the level: {loud}"
+        );
         for level in [SmartLevel::Quiet, SmartLevel::Balanced, SmartLevel::Loud] {
             let (threshold, makeup) = curve(level);
             // PipeWire would clamp anything outside the plugin's ranges.
-            assert!((-30.0..=0.0).contains(&threshold) && (0.0..=24.0).contains(&makeup), "{level:?}");
+            assert!(
+                (-30.0..=0.0).contains(&threshold) && (0.0..=24.0).contains(&makeup),
+                "{level:?}"
+            );
         }
     }
 
     #[test]
     fn the_stage_ends_with_the_volume_and_hears_the_eq_or_the_compressor() {
-        assert!(NODES.last().unwrap().contains("name = vol label = linear"), "vol is the graph's output");
-        assert!(NODES[0].contains(&format!("name = sv_comp plugin = \"{}\" label = sc4m", mic::SC4M)));
         assert!(
-            NODES[0].contains(r#""RMS/peak" = 0.0 "Attack time (ms)" = 1.5 "Release time (ms)" = 800.0"#),
+            NODES.last().unwrap().contains("name = vol label = linear"),
+            "vol is the graph's output"
+        );
+        assert!(NODES[0].contains(&format!(
+            "name = sv_comp plugin = \"{}\" label = sc4m",
+            mic::SC4M
+        )));
+        assert!(
+            NODES[0].contains(
+                r#""RMS/peak" = 0.0 "Attack time (ms)" = 1.5 "Release time (ms)" = 800.0"#
+            ),
             "{}",
             NODES[0]
         );
-        assert_eq!(INPUTS, ["sv_comp:Input", "sv_mix:In 1"], "the channel EQ feeds both");
+        assert_eq!(
+            INPUTS,
+            ["sv_comp:Input", "sv_mix:In 1"],
+            "the channel EQ feeds both"
+        );
         assert!(LINKS.contains(&("sv_comp:Output", "sv_mix:In 2")));
         assert_eq!(LINKS.last(), Some(&("sv_mix:Out", "vol:In")));
         assert_eq!(VOLUME_CONTROL, "vol:Mult");
@@ -122,7 +167,10 @@ mod tests {
         for (output, input) in LINKS.iter().copied().chain(from_eq) {
             for port in [output, input] {
                 let node = port.split(':').next().unwrap();
-                assert!(node == "eq_10" || NODES.iter().any(|n| n.contains(&format!("name = {node} "))), "{port}");
+                assert!(
+                    node == "eq_10" || NODES.iter().any(|n| n.contains(&format!("name = {node} "))),
+                    "{port}"
+                );
             }
         }
     }

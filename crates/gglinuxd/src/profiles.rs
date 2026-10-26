@@ -30,19 +30,34 @@ pub trait LightingPort: Send + Sync + 'static {
 
 impl LightingPort for keyboard::Handle {
     async fn get(&self) -> Result<Lighting, String> {
-        self.send(KeyboardCommand::GetState).await.map(|s| s.lighting)
+        self.send(KeyboardCommand::GetState)
+            .await
+            .map(|s| s.lighting)
     }
     async fn set(&self, lighting: Lighting) -> Result<(), String> {
-        self.send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply }).await
+        self.send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
+            .await
     }
 }
 
 pub enum Command {
     GetState(Reply<ProfilesState>),
-    Save { name: String, reply: Reply<()> },
-    Apply { name: String, reply: Reply<()> },
-    Delete { name: String, reply: Reply<()> },
-    SetRules { rules: Vec<GameRule>, reply: Reply<()> },
+    Save {
+        name: String,
+        reply: Reply<()>,
+    },
+    Apply {
+        name: String,
+        reply: Reply<()>,
+    },
+    Delete {
+        name: String,
+        reply: Reply<()>,
+    },
+    SetRules {
+        rules: Vec<GameRule>,
+        reply: Reply<()>,
+    },
 }
 
 #[derive(Clone)]
@@ -53,8 +68,12 @@ pub struct Handle {
 impl Handle {
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(make(reply_tx)).map_err(|_| "profiles are not running".to_string())?;
-        reply_rx.await.map_err(|_| "profiles dropped the request".to_string())?
+        self.tx
+            .send(make(reply_tx))
+            .map_err(|_| "profiles are not running".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "profiles dropped the request".to_string())?
     }
 }
 
@@ -78,7 +97,15 @@ impl<P: LightingPort> Controller<P> {
         event_tx: broadcast::Sender<Event>,
         game_tx: watch::Sender<Option<String>>,
     ) -> Self {
-        Controller { store, path, port, event_tx, active: None, game_tx, published: None }
+        Controller {
+            store,
+            path,
+            port,
+            event_tx,
+            active: None,
+            game_tx,
+            published: None,
+        }
     }
 
     /// Apply or undo game rules for what's running (lower-cased names).
@@ -106,11 +133,16 @@ impl<P: LightingPort> Controller<P> {
                 if self.store.before.is_none() {
                     match self.port.get().await {
                         Ok(l) => self.store.before = Some(l),
-                        Err(e) => return warn!(error = %e, "could not read the lighting before a game rule"),
+                        Err(e) => {
+                            return warn!(error = %e, "could not read the lighting before a game rule")
+                        }
                     }
                     store::save(&self.path, &self.store);
                 }
-                let lighting = self.store.profile(&rule.profile).map(|p| p.lighting.clone());
+                let lighting = self
+                    .store
+                    .profile(&rule.profile)
+                    .map(|p| p.lighting.clone());
                 if let Some(lighting) = lighting {
                     if let Err(e) = self.port.set(lighting).await {
                         return warn!(error = %e, "could not apply a game profile");
@@ -134,7 +166,12 @@ impl<P: LightingPort> Controller<P> {
     }
 
     pub async fn apply(&mut self, name: &str) -> Result<(), String> {
-        let lighting = self.store.profile(name).ok_or_else(|| format!("no profile named \"{name}\""))?.lighting.clone();
+        let lighting = self
+            .store
+            .profile(name)
+            .ok_or_else(|| format!("no profile named \"{name}\""))?
+            .lighting
+            .clone();
         self.port.set(lighting).await
     }
 
@@ -149,10 +186,15 @@ impl<P: LightingPort> Controller<P> {
     async fn handle(&mut self, command: Command) {
         match command {
             Command::GetState(reply) => {
-                let running = tokio::task::spawn_blocking(|| procs::running(std::path::Path::new("/proc"), unsafe { libc::getuid() }))
-                    .await
-                    .unwrap_or_default();
-                let _ = reply.send(Ok(ProfilesState { running, ..self.state() }));
+                let running = tokio::task::spawn_blocking(|| {
+                    procs::running(std::path::Path::new("/proc"), unsafe { libc::getuid() })
+                })
+                .await
+                .unwrap_or_default();
+                let _ = reply.send(Ok(ProfilesState {
+                    running,
+                    ..self.state()
+                }));
             }
             Command::Save { name, reply } => {
                 let _ = reply.send(self.save_current(&name).await);
@@ -250,7 +292,11 @@ mod tests {
     }
 
     fn look(p: f32) -> Lighting {
-        Lighting { enabled: true, effect: Effect::Wave { period_s: p }, ..Lighting::default() }
+        Lighting {
+            enabled: true,
+            effect: Effect::Wave { period_s: p },
+            ..Lighting::default()
+        }
     }
 
     /// The store's file, removed when the test ends.
@@ -267,13 +313,35 @@ mod tests {
         let mut store = Store::default();
         store.save_profile("A", look(2.0)).unwrap();
         store.save_profile("B", look(3.0)).unwrap();
-        store.set_rules(vec![
-            GameRule { process: "game-a".into(), profile: "A".into() },
-            GameRule { process: "game-b".into(), profile: "B".into() },
-        ]).unwrap();
-        let path = std::env::temp_dir().join(format!("gglinux-ctl-{}-{:?}.json", std::process::id(), std::thread::current().id()));
+        store
+            .set_rules(vec![
+                GameRule {
+                    process: "game-a".into(),
+                    profile: "A".into(),
+                },
+                GameRule {
+                    process: "game-b".into(),
+                    profile: "B".into(),
+                },
+            ])
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "gglinux-ctl-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         let (event_tx, _) = broadcast::channel(8);
-        (Controller::new(store, path.clone(), FakePort(Arc::clone(&now)), event_tx, watch::channel(None).0), now, Scratch(path))
+        (
+            Controller::new(
+                store,
+                path.clone(),
+                FakePort(Arc::clone(&now)),
+                event_tx,
+                watch::channel(None).0,
+            ),
+            now,
+            Scratch(path),
+        )
     }
 
     fn running(names: &[&str]) -> HashSet<String> {
@@ -299,7 +367,11 @@ mod tests {
         assert_eq!(*now.lock().unwrap(), look(2.0));
         assert_eq!(c.active.as_ref().map(|r| r.profile.as_str()), Some("A"));
         c.follow(&running(&[])).await;
-        assert_eq!(*now.lock().unwrap(), look(1.0), "back to the owner's lighting");
+        assert_eq!(
+            *now.lock().unwrap(),
+            look(1.0),
+            "back to the owner's lighting"
+        );
         assert!(c.active.is_none());
     }
 
@@ -330,7 +402,13 @@ mod tests {
         c.follow(&running(&["game-a"])).await;
         // The daemon stops mid-game; the keyboard keeps A's lighting.
         let restart = |c: &Controller<FakePort>| {
-            Controller::new(store::load(&c.path), c.path.clone(), FakePort(Arc::clone(&now)), broadcast::channel(8).0, watch::channel(None).0)
+            Controller::new(
+                store::load(&c.path),
+                c.path.clone(),
+                FakePort(Arc::clone(&now)),
+                broadcast::channel(8).0,
+                watch::channel(None).0,
+            )
         };
         let mut c = restart(&c);
         c.follow(&running(&["game-a"])).await;
@@ -361,9 +439,19 @@ mod tests {
         let (with_keyboard, _now, _file) = controller();
         let (event_tx, _) = broadcast::channel(8);
         let (game_tx, game) = watch::channel(None);
-        let mut c = Controller::new(with_keyboard.store, with_keyboard.path, NoKeyboard, event_tx, game_tx);
+        let mut c = Controller::new(
+            with_keyboard.store,
+            with_keyboard.path,
+            NoKeyboard,
+            event_tx,
+            game_tx,
+        );
         c.follow(&running(&["game-b"])).await;
-        assert_eq!(game.borrow().as_deref(), Some("game-b"), "clips hear of the game");
+        assert_eq!(
+            game.borrow().as_deref(),
+            Some("game-b"),
+            "clips hear of the game"
+        );
         assert!(c.active.is_none(), "though no lighting was applied");
         c.follow(&running(&[])).await;
         assert_eq!(*game.borrow(), None);

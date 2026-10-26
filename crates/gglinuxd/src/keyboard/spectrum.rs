@@ -38,7 +38,13 @@ impl Analyzer {
         for i in 1..=BANDS {
             edges[i] = edges[i].max(edges[i - 1] + 1); // every band gets at least one bin
         }
-        Analyzer { fft, hann, samples: vec![0.0; WINDOW], levels: [0.0; BANDS], edges }
+        Analyzer {
+            fft,
+            hann,
+            samples: vec![0.0; WINDOW],
+            levels: [0.0; BANDS],
+            edges,
+        }
     }
 
     /// Take one hop of new samples (at most a window's worth); return the smoothed levels.
@@ -46,12 +52,19 @@ impl Analyzer {
         let hop = &hop[hop.len().saturating_sub(WINDOW)..];
         self.samples.drain(..hop.len());
         self.samples.extend_from_slice(hop);
-        let mut buf: Vec<Complex<f32>> =
-            self.samples.iter().zip(&self.hann).map(|(s, w)| Complex::new(s * w, 0.0)).collect();
+        let mut buf: Vec<Complex<f32>> = self
+            .samples
+            .iter()
+            .zip(&self.hann)
+            .map(|(s, w)| Complex::new(s * w, 0.0))
+            .collect();
         self.fft.process(&mut buf);
         let norm = 4.0 / WINDOW as f32; // Hann's coherent gain is ½: a full-scale sine → 1
         for band in 0..BANDS {
-            let peak = buf[self.edges[band]..self.edges[band + 1]].iter().map(|c| c.norm() * norm).fold(0.0, f32::max);
+            let peak = buf[self.edges[band]..self.edges[band + 1]]
+                .iter()
+                .map(|c| c.norm() * norm)
+                .fold(0.0, f32::max);
             let db = 20.0 * peak.max(1e-9).log10();
             let raw = ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0);
             self.levels[band] = smooth(self.levels[band], raw);
@@ -75,11 +88,15 @@ mod tests {
     use std::f32::consts::TAU;
 
     fn sine(hz: f32, amplitude: f32, from: usize) -> Vec<f32> {
-        (from..from + HOP).map(|i| amplitude * (TAU * hz * i as f32 / RATE).sin()).collect()
+        (from..from + HOP)
+            .map(|i| amplitude * (TAU * hz * i as f32 / RATE).sin())
+            .collect()
     }
 
     fn loudest(levels: &[f32; BANDS]) -> usize {
-        (0..BANDS).max_by(|&a, &b| levels[a].total_cmp(&levels[b])).unwrap()
+        (0..BANDS)
+            .max_by(|&a, &b| levels[a].total_cmp(&levels[b]))
+            .unwrap()
     }
 
     #[test]
@@ -91,8 +108,15 @@ mod tests {
         }
         // 40 Hz · 400^(i/18) ≤ 1000 Hz < 40 Hz · 400^((i+1)/18)  →  i = 9
         assert_eq!(loudest(&levels), 9, "{levels:?}");
-        assert!(levels[9] > 0.8, "a −6 dB tone is near the top: {}", levels[9]);
-        assert!(levels[2] < 0.3 && levels[16] < 0.3, "far bands stay low: {levels:?}");
+        assert!(
+            levels[9] > 0.8,
+            "a −6 dB tone is near the top: {}",
+            levels[9]
+        );
+        assert!(
+            levels[2] < 0.3 && levels[16] < 0.3,
+            "far bands stay low: {levels:?}"
+        );
     }
 
     #[test]
@@ -112,7 +136,10 @@ mod tests {
             l[9]
         };
         let (loud, quiet) = (level_at(0.5), level_at(0.01));
-        assert!(quiet > 0.2 && quiet < loud - 0.4, "−40 dB sits well below −6 dB: {quiet} vs {loud}");
+        assert!(
+            quiet > 0.2 && quiet < loud - 0.4,
+            "−40 dB sits well below −6 dB: {quiet} vs {loud}"
+        );
     }
 
     #[test]
