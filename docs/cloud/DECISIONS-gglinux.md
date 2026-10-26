@@ -120,3 +120,23 @@ The checklist will be public too, so it never writes the owner's email, home dir
 local user name literally: the cleanup commands read the address from a commit and use regex
 patterns for the two strings. The CHANGELOG avoids citing hashes of this session's commits, which
 path A would change.
+
+## D12. gg-audio test scratch directories (test-only fix)
+
+Running the suite as a non-root user, after root had run it, failed 57 `gg-audio` tests with
+"permission denied": every test's scratch directory sat under one shared `/tmp/gg-audio-tests`,
+owned by whoever ran the tests first. CI on a fresh runner would not hit it, but any contributor on
+a machine another account had tested on would. Fixed test-first: a new test asserts the scratch
+directory sits directly in the temp dir (failed before the fix), and the helper now uses
+`gg-audio-test-<pid>-<name>` directly under the temp dir, like every other crate's tests. No
+non-test code changed.
+
+## D13. PKGBUILD depends lists directly linked libraries
+
+namcap on the built package reported eight directly linked libraries (glibc, libgcc, glib2,
+gdk-pixbuf2, cairo, libsoup3, dbus, hicolor-icon-theme) satisfied only transitively. The Arch
+package guidelines ask not to rely on transitive dependencies, so they were added. `libgcc` is the
+current Arch package that owns `libgcc_s.so.1` (namcap names it). namcap's "may not be needed"
+warnings for `libayatana-appindicator`, `pipewire`, `wireplumber` and `xdg-utils` are false
+positives (loaded or executed at run time), so they stay. The `-debug` package's symlink errors
+are namcap's known false positive for split debug packages.

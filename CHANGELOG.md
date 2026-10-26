@@ -300,6 +300,11 @@ compared against a real PipeWire graph.
 - The Arch package builds with `options=('!lto')`. Under a stock `makepkg.conf`, LTO made hidapi's
   bundled C code into GCC bitcode and `gglinuxd` failed to link (undefined `hid_read`,
   `hid_write`); found by building the package with makepkg in an Arch container.
+- The Arch package lists every library its binaries link directly (glibc, libgcc, glib2,
+  gdk-pixbuf2, cairo, libsoup3, dbus, hicolor-icon-theme), as namcap asked.
+- `gg-audio`'s tests no longer fail with "permission denied" for every user except the first one to
+  run them on a machine: each test's scratch directory now sits directly in the temp dir instead of
+  under one shared parent.
 - New public documents: a README written for newcomers (with an honest verified, untested, blocked
   and parked matrix), `CONTRIBUTING.md`, `SECURITY.md`, this changelog, `docs/ARCHITECTURE.md`,
   `packaging/arch/README.md` and `docs/PUBLISH-CHECKLIST.md`.
