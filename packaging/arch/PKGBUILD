@@ -15,6 +15,9 @@ optdepends=('noise-suppression-for-voice: noise suppression for the Sonar microp
             'xdg-desktop-portal: clip hotkey and screen capture, with a backend like xdg-desktop-portal-kde')
 provides=('gglinux')
 conflicts=('gglinux')
+# makepkg's LTO flags make hidapi's bundled C code GCC LTO bitcode, which the Rust linker
+# cannot read: the daemon then fails to link with undefined hid_read/hid_write symbols.
+options=('!lto')
 install=gglinux.install
 source=("gglinux::git+https://github.com/YKKULTRA/gglinux.git")
 sha256sums=('SKIP')
