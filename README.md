@@ -1,10 +1,10 @@
 # gglinux
 
 An open-source replacement for **SteelSeries GG** on Linux. SteelSeries only ships GG for Windows
-and macOS, so on Linux their keyboards, headsets and mice work as plain USB devices and none of
-their settings can be changed. gglinux brings back the parts of GG that matter for the devices it
-supports: device control (GG's Engine), a Sonar-style audio mixer on PipeWire, GameSense lighting
-for games, and instant-replay clips (GG's Moments).
+and macOS. On Linux their keyboards, headsets and mice work as plain USB devices, and their
+settings are out of reach except through separate single-device tools. gglinux brings back the
+parts of GG that matter for the devices it supports: device control (GG's Engine), a Sonar-style
+audio mixer on PipeWire, GameSense lighting for games, and instant-replay clips (GG's Moments).
 
 It is a Rust daemon, `gglinuxd`, that does all the device and audio work, a small CLI, `ggctl`,
 and a Tauri 2 desktop app. Licensed GPL-3.0-or-later.
