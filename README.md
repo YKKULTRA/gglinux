@@ -1,87 +1,287 @@
 # gglinux
 
-An open-source **SteelSeries GG** replacement for Linux — device control (Engine), audio mixing
-(Sonar), game-event lighting (GameSense), and clip capture (Moments) — for the hardware SteelSeries
-never supported on Linux.
+An open-source replacement for **SteelSeries GG** on Linux. SteelSeries only ships GG for Windows
+and macOS, so on Linux their keyboards, headsets and mice work as plain USB devices and none of
+their settings can be changed. gglinux brings back the parts of GG that matter for the devices it
+supports: device control (GG's Engine), a Sonar-style audio mixer on PipeWire, GameSense lighting
+for games, and instant-replay clips (GG's Moments).
 
-**Status:** early. Most features are built and tested against fakes but not yet seen working on
-real hardware. **Verified** on the owner's devices: the live device list, the Apex's per-key
-lighting (static colours, the wave effect and hand-back to onboard lighting), the headset's status,
-battery and base-station screen protection, and the mouse's battery. **Built, not yet tried live:**
-Sonar (channels, EQ, virtual mic, Smart Volume, streamer mode), the headset's controls, the other
-lighting effects and reactive lighting, GameSense with its audio visualizer and mic-mute light,
-clips, lighting profiles, settings backup, start at login and the Arch `PKGBUILD`. **Parked:** the
-mouse's DPI, polling, button and onboard-save settings, never confirmed on the Rival 3 Wireless
-Gen 2, which is no longer in use here. **Blocked:** the Apex OLED and actuation, which need a USB
-capture of GG on Windows. See [PLAN.md](PLAN.md) for the roadmap and the full feature checklist.
+It is a Rust daemon, `gglinuxd`, that does all the device and audio work, a small CLI, `ggctl`,
+and a Tauri 2 desktop app. Licensed GPL-3.0-or-later.
 
-## Supported hardware (initial targets)
+> gglinux is an independent project. It is not made, endorsed or supported by SteelSeries.
+> "SteelSeries", "GG", "Sonar", "Moments" and "GameSense" are SteelSeries trademarks, used here only
+> to say what gglinux is compatible with.
 
-| Device | USB ID | Highlights |
+## Project status: early, mostly untested on hardware
+
+Read this before you plug anything in. gglinux has one developer and one set of devices. Almost
+everything is built and covered by unit tests against fake devices and a fake PipeWire, but only
+two features have been confirmed working on real hardware:
+
+- **Keyboard lighting** on the Apex Pro TKL Gen 3: static per-key colours, the wave effect, and
+  handing lighting back to the keyboard's own onboard effects.
+- **Base-station screen protection** on the Arctis Nova Pro Wireless: the base station's OLED is
+  kept dark (it never sleeps on its own) and lit briefly on real events such as a battery change.
+
+Read-only paths, such as listing the connected devices and reading headset status and battery,
+were also seen working during development. **Everything else below is untested on hardware.**
+Expect bugs, and please report them.
+
+### Supported devices
+
+| Device | USB ID | Status |
 |---|---|---|
-| Apex Pro TKL Gen 3 (keyboard) | `1038:1642` | OmniPoint actuation, Rapid Trigger, per-key RGB, 128×40 OLED |
-| Rival 3 Wireless Gen 2 (mouse) | `1038:1872` | DPI/polling/buttons, battery *(parked — see PLAN.md)* |
-| Arctis Nova Pro Wireless (headset + base) | `1038:12e0` | ANC, sidetone, EQ, ChatMix, OLED, battery |
+| Apex Pro TKL Gen 3 (keyboard) | `1038:1642` | Lighting verified. OLED and actuation blocked. |
+| Arctis Nova Pro Wireless (headset + base station) | `1038:12e0` | Screen protection verified. Controls untested. |
+| Rival 3 Wireless Gen 2 (mouse) | `1038:1872` | Parked: built, never confirmed on hardware. |
 
-## Design
+Other SteelSeries devices are not supported. Each device speaks its own protocol, and gglinux only
+talks to the exact USB IDs above.
 
-- **Stack:** a Rust daemon (`gglinuxd`) does all HID + PipeWire + GameSense work; a Tauri 2 desktop UI
-  talks to it over a local unix-socket JSON-RPC. Runs as a `systemd --user` service; needs no root
-  (a udev `uaccess` rule grants the seat user hidraw access).
-- **Audio:** PipeWire virtual sinks (Game/Chat/Media/Aux/Mic) with per-channel parametric EQ, per-app
-  routing, ChatMix, Smart Volume, and an RNNoise mic chain — a Sonar equivalent.
-- **GameSense:** a compatible localhost HTTP server that also works for **Steam/Proton** games via a
-  per-prefix `coreProps.json` writer.
-- **Clips:** wraps [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/) (NVENC/VAAPI).
+### Feature matrix
 
-See **[PLAN.md](PLAN.md)** for the full roadmap and **[docs/PROTOCOLS.md](docs/PROTOCOLS.md)** for the
-byte-level device protocol reference.
+**Verified** means seen working on real hardware. **Untested** means built and unit-tested, not yet
+tried on hardware. **Blocked** means it cannot be built yet. **Parked** means built, but the hardware
+is no longer available to test it.
 
-## Building
+| Area | Feature | Status |
+|---|---|---|
+| Keyboard | Per-key static colours, wave effect, hand-back to onboard lighting | Verified |
+| Keyboard | Breathing and spectrum effects | Untested |
+| Keyboard | Reactive lighting (Fade, Ripple on key press), opt-in | Untested |
+| Keyboard | OLED screen | Blocked (needs a USB capture of GG on Windows) |
+| Keyboard | Actuation point, Rapid Trigger, Rapid Tap, key remap | Blocked (same capture) |
+| Headset | Base-station screen burn-in protection | Verified |
+| Headset | ANC, transparency, sidetone, mic volume and mute light, auto-off, 2.4 GHz mode, on-device EQ | Untested |
+| Mouse | DPI stages, polling rate, button remap, onboard save | Parked |
+| Sonar audio | Game, Chat, Media and Aux channels, per-app routing, ChatMix slider | Untested |
+| Sonar audio | 10-band EQ per channel, headphone correction, AutoEQ import | Untested |
+| Sonar audio | Virtual mic: RNNoise noise suppression, gate, compressor | Untested |
+| Sonar audio | Smart Volume, streamer mode (a separate mix for OBS) | Untested |
+| GameSense | Local GameSense server, game events drawn on the keyboard, Proton support | Untested |
+| GameSense | Built-in audio visualizer and mic-mute light | Untested |
+| Profiles | Named lighting profiles, switched automatically per game | Untested |
+| Moments | Instant-replay clips through gpu-screen-recorder, hotkey, clip library | Untested |
+| Desktop | Tray, start at login, settings backup and restore, `ggctl` | Untested |
 
-The daemon needs only a Rust toolchain (≥1.87) and libudev:
+The full parity checklist against GG, with the reasons behind each status, is in
+[PLAN.md](PLAN.md#feature-parity-checklist-vs-steelseries-gg).
+
+### Screenshots
+
+Not added yet. Planned:
+
+1. Engine page: the device list with a keyboard and a headset connected.
+2. Keyboard panel: the per-key editor with a few keys painted.
+3. Headset panel: noise mode, sidetone and the screen-protection setting.
+4. Sonar page: the four channels with the ChatMix slider.
+5. EQ editor: the curve editor with an imported AutoEQ profile.
+6. Games page: GameSense on, with the built-in test game running.
+7. Moments page: the clip library.
+
+## How it works
+
+- `gglinuxd` runs as a `systemd --user` service. It opens the devices' HID control interfaces,
+  drives PipeWire through its own command-line tools (`pw-dump`, `pw-cli`, `pw-metadata`, `wpctl`),
+  serves GameSense on `127.0.0.1`, and supervises `gpu-screen-recorder` for clips.
+- The desktop app and `ggctl` are clients. They talk to the daemon over a unix socket in
+  `$XDG_RUNTIME_DIR/gglinux/` using JSON-RPC. Closing the app leaves the daemon applying your
+  settings.
+- Nothing runs as root. A udev rule gives the logged-in desktop user access to the few HID
+  interfaces gglinux needs.
+
+More detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The byte-level device protocols are in
+[docs/PROTOCOLS.md](docs/PROTOCOLS.md).
+
+## Requirements
+
+- Linux with systemd (for the user service and logind's device ACLs).
+- PipeWire 1.0 or newer with WirePlumber 0.5, for Sonar and the audio-driven effects.
+- To build: Rust 1.87 or newer for the daemon, 1.88 or newer for the desktop app, and Node.js 20
+  or newer with npm for the app's frontend (CI uses Node 22).
+- Build libraries for the daemon: `libudev` headers and `pkg-config`. For the app: WebKitGTK 4.1,
+  libsoup 3, an AppIndicator library for the tray, and librsvg.
+
+On **Arch Linux**:
 
 ```sh
-cargo build --workspace --bins
-cargo test --workspace
+sudo pacman -S --needed base-devel rust nodejs npm webkit2gtk-4.1 libayatana-appindicator librsvg
 ```
 
-Install it with `ggctl`, the UI, the `systemd --user` unit, and the udev rule that grants your
-desktop session access to the SteelSeries HID interfaces gglinux controls:
+On **Debian or Ubuntu** (tested on Ubuntu 24.04, which is also what CI uses):
 
 ```sh
-./scripts/install-local.sh          # prompts for sudo once, for the udev rule
-./scripts/install-local.sh --no-ui  # the same without the UI: no npm, no webkit2gtk
+sudo apt install build-essential pkg-config libudev-dev \
+  libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+```
+
+Rust from [rustup](https://rustup.rs) is the easiest way to get a new enough toolchain on Debian
+and Ubuntu.
+
+Optional packages turn on more features. gglinux works without them and tells you in the app what
+is missing:
+
+| Package (Arch name) | Used for | Without it |
+|---|---|---|
+| `noise-suppression-for-voice` | RNNoise noise suppression in the virtual mic | no virtual mic |
+| `swh-plugins` | the `sc4m` compressor (virtual mic and Smart Volume) | no virtual mic, no Smart Volume |
+| `gpu-screen-recorder` | instant-replay clips | the Moments page asks you to install it |
+| `xdg-desktop-portal` with a backend (KDE, GNOME, ...) | the clip hotkey and screen capture | no clip hotkey or portal screen capture |
+
+## Install
+
+### Arch Linux
+
+A `gglinux-git` PKGBUILD is in [packaging/arch](packaging/arch/). Until it is on the AUR:
+
+```sh
+git clone https://github.com/YKKULTRA/gglinux.git
+cd gglinux/packaging/arch
+makepkg -si
 systemctl --user enable --now gglinuxd
 ```
 
-`gglinuxd`, `ggctl` and the UI (`gglinux`) go to `~/.local/bin`, and the UI gets a desktop entry and
-an icon, so it's in your app menu. Building the UI needs npm and the packages under [UI](#ui). To
-start with your desktop, tick **Settings → Start gglinux when I log in**: it enables the daemon's
-unit and starts the UI hidden in the tray. Opening gglinux from the menu while it's in the tray
-brings up its window rather than starting a second copy.
+The package installs the udev rule to `/usr/lib/udev/rules.d/`, the user unit, the app with a menu
+entry, and `ggctl`.
 
-Without that udev rule the hidraw nodes stay `root:root 0600`: devices will still be *listed* (that
-only reads sysfs) but cannot be opened or controlled. The rule opens only control interfaces — never
-a keyboard's typing interfaces. If you installed gglinux before 2026-09-28, run
-`./scripts/install-local.sh --no-build --no-ui` again: the old rule opened every SteelSeries
-interface, including the Apex's typing ones, and the installer clears the access that rule left
-behind.
-`./scripts/check-udev.sh` shows which interfaces the repo's rules open, without installing anything.
-
-**Reactive lighting (optional).** Reactive lighting needs to see which keys you press. The optional
-udev rule lets any program you run read what you type on the Apex while you're logged in. gglinux
-reads only while reactive lighting is on, and keeps presses in memory only until their light fades.
+### From source, any distribution
 
 ```sh
-./scripts/install-local.sh --no-build --no-ui --reactive  # opt in
-sudo rm /etc/udev/rules.d/61-gglinux-reactive.rules       # opt out, then replug the keyboard
-sudo udevadm control --reload
+git clone https://github.com/YKKULTRA/gglinux.git
+cd gglinux
+./scripts/install-local.sh          # builds everything, asks for sudo once for the udev rule
+systemctl --user enable --now gglinuxd
 ```
 
-**Uninstalling.** Turn Sonar and GameSense off in the UI first: Sonar's PipeWire drop-in
-(`~/.config/pipewire/pipewire.conf.d/60-gglinux-sonar.conf`) keeps its channels in PipeWire after
-gglinux is gone, and GameSense leaves a `coreProps.json` in each Proton prefix. Then remove the rest:
+This puts `gglinuxd`, `ggctl` and the app (`gglinux`) in `~/.local/bin`, the user unit in
+`~/.config/systemd/user/`, a menu entry and icon in `~/.local/share/`, and the udev rule in
+`/etc/udev/rules.d/`. Options:
+
+- `--no-ui` skips the desktop app (no npm or WebKitGTK needed).
+- `--no-udev` skips the udev rule (and sudo).
+- `--no-build` installs what an earlier build left.
+- `--reactive` also installs the optional reactive-lighting rule (see below).
+
+To start everything with your desktop, open the app and tick **Settings > Start gglinux when I log
+in**. That enables the daemon's unit and starts the app hidden in the tray.
+
+Don't keep a `install-local.sh` copy and the Arch package installed at the same time: the copy in
+`~/.local/bin` runs instead of the package's. Remove it first (see [Uninstall](#uninstall)).
+
+### The udev rule, and why it is narrow
+
+Linux creates `/dev/hidraw*` nodes as `root:root 0600`, so a normal user can't talk to the devices.
+[`data/udev/60-gglinux.rules`](data/udev/60-gglinux.rules) tags exactly three interfaces with
+`uaccess`, which makes systemd-logind give the user of the active local session access, and takes
+it away when the session ends:
+
+| Device | Interface opened | What it is |
+|---|---|---|
+| Apex Pro TKL Gen 3 `1038:1642` | 1 | lighting control (vendor page `0xFFC0`) |
+| Arctis Nova Pro Wireless `1038:12e0` | 4 | base-station control |
+| Rival 3 Wireless Gen 2 `1038:1872` | 3 | mouse control |
+
+It deliberately does **not** open the keyboard's typing interfaces. Those carry every keystroke, and
+opening them would let any program you run read what you type. Early versions of gglinux opened
+every SteelSeries interface; if you installed before 2026-09-28, re-run
+`./scripts/install-local.sh --no-build --no-ui`, which installs the narrow rule and clears the
+access the old one left behind.
+
+`./scripts/check-udev.sh` shows which interfaces the repository's rules open, without installing
+anything. Without the rule, devices are still listed (that only reads sysfs) but can't be
+controlled.
+
+**Reactive lighting (optional).** Lighting that reacts to key presses has to see which keys you
+press, so it needs the typing interface. The separate rule `61-gglinux-reactive.rules` grants it.
+With it installed, any program you run can read what you type on the Apex while you are logged in.
+gglinux itself reads only while reactive lighting is on, and keeps presses in memory only until
+their light fades. Opt in only if you want the feature:
+
+```sh
+./scripts/install-local.sh --no-build --no-ui --reactive   # from a checkout
+# or, with the Arch package:
+sudo install -m644 /usr/share/gglinux/61-gglinux-reactive.rules /etc/udev/rules.d/
+sudo udevadm control --reload                               # then replug the keyboard
+```
+
+To opt out, delete `/etc/udev/rules.d/61-gglinux-reactive.rules`, reload udev and replug the
+keyboard.
+
+### The user service
+
+[`data/systemd/gglinuxd.service`](data/systemd/gglinuxd.service) is a `systemd --user` unit. It
+starts after the graphical session (device ACLs only exist once a seat session is up), restarts on
+failure, and keeps its socket in `$XDG_RUNTIME_DIR/gglinux/`. It has light hardening
+(`NoNewPrivileges`, no SUID, no realtime) but not `ProtectHome`, because gglinux writes its
+settings to `~/.config/gglinux` and clips to your videos folder.
+
+```sh
+systemctl --user enable --now gglinuxd   # start now and at login
+systemctl --user status gglinuxd
+journalctl --user -u gglinuxd -f         # logs
+```
+
+For more detailed logs, `systemctl --user edit gglinuxd` and add `Environment=RUST_LOG=debug`
+under `[Service]`.
+
+Only one daemon runs at a time: a second one refuses to start while the first is listening.
+
+## Using it
+
+Open **gglinux** from your app menu. The app is optional: the daemon keeps applying your settings
+with it closed.
+
+**Sonar** is off until you turn it on. Turning it on writes a PipeWire drop-in
+(`~/.config/pipewire/pipewire.conf.d/60-gglinux-sonar.conf`) and restarts PipeWire, so expect a
+short audio dropout. The channels then live inside PipeWire and keep working even when gglinux
+isn't running. Turning Sonar off removes the drop-in.
+
+**GameSense** is off until you turn it on in the Games page. It then serves on `127.0.0.1` and
+writes a small `coreProps.json` into every Proton prefix under
+`steamapps/compatdata/*/pfx/drive_c/ProgramData/SteelSeries/SteelSeries Engine 3/`, so Windows
+games under Proton can find it. Turning it off removes those files. Only native Steam is supported,
+not Flatpak Steam. Few games speak GameSense; **Run test** shows what it looks like.
+
+**ggctl** drives the daemon from scripts and keyboard shortcuts:
+
+```sh
+ggctl                         # device list and live hotplug events
+ggctl clip save               # save the instant replay (bind it to a key)
+ggctl profile list            # saved lighting profiles
+ggctl profile apply "Late Night"
+ggctl gamesense on            # also: gamesense off, gamesense test
+ggctl mouse                   # the mouse's battery and the settings gglinux applied
+ggctl --help
+```
+
+The Rival 3's protocol is write-only: there is no way to read its current settings, so applying one
+replaces whatever was configured before, and `ggctl mouse` reports what gglinux applied this
+session.
+
+### NVIDIA proprietary driver
+
+WebKitGTK's DMABUF renderer can't allocate buffers on the NVIDIA proprietary driver: on Wayland the
+app dies with `Gdk-Message: Error 71 (Protocol error)`, on XWayland the window stays empty. gglinux
+detects the driver and sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself. If you set that variable
+yourself, your value wins.
+
+## Uninstall
+
+Turn Sonar and GameSense off in the app first. Sonar's PipeWire drop-in keeps its channels in
+PipeWire after gglinux is gone, and GameSense leaves a `coreProps.json` in each Proton prefix until
+it is turned off.
+
+**Arch package:**
+
+```sh
+systemctl --user disable --now gglinuxd
+rm -f ~/.config/autostart/gglinux.desktop                  # if you used Start at login
+sudo pacman -Rns gglinux-git
+sudo rm -f /etc/udev/rules.d/61-gglinux-reactive.rules     # if you opted in to reactive lighting
+```
+
+**`install-local.sh` install:**
 
 ```sh
 systemctl --user disable --now gglinuxd
@@ -89,126 +289,31 @@ rm -f ~/.local/bin/{gglinuxd,gglinux,ggctl}
 rm -f ~/.local/share/applications/gglinux.desktop
 rm -f ~/.local/share/icons/hicolor/128x128/apps/gglinux.png
 rm -f ~/.config/systemd/user/gglinuxd.service
-rm -f ~/.config/autostart/gglinux.desktop             # start at login
+rm -f ~/.config/autostart/gglinux.desktop
 systemctl --user daemon-reload
 sudo rm -f /etc/udev/rules.d/{60-gglinux,61-gglinux-reactive}.rules
 sudo udevadm control --reload
-rm -rf ~/.config/gglinux ~/.local/share/io.github.ykk.gglinux   # settings, and the UI's web storage
 ```
 
-**Moving to the Arch package** (`packaging/arch/PKGBUILD`)? Don't keep both installs: what
-`install-local.sh` put in your home runs instead of what the package installs. Quit gglinux from
-its tray and run the commands above first, all but the last line, which removes your settings.
-
-**Sonar** (the audio channels, EQ and virtual mic) needs PipeWire ≥ 1.0 with WirePlumber 0.5; it
-drives them with PipeWire's own `pw-dump`, `pw-metadata`, `pw-cli` and `wpctl`, so there is nothing
-extra to build. Three packages are **optional**: two for the mic chain (one of them also for Smart
-Volume), and one for clips:
-
-| Package | Provides | Without it |
-|---|---|---|
-| `noise-suppression-for-voice` | RNNoise noise suppression (`librnnoise_ladspa.so`) | no virtual mic |
-| `swh-plugins` | the `sc4m` compressor | no virtual mic, no Smart Volume |
-| `gpu-screen-recorder` | instant-replay clips | the Moments page asks you to install it |
-
-**Smart Volume** uses the `sc4m` compressor from `swh-plugins`. Without it, the channels stay
-exactly as they were and the Sonar tab asks you to install it. If you remove it while Sonar is on,
-gglinux takes Smart Volume out of its PipeWire drop-in at once, but the channels PipeWire is already
-running keep it, as last set, until PipeWire next restarts, and the Sonar tab can no longer switch
-it: turn Sonar off and on to take it out of them. If gglinux wasn't running then, the channels are
-missing from the next login until gglinux starts and puts them back without it.
-
-**GameSense** (games and apps driving the keyboard lighting) is off until you turn it on in the
-Games page. Turning it on starts a server on `127.0.0.1` and writes a small `coreProps.json`
-(`{"address":"127.0.0.1:<port>"}`) into every Proton prefix under
-`steamapps/compatdata/*/pfx/drive_c/ProgramData/SteelSeries/SteelSeries Engine 3/`, so Windows games
-under Proton find it; turning it off removes those files (gglinux never touches a coreProps.json it
-didn't write). Native Arch `steam` only — Flatpak Steam isn't supported. Few games speak GameSense;
-**Run test** shows what it looks like.
-
-**Audio visualizer and mic-mute light** use PipeWire's own `pw-record` and `wpctl`; nothing extra to
-install. The visualizer analyses what's playing live and never records it.
+**Your settings** (both kinds of install):
 
 ```sh
-sudo pacman -S noise-suppression-for-voice swh-plugins   # Arch; both are in [extra]
+rm -rf ~/.config/gglinux ~/.local/share/io.github.ykk.gglinux   # settings and the app's web storage
 ```
 
-Everything else works without them, and the mic appears on the next start once they are installed.
+## Development
 
-Poke at it without the UI, or from scripts and keyboard shortcuts, with `ggctl`. Installed, it's
-plain `ggctl …`; from a checkout:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for building, testing, the fake daemon that lets you work on
+the app with no devices attached, and the rules for anything that writes to hardware.
 
-```sh
-cargo run -p gglinuxd --bin ggctl                       # device list + live hotplug events
-cargo run -p gglinuxd --bin ggctl -- mouse              # battery + applied settings
-cargo run -p gglinuxd --bin ggctl -- mouse dpi 800,1600 --select 0 --save
-cargo run -p gglinuxd --bin ggctl -- mouse polling 1000 --save
-cargo run -p gglinuxd --bin ggctl -- mouse buttons button1,button2,button3,button4,button5,dpi
-cargo run -p gglinuxd --bin ggctl -- clip save          # save the instant replay (bind it to a key)
-cargo run -p gglinuxd --bin ggctl -- profile list       # saved lighting profiles, one per line
-cargo run -p gglinuxd --bin ggctl -- profile apply Late Night
-cargo run -p gglinuxd --bin ggctl -- gamesense test     # also: gamesense on, gamesense off
-```
+Security issues: see [SECURITY.md](SECURITY.md). Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
-Settings apply immediately but are lost when the mouse sleeps unless you pass `--save`, which commits
-them to its onboard memory. There is **no way to read settings back** off this mouse — the vendor
-protocol is write-only — so `ggctl mouse` reports what *gglinux* has applied this session rather than
-pretending to know what is on the device.
+## License and credits
 
-### UI
+gglinux is free software under the [GNU General Public License v3.0 or later](LICENSE).
 
-The desktop UI is a Tauri 2 + Svelte 5 app in [`ui/`](ui/):
-
-```sh
-cd ui && npm install
-npm run tauri dev
-```
-
-Use that, or `npm run tauri build` — **not** `cargo build && ./target/debug/gglinux`. A debug binary
-loads the frontend from `devUrl` (`http://localhost:1420`), not from the embedded `dist`, so without
-Vite running it comes up as a blank window: no error, no log line, and the tray and daemon socket all
-behave normally. Only a release build embeds the frontend.
-
-A dev build runs beside an installed gglinux rather than handing over to it, so while Start at login
-has the installed copy in the tray you'll see two tray icons.
-
-It needs a newer Rust toolchain than the daemon (≥1.88), `webkit2gtk-4.1` and an appindicator for
-the tray. On Arch:
-
-```sh
-sudo pacman -S webkit2gtk-4.1 libayatana-appindicator
-```
-
-On the **NVIDIA proprietary driver**, WebKit's DMABUF renderer cannot allocate its buffers: on a
-native Wayland session that takes the process down with `Gdk-Message: Error 71 (Protocol error)`, and
-on XWayland the window comes up empty. gglinux detects that driver and sets
-`WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself, so this needs no action — but if you set that variable
-yourself, your value wins.
-
-The UI is optional — the daemon runs headless and keeps applying your settings with the UI closed.
-
-### Testing without hardware
-
-`fakemouse` stands in for the daemon: same socket, same protocol, no devices. Stop `gglinuxd` first
-(it refuses to start if anything else is listening), then:
-
-```sh
-cargo run -p gglinuxd --example fakemouse                 # battery drifts down from 87%
-cargo run -p gglinuxd --example fakemouse -- --battery 12 # start low
-cargo run -p gglinuxd --example fakemouse -- --charging
-cargo run -p gglinuxd --example fakemouse -- --fail set_mouse_dpi
-cargo run -p gglinuxd --example fakemouse -- --no-mouse
-```
-
-It logs every request it receives, decoded — so it shows what the UI actually sent, not just which
-method was called. Two reasons to prefer it over the real daemon while working on the UI: applying a
-setting to the real mouse cannot be undone (the protocol has no getters, so the previous values are
-unrecoverable), and the battery paths are otherwise only reachable by waiting for the battery to
-move. It deserializes with the same `gg-ipc` types the daemon uses, so a frame it accepts is a frame
-the daemon accepts.
-
-## License
-
-GPL-3.0-or-later. Builds on the work of rivalcfg (WTFPL), HeadsetControl (GPL-3.0), OpenRGB (GPL-2.0+),
-apex-tux (Unlicense), loteran/Arctis-Sound-Manager (GPL-3.0+), Dymstro/nova-chatmix-linux (0BSD), and
-others — see the reuse map in PLAN.md.
+The device protocols come from the work of others: rivalcfg (WTFPL) for the mouse,
+HeadsetControl (GPL-3.0), loteran/Arctis-Sound-Manager (GPL-3.0+) and Dymstro/nova-chatmix-linux
+(0BSD) for the headset, OpenRGB (GPL-2.0+) for the keyboard lighting, and apex-tux (Unlicense) for
+the OLED research. RNNoise comes from werman/noise-suppression-for-voice and clips from
+gpu-screen-recorder. See the reuse map in [PLAN.md](PLAN.md#reuse-map-what-we-port-and-its-license).
