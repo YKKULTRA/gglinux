@@ -63,3 +63,42 @@ by hand.
 Network access (`cargo fetch`, `npm ci`) moved to `prepare()`; `build()` and `check()` use
 `--frozen`. The maintainer line is `# Maintainer: YKKULTRA` without an email: publishing an
 email address is the owner's call (see the publish checklist).
+
+## D9. Hygiene sweep: what was removed or changed
+
+Searched every tracked file (outside the orchestrator's `.claude/` and `.cloud-context/`) for home
+paths, usernames, hostnames, IPs, private-note references, logs, large binaries and tracked
+`.remember/` or `.superpowers/` content, and searched the full history for deleted files, blobs
+over 200 KB and credential-like strings.
+
+Removed or changed in the tree:
+
+- `docs/superpowers/plans/2026-09-29-gamesense-server.md`: a session scratchpad path containing
+  `/home/<you>`-derived directory names and a session id, replaced by `S=$(mktemp -d)`; a step that
+  said to update the owner's Obsidian note and assistant memory, reworded to "the list of files
+  gglinux writes".
+- `docs/superpowers/plans/2026-09-28-reactive-lighting.md`: "system-changes memory" step reworded
+  the same way.
+- `docs/superpowers/specs/2026-09-28-reactive-lighting-design.md`: an ACL line naming the local
+  user (`user:<you>:rw-`) now reads `user:<you>:rw-`.
+- Repository URLs `github.com/ykk/gglinux` → `github.com/YKKULTRA/gglinux` (see D5).
+
+Checked and kept:
+
+- `crates/gg-audio/fixtures/pw-dump-2026-09-27.json`: a trimmed `pw-dump` used by tests. It names
+  generic audio devices (the headset, a USB audio interface, "AirPods Pro", an HDMI monitor model)
+  and apps (Firefox, Elisa); the Bluetooth address is already the placeholder `00:11:22:33:44:55`.
+  Nothing personal enough to justify breaking the test fixture.
+- Test paths like `/home/u/...` and `/home/you/...` are placeholders.
+- Hardware descriptions in `PLAN.md` and the specs (RTX 4090, KDE, Arch/CachyOS) are development
+  context, not private.
+- No logs, no large binaries (largest tracked file is a 140 KB plan), nothing tracked under
+  `.remember/` or `.superpowers/`. `.gitignore` already covers `target/`, `node_modules/`,
+  `ui/dist/`, makepkg output and `*.log`.
+- History: no file was ever deleted, no blob over 200 KB, no credentials. The two personal strings
+  fixed above remain in old commits; harmless, and rewriting published history is the owner's call.
+
+Not touched (orchestrator-owned): the commit `b68b0db` "cloud-only: session settings and context
+pack" adds `.claude/` and `.cloud-context/`, which contain the owner's home paths, Obsidian vault
+path and email. **That commit must not reach a public branch**; the publish checklist says how to
+drop it.

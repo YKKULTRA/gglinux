@@ -1817,4 +1817,4 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 4. `./scripts/install-local.sh --no-build --reactive`; within about 2 s the panel shows "on".
 5. Fade, then Ripple, over a wave: presses light up at once; typing is unaffected.
 6. Turn reactive off; `lsof /dev/hidraw6 /dev/hidraw8` shows gglinuxd holds neither.
-7. Record `61-gglinux-reactive.rules` (if kept) in the system-changes memory.
+7. Record `61-gglinux-reactive.rules` (if kept) in the list of files gglinux installs.
