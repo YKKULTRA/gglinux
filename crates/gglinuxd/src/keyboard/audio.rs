@@ -70,7 +70,8 @@ impl Capture {
                 let mut bytes = vec![0u8; HOP * 4];
                 let mut hop = vec![0f32; HOP];
                 while out.read_exact(&mut bytes).is_ok() {
-                    #[allow(clippy::chunks_exact_to_as_chunks)] // `as_chunks` needs Rust 1.88
+                    // `as_chunks` needs Rust 1.88; older clippy (1.97 included) does not know this lint.
+                    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
                     let samples = bytes.chunks_exact(4);
                     for (s, b) in hop.iter_mut().zip(samples) {
                         *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
