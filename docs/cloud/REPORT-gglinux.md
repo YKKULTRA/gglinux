@@ -18,9 +18,23 @@ touched.
 | `ui/src-tauri`: fmt, clippy `-D warnings`, tests | Rust 1.97.0 | pass, 11 tests passed |
 | `npx tauri build --no-bundle` (release) | | ok, 5.5 MB binary |
 | `npx tauri build --debug --no-bundle -- --locked` (what CI runs) | | ok |
-| `makepkg` of `gglinux-git` | `archlinux` container, Rust 1.99.1, Node 26 | pending (rebuild with the final PKGBUILD running) |
-| CI checks on current stable, non-root | `archlinux` container, Rust 1.99.1 | pending (running) |
+| `makepkg` of `gglinux-git` (prepare, build, `check()`, package) | `archlinux` container, Rust 1.99.1, Node 26.12 | pass; `check()` 369 passed; namcap: only expected warnings (see below) |
+| Every CI step, as a non-root user, clean clone | `archlinux` container, Rust 1.99.1 (current stable), Node 26.12 | all pass; 381 tests (370 workspace + 11 backend); debug Tauri build ok |
 | GitHub Actions | | not run: the workflow only triggers on master/main, pull requests and manual dispatch |
+
+Notes on the results:
+
+- `makepkg` ran from a local clone of this branch (the GitHub repository is private, so the
+  PKGBUILD's real source could not be fetched anonymously). The first run failed to link the
+  daemon (fixed with `!lto`); the final run used the final PKGBUILD.
+- namcap's remaining warnings are expected: `libayatana-appindicator`, `pipewire`, `wireplumber`
+  and `xdg-utils` "may not be needed" (they are loaded or executed at run time, not linked), the
+  usual "unused shared library ld-linux" note on Rust binaries, and the `-debug` package's
+  build-id symlinks pointing into the main package.
+- The 369 vs 370 test counts: the gg-audio regression test was added after the package build
+  started.
+- The Rust 1.99.1 run matters because CI uses the latest stable, whose clippy knows lints that
+  1.97 does not; it found nothing.
 
 ## What changed (commits on this branch)
 

@@ -140,3 +140,14 @@ current Arch package that owns `libgcc_s.so.1` (namcap names it). namcap's "may 
 warnings for `libayatana-appindicator`, `pipewire`, `wireplumber` and `xdg-utils` are false
 positives (loaded or executed at run time), so they stay. The `-debug` package's symlink errors
 are namcap's known false positive for split debug packages.
+
+## D14. How the release was verified without GitHub Actions or an Arch machine
+
+CI can't run on this branch (it only triggers on master/main, pull requests and manual dispatch,
+and opening a pull request was not part of the brief). Instead, every command the workflow runs
+was run here on Ubuntu 24.04 with Rust 1.97, and again in an `archlinux` container with Rust
+1.99.1 (the current stable, which CI's `dtolnay/rust-toolchain@stable` will pick up) as a non-root
+user on a clean clone, since GitHub's runners are non-root. The PKGBUILD was built end to end with
+makepkg in the same kind of container, from a local clone of this branch because the repository is
+still private. The Arch image came from `ghcr.io/archlinux/archlinux` (Docker Hub rate-limited the
+pull).
