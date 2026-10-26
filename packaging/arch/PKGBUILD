@@ -6,8 +6,12 @@ pkgdesc="Open-source SteelSeries GG for Linux: lighting, headset, Sonar-style au
 arch=('x86_64')
 url="https://github.com/YKKULTRA/gglinux"
 license=('GPL-3.0-or-later')
-depends=('systemd-libs' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'pipewire' 'wireplumber'
-         'xdg-utils')
+# Linked: glibc and libgcc (all binaries), systemd-libs (libudev, for the daemon), the rest (the app).
+# Run, not linked: libayatana-appindicator (loaded for the tray), pipewire and wireplumber (the
+# pw-* tools and wpctl), xdg-utils (xdg-open).
+depends=('glibc' 'libgcc' 'systemd-libs'
+         'webkit2gtk-4.1' 'gtk3' 'glib2' 'gdk-pixbuf2' 'cairo' 'libsoup3' 'dbus' 'hicolor-icon-theme'
+         'libayatana-appindicator' 'pipewire' 'wireplumber' 'xdg-utils')
 makedepends=('git' 'cargo' 'nodejs' 'npm')
 optdepends=('noise-suppression-for-voice: noise suppression for the Sonar microphone'
             'swh-plugins: compressor for the Sonar microphone and Smart Volume'
