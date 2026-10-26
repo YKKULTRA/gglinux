@@ -1,0 +1,5 @@
+# Formatting-only commits; `git config blame.ignoreRevsFile .git-blame-ignore-revs` makes
+# git blame skip them.
+
+# style: apply rustfmt to the whole workspace
+88a6390f76378c19fc13e7a350d447178194b2a9
