@@ -74,13 +74,13 @@ over 200 KB and credential-like strings.
 Removed or changed in the tree:
 
 - `docs/superpowers/plans/2026-09-29-gamesense-server.md`: a session scratchpad path containing
-  `/home/<you>`-derived directory names and a session id, replaced by `S=$(mktemp -d)`; a step that
+  the owner's home directory name and a session id, replaced by `S=$(mktemp -d)`; a step that
   said to update the owner's Obsidian note and assistant memory, reworded to "the list of files
   gglinux writes".
 - `docs/superpowers/plans/2026-09-28-reactive-lighting.md`: "system-changes memory" step reworded
   the same way.
 - `docs/superpowers/specs/2026-09-28-reactive-lighting-design.md`: an ACL line naming the local
-  user (`user:<you>:rw-`) now reads `user:<you>:rw-`.
+  user now reads `user:<you>:rw-`.
 - Repository URLs `github.com/ykk/gglinux` → `github.com/YKKULTRA/gglinux` (see D5).
 
 Checked and kept:
@@ -102,3 +102,21 @@ Not touched (orchestrator-owned): the commit `b68b0db` "cloud-only: session sett
 pack" adds `.claude/` and `.cloud-context/`, which contain the owner's home paths, Obsidian vault
 path and email. **That commit must not reach a public branch**; the publish checklist says how to
 drop it.
+
+## D10. Orchestrator correction: no deadline, no history rewrite
+
+Mid-session the owner's orchestrator cancelled the 23:45 UTC deadline and said not to rewrite
+history or force-push, but to record the history findings with exact cleanup commands. Nothing was
+rewritten or force-pushed. The findings and two cleanup paths (A: rebase only the release branch to
+drop `b68b0db`; B: `git filter-repo` to also replace the email everywhere) are in
+`docs/PUBLISH-CHECKLIST.md`. Both paths were dry-run in throwaway clones in the session scratchpad
+(never pushed): A rebases cleanly and the per-milestone `--no-ff` merges reproduce the release
+tree exactly; B rewrites all 205 owner commits, prunes `b68b0db` and its files from every branch,
+scrubs the two leftover strings, and the hash-remap loop leaves every CHANGELOG hash resolvable.
+
+## D11. The public docs don't spell out what they tell the owner to scrub
+
+The checklist will be public too, so it never writes the owner's email, home directory path or
+local user name literally: the cleanup commands read the address from a commit and use regex
+patterns for the two strings. The CHANGELOG avoids citing hashes of this session's commits, which
+path A would change.

@@ -278,7 +278,7 @@ compared against a real PipeWire graph.
   Handlers kept for all games together are capped at 2 MiB.
 - **Clip tests** (`aa593ac`). Tests run their stand-in recorder only from a new private folder with
   an unguessable name, never one another account could have created first.
-- **Build dependencies** (`d95f208`, 2026-10-26). The UI lockfile takes patched `vite`, `devalue`,
+- **Build dependencies** (2026-10-26). The UI lockfile takes patched `vite`, `devalue`,
   `nanoid` and `source-map-js`, clearing four high-severity `npm audit` advisories, all in build-time
   dependencies.
 
