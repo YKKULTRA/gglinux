@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! PipeWire's own command-line tools, behind a trait so the orchestration can
 //! be tested against a fake.
 

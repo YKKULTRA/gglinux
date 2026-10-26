@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Headset settings between the IPC and the device: mapping a client's change
 //! onto the device's typed setting, and remembering what the device cannot
 //! report back.

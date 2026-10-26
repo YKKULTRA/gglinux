@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! ChatMix: one balance control across the Game and Chat channels.
 
 /// Gains for the (Game, Chat) outlets from a balance of -1.0 (all Game) through

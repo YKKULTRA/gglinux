@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! gglinuxd — the gglinux background daemon.
 //!
 //! Current scope: enumerate SteelSeries devices, monitor hotplug, control the

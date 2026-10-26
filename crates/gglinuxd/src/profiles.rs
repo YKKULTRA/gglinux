@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Lighting profiles, and rules that switch to one while a game runs. A tokio
 //! task scans running programs every 2 s and talks to the keyboard worker —
 //! through [`LightingPort`], so the switching is testable without it. The game

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The virtual mic: RNNoise noise suppression → noise gate → compressor on a
 //! physical mic, as a source apps record from.
 //!

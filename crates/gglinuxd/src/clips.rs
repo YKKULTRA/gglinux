@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Instant replay: a supervised `gpu-screen-recorder` in replay mode, saved
 //! on `SIGUSR1`. Off by default. With `games_only`, it records only while a
 //! game from the profiles' rules runs (the profiles watcher says which). A

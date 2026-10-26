@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Which status changes are worth lighting the base-station screen for.
 //!
 //! The worker compares consecutive `06 b0` reads with [`wake_reason`]. A `Some`

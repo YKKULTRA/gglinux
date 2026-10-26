@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A stand-in for `gglinuxd` that speaks the real protocol against no hardware.
 //!
 //! ```text

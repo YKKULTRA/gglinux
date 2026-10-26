@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Packet construction for the Rival 3 Wireless Gen 2.
 //!
 //! Pure functions over bytes — no I/O — so the wire format is unit-testable without

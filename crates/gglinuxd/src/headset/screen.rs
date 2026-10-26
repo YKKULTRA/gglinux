@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! When the base-station screen should be lit.
 //!
 //! Pure: no device access, and the clock is passed in, so every rule here is

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Which programs are running, by the names a person would recognise.
 
 use std::collections::BTreeMap;

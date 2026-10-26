@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Minimal CLI for poking the Rival 3 Wireless Gen 2 directly, without the daemon.
 //!
 //! ```text

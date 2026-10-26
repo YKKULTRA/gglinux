@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Control for the SteelSeries **Arctis Nova Pro Wireless** (`1038:12e0`).
 //!
 //! Talks to the base station's vendor HID interface. Unlike the Rival 3, this

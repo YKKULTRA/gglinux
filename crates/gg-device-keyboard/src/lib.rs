@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Control for the SteelSeries **Apex Pro TKL Gen 3** (`1038:1642`) lighting.
 //!
 //! Everything sent is framed by [`proto`], which only frames opcodes on its

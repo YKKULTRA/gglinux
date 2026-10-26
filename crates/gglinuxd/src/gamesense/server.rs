@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The GameSense HTTP endpoints, on loopback only, and closed to web pages:
 //! a request carrying an `Origin` header is refused, and every POST must be
 //! `application/json`, which a browser can't send cross-origin without a

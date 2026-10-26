@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Feeds the visualizer: records an output's monitor with `pw-record` — the
 //! default output's, or with Sonar on the device its channels play into — and
 //! keeps 18 band levels current. Audio is analysed in memory only; nothing is

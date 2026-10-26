@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Profiles and game rules, as saved, and which rule applies when.
 
 use std::collections::HashSet;

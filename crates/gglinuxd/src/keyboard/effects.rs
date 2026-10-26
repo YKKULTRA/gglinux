@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Key colours for each lighting effect at a moment in time.
 //!
 //! Pure, so every effect is tested without the keyboard; the worker asks for

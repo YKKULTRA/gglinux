@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Sonar-style audio for gglinux, on PipeWire.
 //!
 //! PipeWire hosts the graph — four virtual output channels declared in a

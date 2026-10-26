@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Which channel an app plays into.
 
 use std::collections::BTreeMap;

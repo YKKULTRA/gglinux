@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Shared wire types for the `gglinuxd` <-> UI unix-socket protocol.
 //!
 //! Framing is newline-delimited JSON (one JSON value per line). The client sends

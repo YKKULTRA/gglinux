@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Check which SteelSeries hidraw nodes the repo's udev rules open to the desktop user,
 # without installing them: `udevadm test` loads the repo copies from a scratch directory,
 # where a file of the same name shadows any installed copy. CURRENT_TAGS is what this run

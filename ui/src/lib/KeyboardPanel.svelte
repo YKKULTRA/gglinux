@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
   // Apex Pro TKL Gen 3 lighting: give it to gglinux or leave it to the
   // keyboard, pick an effect, and paint keys for the static one.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Apex Pro TKL Gen 3 (`1038:1642`) lighting protocol.
 //!
 //! From OpenRGB's `SteelSeriesApexController` (GPL-2.0-or-later), verified on

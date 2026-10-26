@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Parametric EQ: band layouts, defaults, validation, AutoEQ import, and the
 //! filter-chain parameters that set bands live.
 //!

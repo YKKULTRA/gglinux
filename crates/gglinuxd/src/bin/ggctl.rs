@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! CLI client for gglinuxd. Installed as `ggctl`; from a checkout:
 //! `cargo run -p gglinuxd --bin ggctl`. The commands are in [`USAGE`], which
 //! `ggctl --help` prints.

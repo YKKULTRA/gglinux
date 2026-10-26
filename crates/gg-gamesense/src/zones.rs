@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! GameSense zone names → HID codes on the Apex Pro TKL Gen 3, in zone
 //! order: left to right, then top to bottom.
 

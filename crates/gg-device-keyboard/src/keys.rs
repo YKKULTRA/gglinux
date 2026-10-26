@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The keyboard's typing reports, decoded to the set of keys held down.
 //!
 //! Interface 0 sends the 8-byte boot report (a modifier bitmask, a reserved

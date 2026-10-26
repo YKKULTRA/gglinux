@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Watches whether the default microphone is muted, for the mute light.
 
 use std::process::Command as Process;

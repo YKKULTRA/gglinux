@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What games send: the GameSense requests, and colour handlers parsed into
 //! something the painter can use. Parsing is lenient about devices this
 //! machine can't show and strict about malformed colours.

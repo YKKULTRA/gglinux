@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Prove a setter reaches the hardware, then put it back.
 //!
 //! ```text

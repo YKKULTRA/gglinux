@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
   // Start at login, and backups of every setting. The UI process does these
   // itself, so they work while the daemon is down.

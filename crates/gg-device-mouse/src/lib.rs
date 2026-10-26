@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Control for the SteelSeries **Rival 3 Wireless Gen 2** (`1038:1872`).
 //!
 //! Talks to the 2.4 GHz dongle's vendor HID interface. Bluetooth mode exposes a

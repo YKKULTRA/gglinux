@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
   // Panel for the Arctis Nova Pro Wireless: battery, and burn-in protection for
   // the base station's screen.

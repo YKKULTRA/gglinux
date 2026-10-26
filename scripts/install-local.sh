@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Install gglinux for the current user: the daemon and ggctl -> ~/.local/bin, systemd --user
 # unit, the UI with its desktop entry, and the udev rule that grants your desktop session access
 # to SteelSeries devices.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What PipeWire has right now, read from `pw-dump`.
 
 use anyhow::{Context, Result};

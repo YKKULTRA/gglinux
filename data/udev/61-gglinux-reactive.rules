@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # gglinux — OPTIONAL: lets reactive lighting see key presses on the Apex Pro TKL Gen 3.
 #
 # Reactive lighting needs to see which keys you press. This rule lets any program you

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Stroke-only 24x24 icon paths, rendered by <Icon>. Kept as data so nav/device
 // tables can reference icons by name without a component per glyph.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Desktop chores the UI process does itself, not through the daemon.
 
 import { invoke } from "@tauri-apps/api/core";

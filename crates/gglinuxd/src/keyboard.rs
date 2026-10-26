@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Keyboard worker: the Apex Pro TKL Gen 3's lighting.
 //!
 //! One OS thread owns the device, like the other workers. With gglinux lighting

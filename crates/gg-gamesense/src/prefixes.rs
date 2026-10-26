@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The Proton bridge: `coreProps.json` in every Proton prefix, so Windows games
 //! under Proton find the server — Wine maps `C:\ProgramData` to the prefix's
 //! `drive_c/ProgramData`, and pressure-vessel shares the host network, so the

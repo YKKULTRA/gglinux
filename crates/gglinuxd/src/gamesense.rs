@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! GameSense: the SDK server, its files in Proton prefixes, and the games it
 //! lets draw on the keyboard. A tokio task owns the on/off switch, the server,
 //! the prefix scan and the settings file; the registry is shared with the

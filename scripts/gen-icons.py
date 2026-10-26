@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Render the gglinux app icon at every size Tauri bundles.
 
 Draws once at 1024px and downsamples, so there is a single source of truth for the

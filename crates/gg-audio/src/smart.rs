@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Smart Volume: evens out a channel's loudness, like Sonar's.
 //!
 //! It is swh's SC4 compressor (`sc4m`, from the optional `swh-plugins`) at the

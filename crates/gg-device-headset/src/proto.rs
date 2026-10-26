@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Packet builders and reply decoding for the Arctis Nova Pro Wireless.
 //!
 //! Commands are written as report `0x06`. The opcode is the byte *after* the

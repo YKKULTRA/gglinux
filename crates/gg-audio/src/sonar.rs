@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Sonar: the channels, routing apps into them, their volumes, and ChatMix.
 //!
 //! PipeWire hosts the graph (see [`config`]); this drives it through

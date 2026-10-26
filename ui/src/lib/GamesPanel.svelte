@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
   // GameSense: the switch, where games find it, a test, and the games that have talked to it.
 

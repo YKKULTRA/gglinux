@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Typed client for gglinuxd.
 //
 // The webview cannot open a unix socket, so the Rust side (src-tauri) owns the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The PipeWire drop-in that declares Sonar's channels.
 //!
 //! PipeWire hosts the channels itself, so they keep working while gglinux is

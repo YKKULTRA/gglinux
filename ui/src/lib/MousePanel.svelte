@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
   // Control panel for the Rival 3 Wireless Gen 2.
   //

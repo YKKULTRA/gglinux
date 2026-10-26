@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The save-clip hotkey, through the GlobalShortcuts portal: the daemon never
 //! sees the keyboard (reactive lighting's security choice), so KDE does.
 

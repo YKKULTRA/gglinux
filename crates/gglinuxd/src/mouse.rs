@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Mouse control worker.
 //!
 //! `hidapi` handles are neither `Send` nor `Sync` and every call blocks, so all

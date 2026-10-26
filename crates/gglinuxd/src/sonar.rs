@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Sonar worker: channel routing on its own thread.
 //!
 //! Every PipeWire action shells out to PipeWire's tools and can block — enabling

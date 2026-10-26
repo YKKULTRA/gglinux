@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Lookup tables for the Rival 3 Wireless Gen 2.
 //!
 //! **Generated — do not edit by hand.** Transcribed mechanically from rivalcfg

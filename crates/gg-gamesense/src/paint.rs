@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What one handler paints for an event's current value, at a moment in time.
 //! Pure: the registry supplies the value, its range and its age.
 

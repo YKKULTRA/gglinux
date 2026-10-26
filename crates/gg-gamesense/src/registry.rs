@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Every game that has talked to the server, its events and their handlers,
 //! and what the active one paints. Time is passed in (`now`, monotonic seconds),
 //! so all of it is testable without a clock.

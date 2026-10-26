@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The replay recorder's command line, restart pacing, and clip files. Pure,
 //! apart from reading and writing its own files.
 

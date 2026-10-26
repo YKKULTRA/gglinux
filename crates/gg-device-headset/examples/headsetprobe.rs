@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Read-only probe for the Nova Pro Wireless base station.
 //!
 //! ```text

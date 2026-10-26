@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Audio → 18 band levels for the visualizer. Pure: samples in, levels out.
 
 use std::sync::Arc;

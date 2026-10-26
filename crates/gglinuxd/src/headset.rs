@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Headset worker: the Arctis Nova Pro Wireless base station.
 //!
 //! Like the mouse, all device I/O happens on one dedicated OS thread, because

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Sonar's saved state: `$XDG_CONFIG_HOME/gglinux/sonar.json`.
 
 use std::collections::BTreeMap;

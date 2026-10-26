@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! gglinux desktop UI.
 //!
 //! The webview cannot open a unix socket, so this process owns the connection to

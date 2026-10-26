@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Desktop chores for the UI: starting at login, and backing settings up.
 //! Paths and the command runner are passed in, so all of it is testable.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Reads key presses from the Apex's typing interfaces, for reactive lighting.
 //!
 //! Only while reactive lighting is on: the worker starts a [`Reader`] then,

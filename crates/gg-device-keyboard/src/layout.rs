@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The US ANSI TKL keyboard as the UI draws it: HID usage code, label, and
 //! position and width in key units (a standard key is 1 × 1). The owner's
 //! keyboard reports region 1 (US); ISO boards would add two keys and reshape

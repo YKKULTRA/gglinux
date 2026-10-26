@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! HID enumeration + classification + hotplug monitoring for SteelSeries devices.
 //!
 //! [`scan`] returns the currently-connected logical devices. [`run_monitor`] blocks
