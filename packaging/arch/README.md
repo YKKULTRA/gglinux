@@ -16,7 +16,7 @@ This directory holds the AUR package for gglinux:
 | `/usr/lib/systemd/user/gglinuxd.service` | the user unit, with `ExecStart=/usr/bin/gglinuxd` |
 | `/usr/lib/udev/rules.d/60-gglinux.rules` | the narrow device-access rule (control interfaces only) |
 | `/usr/share/gglinux/61-gglinux-reactive.rules` | the opt-in reactive-lighting rule, **not** active until the user copies it to `/etc/udev/rules.d/` |
-| `/usr/share/applications/gglinux.desktop`, `/usr/share/icons/hicolor/128x128/apps/gglinux.png` | menu entry and icon |
+| `/usr/share/applications/io.github.ykk.gglinux.desktop`, `/usr/share/icons/hicolor/128x128/apps/gglinux.png` | menu entry and icon |
 | `/usr/share/licenses/gglinux-git/LICENSE` | GPL-3.0 text |
 
 The user still runs `systemctl --user enable --now gglinuxd` (the install message says so).

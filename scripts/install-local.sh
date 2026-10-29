@@ -70,8 +70,10 @@ if [[ $do_ui -eq 1 ]]; then
     echo "==> installing the UI -> ~/.local/bin/gglinux"
     install -Dm755 "$repo/ui/src-tauri/target/release/gglinux" "$HOME/.local/bin/gglinux"
     # ~/.local/bin may not be on the desktop session's PATH, so the entry names the full path.
-    sed "s|^Exec=.*|Exec=\"$HOME/.local/bin/gglinux\"|" "$repo/data/gglinux.desktop" \
-      | install -Dm644 /dev/stdin "$HOME/.local/share/applications/gglinux.desktop"
+    # Named after the app id: the desktop portal finds gglinux by it (the clip hotkey).
+    sed "s|^Exec=.*|Exec=\"$HOME/.local/bin/gglinux\"|" "$repo/data/io.github.ykk.gglinux.desktop" \
+      | install -Dm644 /dev/stdin "$HOME/.local/share/applications/io.github.ykk.gglinux.desktop"
+    rm -f "$HOME/.local/share/applications/gglinux.desktop"  # its name before 2026-10-29
     install -Dm644 "$repo/ui/src-tauri/icons/128x128.png" \
       "$HOME/.local/share/icons/hicolor/128x128/apps/gglinux.png"
   else

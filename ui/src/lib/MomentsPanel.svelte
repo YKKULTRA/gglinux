@@ -102,7 +102,7 @@
         {:else if st.hotkey_error}
           <span class="meta warn">{st.hotkey_error}</span>
         {:else}
-          <span class="meta">No hotkey yet: KDE asks to confirm Alt+S when clips start.</span>
+          <span class="meta">No hotkey yet: when clips start, KDE asks to confirm Alt+S (Hyprland takes it from its config).</span>
         {/if}
       </div>
       {#if st.error}<p class="meta warn">{st.error}</p>{/if}
