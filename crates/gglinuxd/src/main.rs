@@ -21,12 +21,14 @@ mod gamesense;
 mod headset;
 mod keyboard;
 mod mouse;
+mod profiles;
 mod sonar;
 
 use gamesense::{Command as GamesenseCommand, Handle as GamesenseHandle};
 use headset::{Command as HeadsetCommand, Handle as HeadsetHandle};
 use keyboard::{Command as KeyboardCommand, Handle as KeyboardHandle};
 use mouse::{Command as MouseCommand, Handle as MouseHandle};
+use profiles::{Command as ProfilesCommand, Handle as ProfilesHandle};
 use sonar::{Command as SonarCommand, Handle as SonarHandle};
 
 /// Capacity of the per-client event broadcast buffer.
@@ -43,6 +45,7 @@ struct Workers {
     keyboard: KeyboardHandle,
     sonar: SonarHandle,
     gamesense: GamesenseHandle,
+    profiles: ProfilesHandle,
 }
 
 #[tokio::main]
@@ -79,6 +82,7 @@ async fn main() -> Result<()> {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
         gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
+        profiles: profiles::spawn(event_tx.clone(), keyboard.clone()),
         keyboard,
         sonar: sonar::spawn(event_tx.clone()),
     };
@@ -356,6 +360,22 @@ async fn dispatch(
             workers.gamesense.send::<()>(|reply| GamesenseCommand::RemoveGame { game, reply }).await,
         ),
         Request::GamesenseTest => outcome(workers.gamesense.send(GamesenseCommand::RunTest).await),
+        Request::GetProfiles => match workers.profiles.send(ProfilesCommand::GetState).await {
+            Ok(state) => ResponseData::Profiles { state },
+            Err(message) => ResponseData::Error { message },
+        },
+        Request::SaveProfile { name } => {
+            outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::Save { name, reply }).await)
+        }
+        Request::ApplyProfile { name } => {
+            outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::Apply { name, reply }).await)
+        }
+        Request::DeleteProfile { name } => {
+            outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::Delete { name, reply }).await)
+        }
+        Request::SetGameRules { rules } => {
+            outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::SetRules { rules, reply }).await)
+        }
     };
     ServerMessage::response(frame.id, result)
 }

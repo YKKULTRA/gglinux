@@ -286,6 +286,11 @@ Profiles + per-game auto-switch (QuickSet-style `/proc` exec watcher swaps profi
 Personal/Stream sink graph); virtual surround (spatializer + SOFA, optional); tray/autostart; settings
 backup (local export/import — no cloud); AUR PKGBUILD + install docs.
 **Accept:** launching a game swaps profiles and restores on exit; Alt+S saves a replay clip; RGB syncs
+
+Progress 2026-09-29 — **M7a profiles done in software** (spec
+`docs/superpowers/specs/2026-09-29-profiles-design.md`): named lighting profiles and game rules
+(process name → profile) applied while the program runs, from a 2 s `/proc` scan that also
+recognises Proton games' `.exe` names. Not yet verified on hardware.
 across all three devices; `makepkg -si` installs a working daemon+UI from clean.
 
 ---

@@ -17,6 +17,8 @@ import type {
   HeadsetState,
   KeyboardState,
   GameSenseState,
+  GameRule,
+  ProfilesState,
   Lighting,
   MicSettings,
   MouseState,
@@ -51,6 +53,8 @@ class Daemon {
   keyboard = $state<KeyboardState | null>(null);
   /** GameSense server and games; null until first fetched. */
   gamesense = $state<GameSenseState | null>(null);
+  /** Profiles and game rules; null until first fetched. */
+  profiles = $state<ProfilesState | null>(null);
   /** Last transport/protocol error, for surfacing in the UI. */
   lastError = $state<string | null>(null);
 
@@ -75,6 +79,7 @@ class Daemon {
         this.sonar = null;
         this.keyboard = null;
         this.gamesense = null;
+        this.profiles = null;
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -254,6 +259,35 @@ class Daemon {
     return this.#gamesenseCommand({ method: "gamesense_test" });
   }
 
+  async getProfiles(): Promise<ProfilesState> {
+    const res = await this.request({ method: "get_profiles" });
+    if (res.type !== "profiles") throw new Error(`unexpected response: ${res.type}`);
+    this.profiles = res.state;
+    return res.state;
+  }
+
+  saveProfile(name: string): Promise<void> {
+    return this.#profilesCommand({ method: "save_profile", params: { name } });
+  }
+
+  applyProfile(name: string): Promise<void> {
+    return this.#profilesCommand({ method: "apply_profile", params: { name } });
+  }
+
+  deleteProfile(name: string): Promise<void> {
+    return this.#profilesCommand({ method: "delete_profile", params: { name } });
+  }
+
+  setGameRules(rules: GameRule[]): Promise<void> {
+    return this.#profilesCommand({ method: "set_game_rules", params: { rules } });
+  }
+
+  async #profilesCommand(req: Request): Promise<void> {
+    const res = await this.request(req);
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getProfiles();
+  }
+
   async #gamesenseCommand(req: Request): Promise<void> {
     const res = await this.request(req);
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
@@ -310,6 +344,10 @@ class Daemon {
         break;
       case "gamesense_changed":
         this.gamesense = ev.data.state;
+        break;
+      case "profiles_changed":
+        // Events carry no running-program list; keep the last one fetched.
+        this.profiles = { ...ev.data.state, running: this.profiles?.running ?? [] };
         break;
     }
   }

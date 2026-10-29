@@ -262,6 +262,18 @@ export interface GameSenseState {
   games: GameInfo[];
 }
 
+export interface GameRule {
+  process: string;
+  profile: string;
+}
+
+export interface ProfilesState {
+  profiles: string[];
+  rules: GameRule[];
+  active: GameRule | null;
+  running: string[];
+}
+
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
 export type Request =
   | { method: "list_devices" }
@@ -292,7 +304,12 @@ export type Request =
   | { method: "set_gamesense_enabled"; params: { enabled: boolean } }
   | { method: "set_game_enabled"; params: { game: string; enabled: boolean } }
   | { method: "remove_game"; params: { game: string } }
-  | { method: "gamesense_test" };
+  | { method: "gamesense_test" }
+  | { method: "get_profiles" }
+  | { method: "save_profile"; params: { name: string } }
+  | { method: "apply_profile"; params: { name: string } }
+  | { method: "delete_profile"; params: { name: string } }
+  | { method: "set_game_rules"; params: { rules: GameRule[] } };
 
 export interface RequestFrame {
   id: number;
@@ -307,6 +324,7 @@ export type ResponseData =
   | { type: "sonar"; state: SonarState }
   | { type: "keyboard"; state: KeyboardState }
   | { type: "gamesense"; state: GameSenseState }
+  | { type: "profiles"; state: ProfilesState }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -318,7 +336,8 @@ export type DaemonEvent =
   | { event: "headset_changed"; data: { state: HeadsetState } }
   | { event: "sonar_changed"; data: { state: SonarState } }
   | { event: "keyboard_changed"; data: { state: KeyboardState } }
-  | { event: "gamesense_changed"; data: { state: GameSenseState } };
+  | { event: "gamesense_changed"; data: { state: GameSenseState } }
+  | { event: "profiles_changed"; data: { state: ProfilesState } };
 
 export type ServerMessage =
   | { kind: "response"; id: number; result: ResponseData }
