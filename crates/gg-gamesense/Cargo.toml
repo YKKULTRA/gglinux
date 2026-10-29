@@ -1,0 +1,13 @@
+[package]
+name = "gg-gamesense"
+description = "SteelSeries GameSense: requests, handlers, zones and the game registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+gg-device-keyboard = { path = "../gg-device-keyboard" }

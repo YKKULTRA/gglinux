@@ -269,6 +269,11 @@ document "use native Steam for GameSense". Native Arch `steam` is fine.
 Reuse: `SteelSeries/gamesense-sdk` docs (protocol facts); `Ven0m0/steelseriesgg-rs` axum server
 skeleton (MIT) — note it lacks the per-prefix writer, which is new work.
 
+**Implemented 2026-09-29** in `gg-gamesense` + `gglinuxd/src/gamesense*`: the prefix writer never
+overwrites a coreProps.json that isn't gglinux's (only an `address` key on `127.0.0.1`), and removes
+its own files when GameSense is turned off. Requests with an `Origin` header are refused and POSTs
+must be `application/json`, so browsers can't reach it.
+
 ---
 
 ## 5. Clips — gpu-screen-recorder (GPL-3.0)

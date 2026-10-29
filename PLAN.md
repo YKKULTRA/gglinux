@@ -263,6 +263,14 @@ inotify new prefixes). Implement all endpoints + the handler model (color/tactil
 events onto keyboard RGB/OLED via M4. Built-in Engine Apps: clock, audio visualizer, Discord (mute/talk),
 CS2 (health/ammo). Document "native Steam only (not Flatpak Steam)".
 **Accept:** a GameSense title under Proton (e.g. CS2) drives the Apex OLED/RGB live; a heartbeat timeout
+
+Progress 2026-09-29 — **M6a GameSense server done in software** (spec:
+`docs/superpowers/specs/2026-09-29-gamesense-server-design.md`): new `gg-gamesense` crate (requests,
+handlers, zones, painting, registry, Proton-prefix files), an axum server on loopback closed to web
+pages, `coreProps.json` in every Proton prefix while enabled, games drawn over the lighting as an
+overlay (taking the keyboard over when gglinux lighting is off, handing back after the game goes
+quiet), and a Games page with a built-in test game. None of the owner's installed games speak the
+SDK. Not yet verified on hardware. Next: M6b game-independent effects on the same overlay interface.
 clears state after 15 s.
 
 ### M7 — Suite features & polish

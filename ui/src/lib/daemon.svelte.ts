@@ -16,6 +16,7 @@ import type {
   HeadsetChange,
   HeadsetState,
   KeyboardState,
+  GameSenseState,
   Lighting,
   MicSettings,
   MouseState,
@@ -48,6 +49,8 @@ class Daemon {
   sonar = $state<SonarState | null>(null);
   /** Keyboard layout and lighting; null until first fetched. */
   keyboard = $state<KeyboardState | null>(null);
+  /** GameSense server and games; null until first fetched. */
+  gamesense = $state<GameSenseState | null>(null);
   /** Last transport/protocol error, for surfacing in the UI. */
   lastError = $state<string | null>(null);
 
@@ -71,6 +74,7 @@ class Daemon {
         this.headset = null;
         this.sonar = null;
         this.keyboard = null;
+        this.gamesense = null;
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -227,6 +231,35 @@ class Daemon {
     await this.getKeyboardState();
   }
 
+  async getGamesenseState(): Promise<GameSenseState> {
+    const res = await this.request({ method: "get_gamesense_state" });
+    if (res.type !== "gamesense") throw new Error(`unexpected response: ${res.type}`);
+    this.gamesense = res.state;
+    return res.state;
+  }
+
+  setGamesenseEnabled(enabled: boolean): Promise<void> {
+    return this.#gamesenseCommand({ method: "set_gamesense_enabled", params: { enabled } });
+  }
+
+  setGameEnabled(game: string, enabled: boolean): Promise<void> {
+    return this.#gamesenseCommand({ method: "set_game_enabled", params: { game, enabled } });
+  }
+
+  removeGame(game: string): Promise<void> {
+    return this.#gamesenseCommand({ method: "remove_game", params: { game } });
+  }
+
+  gamesenseTest(): Promise<void> {
+    return this.#gamesenseCommand({ method: "gamesense_test" });
+  }
+
+  async #gamesenseCommand(req: Request): Promise<void> {
+    const res = await this.request(req);
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getGamesenseState();
+  }
+
   async #command(req: Request): Promise<void> {
     const res = await this.request(req);
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
@@ -274,6 +307,9 @@ class Daemon {
         break;
       case "keyboard_changed":
         this.keyboard = ev.data.state;
+        break;
+      case "gamesense_changed":
+        this.gamesense = ev.data.state;
         break;
     }
   }

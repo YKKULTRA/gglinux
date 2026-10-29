@@ -237,6 +237,22 @@ export interface KeyboardState {
   reactive: "off" | "reading" | "no_access";
 }
 
+export interface GameInfo {
+  name: string;
+  display_name: string | null;
+  developer: string | null;
+  enabled: boolean;
+  active: boolean;
+  events: string[];
+}
+
+export interface GameSenseState {
+  enabled: boolean;
+  address: string | null;
+  prefixes: number;
+  games: GameInfo[];
+}
+
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
 export type Request =
   | { method: "list_devices" }
@@ -262,7 +278,12 @@ export type Request =
   | { method: "set_mic_settings"; params: { settings: MicSettings } }
   | { method: "set_mic_volume"; params: { volume: number } }
   | { method: "get_keyboard_state" }
-  | { method: "set_lighting"; params: { lighting: Lighting } };
+  | { method: "set_lighting"; params: { lighting: Lighting } }
+  | { method: "get_gamesense_state" }
+  | { method: "set_gamesense_enabled"; params: { enabled: boolean } }
+  | { method: "set_game_enabled"; params: { game: string; enabled: boolean } }
+  | { method: "remove_game"; params: { game: string } }
+  | { method: "gamesense_test" };
 
 export interface RequestFrame {
   id: number;
@@ -276,6 +297,7 @@ export type ResponseData =
   | { type: "headset"; state: HeadsetState }
   | { type: "sonar"; state: SonarState }
   | { type: "keyboard"; state: KeyboardState }
+  | { type: "gamesense"; state: GameSenseState }
   | { type: "success" }
   | { type: "error"; message: string };
 
@@ -286,7 +308,8 @@ export type DaemonEvent =
   | { event: "mouse_battery"; data: { battery: BatteryState | null } }
   | { event: "headset_changed"; data: { state: HeadsetState } }
   | { event: "sonar_changed"; data: { state: SonarState } }
-  | { event: "keyboard_changed"; data: { state: KeyboardState } };
+  | { event: "keyboard_changed"; data: { state: KeyboardState } }
+  | { event: "gamesense_changed"; data: { state: GameSenseState } };
 
 export type ServerMessage =
   | { kind: "response"; id: number; result: ResponseData }

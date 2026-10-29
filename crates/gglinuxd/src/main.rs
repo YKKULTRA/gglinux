@@ -17,11 +17,13 @@ use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, info, warn};
 
 mod clock;
+mod gamesense;
 mod headset;
 mod keyboard;
 mod mouse;
 mod sonar;
 
+use gamesense::{Command as GamesenseCommand, Handle as GamesenseHandle};
 use headset::{Command as HeadsetCommand, Handle as HeadsetHandle};
 use keyboard::{Command as KeyboardCommand, Handle as KeyboardHandle};
 use mouse::{Command as MouseCommand, Handle as MouseHandle};
@@ -40,6 +42,7 @@ struct Workers {
     headset: HeadsetHandle,
     keyboard: KeyboardHandle,
     sonar: SonarHandle,
+    gamesense: GamesenseHandle,
 }
 
 #[tokio::main]
@@ -69,10 +72,14 @@ async fn main() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAP);
 
     spawn_hid_monitor(snapshot_tx, event_tx.clone());
+    // GameSense's registry exists before the keyboard worker, which draws it.
+    let engine = gamesense::Engine::load();
+    let keyboard = keyboard::spawn(event_tx.clone(), vec![engine.overlay()]);
     let workers = Workers {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
-        keyboard: keyboard::spawn(event_tx.clone()),
+        gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
+        keyboard,
         sonar: sonar::spawn(event_tx.clone()),
     };
 
@@ -332,6 +339,23 @@ async fn dispatch(
                 .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
                 .await,
         ),
+        Request::GetGamesenseState => match workers.gamesense.send(GamesenseCommand::GetState).await {
+            Ok(state) => ResponseData::Gamesense { state },
+            Err(message) => ResponseData::Error { message },
+        },
+        Request::SetGamesenseEnabled { enabled } => outcome(
+            workers.gamesense.send::<()>(|reply| GamesenseCommand::SetEnabled { enabled, reply }).await,
+        ),
+        Request::SetGameEnabled { game, enabled } => outcome(
+            workers
+                .gamesense
+                .send::<()>(|reply| GamesenseCommand::SetGameEnabled { game, enabled, reply })
+                .await,
+        ),
+        Request::RemoveGame { game } => outcome(
+            workers.gamesense.send::<()>(|reply| GamesenseCommand::RemoveGame { game, reply }).await,
+        ),
+        Request::GamesenseTest => outcome(workers.gamesense.send(GamesenseCommand::RunTest).await),
     };
     ServerMessage::response(frame.id, result)
 }
