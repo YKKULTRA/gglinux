@@ -12,6 +12,7 @@
     { kind: "breathing", label: "Breathing" },
     { kind: "wave", label: "Wave" },
     { kind: "spectrum", label: "Spectrum" },
+    { kind: "visualizer", label: "Audio" },
   ];
   const MODES: { mode: ReactiveMode; label: string }[] = [
     { mode: "fade", label: "Fade" },
@@ -59,7 +60,7 @@
   });
   let width = $derived(kb ? Math.max(...kb.layout.map((k) => k.x + k.w)) * U : 0);
   let height = $derived(kb ? Math.max(...kb.layout.map((k) => k.y + 1)) * U : 0);
-  let period = $derived(lighting && lighting.effect.kind !== "static" ? lighting.effect.period_s : 4);
+  let period = $derived(lighting && "period_s" in lighting.effect ? lighting.effect.period_s : 4);
 
   async function apply(patch: Partial<Lighting>) {
     if (!lighting) return;
@@ -75,17 +76,16 @@
   }
 
   function setEffect(kind: Effect["kind"]) {
-    const effect: Effect =
-      kind === "static"
-        ? { kind }
-        : kind === "breathing"
-          ? { kind, color: rgbOf(brush), period_s: period }
-          : { kind, period_s: period };
+    let effect: Effect;
+    if (kind === "static") effect = { kind };
+    else if (kind === "visualizer") effect = { kind, sensitivity: 1 };
+    else if (kind === "breathing") effect = { kind, color: rgbOf(brush), period_s: period };
+    else effect = { kind, period_s: period };
     void apply({ effect });
   }
 
   function setPeriod(p: number) {
-    if (!lighting || lighting.effect.kind === "static") return;
+    if (!lighting || !("period_s" in lighting.effect)) return;
     void apply({ effect: { ...lighting.effect, period_s: p } });
   }
 
@@ -153,7 +153,7 @@
             />
           </div>
         {/if}
-        {#if lighting.effect.kind !== "static"}
+        {#if "period_s" in lighting.effect}
           <div class="row">
             <span class="label">Speed</span>
             <input
@@ -166,6 +166,22 @@
             />
             <span class="unit">{period} s</span>
           </div>
+        {/if}
+        {#if lighting.effect.kind === "visualizer"}
+          {@const sens = lighting.effect.sensitivity}
+          <div class="row">
+            <span class="label">Sensitivity</span>
+            <input
+              type="range"
+              min="0.25"
+              max="4"
+              step="0.25"
+              value={sens}
+              onchange={(e) => apply({ effect: { kind: "visualizer", sensitivity: e.currentTarget.valueAsNumber } })}
+            />
+            <span class="unit">{sens.toFixed(2)}×</span>
+          </div>
+          <p class="hint">What's playing is analysed live and never recorded; KDE may show that audio is being captured.</p>
         {/if}
         <div class="row">
           <span class="label">Brightness</span>
@@ -231,6 +247,37 @@
               <p>To allow it: <code>./scripts/install-local.sh --no-build --reactive</code></p>
             </div>
           {/if}
+        {/if}
+      </section>
+
+      <section>
+        <div class="head"><h4>Mic mute light</h4></div>
+        <label class="toggle">
+          <input
+            type="checkbox"
+            checked={lighting.mic_mute.enabled}
+            disabled={busy}
+            onchange={(e) => apply({ mic_mute: { ...lighting!.mic_mute, enabled: e.currentTarget.checked } })}
+          />
+          Light a key while the microphone is muted
+        </label>
+        {#if lighting.mic_mute.enabled}
+          <div class="row">
+            <span class="label">Key</span>
+            <select
+              value={lighting.mic_mute.key}
+              onchange={(e) => apply({ mic_mute: { ...lighting!.mic_mute, key: Number(e.currentTarget.value) } })}
+            >
+              {#each kb.layout.filter((k) => k.label) as k (k.code)}
+                <option value={k.code}>{k.label}</option>
+              {/each}
+            </select>
+            <input
+              type="color"
+              value={hex(lighting.mic_mute.color)}
+              onchange={(e) => apply({ mic_mute: { ...lighting!.mic_mute, color: rgbOf(e.currentTarget.value) } })}
+            />
+          </div>
         {/if}
       </section>
 
@@ -305,5 +352,6 @@
   .notice p { margin: 0; }
   .notice p + p { margin-top: 0.45rem; }
   .notice code { font-size: 0.78rem; color: var(--text); }
+  .hint { margin: 0.5rem 0 0; font-size: 0.78rem; color: var(--text-dim); }
   .error { margin: 0.8rem 0 0; padding: 0.5rem 0.7rem; font-size: 0.8rem; color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-radius: 8px; }
 </style>

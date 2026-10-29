@@ -23,6 +23,7 @@ libc = "0.2"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+rustfft = "6"
 
 # Slimmer, faster debug builds for the C-heavy hidapi dep.
 [profile.dev.package."*"]

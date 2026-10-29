@@ -40,7 +40,7 @@ pub fn positions() -> HashMap<u8, Pos> {
 ///
 /// `t` is `f64` because the daemon runs for weeks: as `f32`, seconds since
 /// start lose frame precision after about six days.
-pub fn color(lighting: &Lighting, positions: &HashMap<u8, Pos>, code: u8, t: f64, hits: &[Hit]) -> Rgb {
+pub fn color(lighting: &Lighting, positions: &HashMap<u8, Pos>, code: u8, t: f64, hits: &[Hit], bands: &[f32]) -> Rgb {
     let base = match lighting.effect {
         Effect::Static => lighting
             .keys
@@ -56,6 +56,7 @@ pub fn color(lighting: &Lighting, positions: &HashMap<u8, Pos>, code: u8, t: f64
             hsv(x - cycle(t, period_s))
         }
         Effect::Spectrum { period_s } => hsv(cycle(t, period_s)),
+        Effect::Visualizer { sensitivity } => visualizer(positions.get(&code), bands, sensitivity),
     };
     let r = &lighting.reactive;
     let w = if r.enabled { reactive_weight(r, positions, code, t, hits) } else { 0.0 };
@@ -119,6 +120,22 @@ fn rgb(c: gg_ipc::Rgb) -> Rgb {
     Rgb { r: c.r, g: c.g, b: c.b }
 }
 
+/// Rows on the board: the F-row is 0, the bottom row 5.
+const ROWS: f32 = 6.0;
+
+/// A key's colour in the visualizer: lit if its column's bar reaches its row.
+fn visualizer(pos: Option<&Pos>, bands: &[f32], sensitivity: f32) -> Rgb {
+    let (Some(p), false) = (pos, bands.is_empty()) else { return Rgb::default() };
+    let band = ((p.x / WIDTH * bands.len() as f32) as usize).min(bands.len() - 1);
+    let level = (bands[band] * sensitivity).min(1.0);
+    let from_bottom = (ROWS - 1.0) - (p.y - 1.0).max(0.0).round();
+    if from_bottom + 1.0 <= level * ROWS + 1e-4 {
+        hsv((1.0 - from_bottom / (ROWS - 1.0)) / 3.0)
+    } else {
+        Rgb::default()
+    }
+}
+
 /// How far through its current period an effect is at `t`, 0..1.
 fn cycle(t: f64, period_s: f32) -> f32 {
     (t / f64::from(period_s)).fract() as f32
@@ -145,7 +162,7 @@ mod tests {
     const RED: gg_ipc::Rgb = gg_ipc::Rgb { r: 255, g: 0, b: 0 };
 
     fn lit(effect: Effect) -> Lighting {
-        Lighting { enabled: true, effect, keys: Vec::new(), brightness: 100, reactive: gg_ipc::Reactive::default() }
+        Lighting { enabled: true, effect, keys: Vec::new(), brightness: 100, reactive: gg_ipc::Reactive::default(), mic_mute: gg_ipc::MicMuteLight::default() }
     }
 
     #[test]
@@ -160,43 +177,43 @@ mod tests {
     fn static_colours_come_from_the_key_list_and_unlisted_keys_are_dark() {
         let l = Lighting { keys: vec![KeyColor { code: 0x0A, color: RED }], ..lit(Effect::Static) };
         let p = positions();
-        assert_eq!(color(&l, &p, 0x0A, 5.0, &[]), Rgb { r: 255, g: 0, b: 0 });
-        assert_eq!(color(&l, &p, 0x04, 5.0, &[]), Rgb::default());
-        assert_eq!(color(&l, &p, 0x59, 5.0, &[]), Rgb::default(), "numpad codes the TKL lacks stay dark");
+        assert_eq!(color(&l, &p, 0x0A, 5.0, &[], &[]), Rgb { r: 255, g: 0, b: 0 });
+        assert_eq!(color(&l, &p, 0x04, 5.0, &[], &[]), Rgb::default());
+        assert_eq!(color(&l, &p, 0x59, 5.0, &[], &[]), Rgb::default(), "numpad codes the TKL lacks stay dark");
     }
 
     #[test]
     fn breathing_goes_from_dark_to_full_each_period() {
         let l = lit(Effect::Breathing { color: RED, period_s: 2.0 });
         let p = positions();
-        assert_eq!(color(&l, &p, 0x04, 0.0, &[]), Rgb::default());
-        assert_eq!(color(&l, &p, 0x04, 1.0, &[]), Rgb { r: 255, g: 0, b: 0 });
-        assert_eq!(color(&l, &p, 0x04, 2.0, &[]), Rgb::default());
+        assert_eq!(color(&l, &p, 0x04, 0.0, &[], &[]), Rgb::default());
+        assert_eq!(color(&l, &p, 0x04, 1.0, &[], &[]), Rgb { r: 255, g: 0, b: 0 });
+        assert_eq!(color(&l, &p, 0x04, 2.0, &[], &[]), Rgb::default());
     }
 
     #[test]
     fn the_wave_moves_across_the_keyboard() {
         let l = lit(Effect::Wave { period_s: 4.0 });
         let p = positions();
-        let esc = color(&l, &p, 0x29, 0.0, &[]);
-        assert_ne!(esc, color(&l, &p, 0x48, 0.0, &[]), "Esc and Pause differ");
-        assert_ne!(color(&l, &p, 0x29, 1.0, &[]), esc, "and it moves");
+        let esc = color(&l, &p, 0x29, 0.0, &[], &[]);
+        assert_ne!(esc, color(&l, &p, 0x48, 0.0, &[], &[]), "Esc and Pause differ");
+        assert_ne!(color(&l, &p, 0x29, 1.0, &[], &[]), esc, "and it moves");
     }
 
     #[test]
     fn spectrum_is_one_colour_for_every_key() {
         let l = lit(Effect::Spectrum { period_s: 6.0 });
         let p = positions();
-        assert_eq!(color(&l, &p, 0x29, 1.5, &[]), color(&l, &p, 0x48, 1.5, &[]));
+        assert_eq!(color(&l, &p, 0x29, 1.5, &[], &[]), color(&l, &p, 0x48, 1.5, &[], &[]));
     }
 
     #[test]
     fn brightness_scales_every_effect() {
         let p = positions();
         let off = Lighting { brightness: 0, ..lit(Effect::Spectrum { period_s: 6.0 }) };
-        assert_eq!(color(&off, &p, 0x29, 1.0, &[]), Rgb::default());
+        assert_eq!(color(&off, &p, 0x29, 1.0, &[], &[]), Rgb::default());
         let half = Lighting { brightness: 50, keys: vec![KeyColor { code: 0x0A, color: RED }], ..lit(Effect::Static) };
-        assert_eq!(color(&half, &p, 0x0A, 0.0, &[]).r, 128);
+        assert_eq!(color(&half, &p, 0x0A, 0.0, &[], &[]).r, 128);
     }
 
     const BLUE: gg_ipc::Rgb = gg_ipc::Rgb { r: 0, g: 0, b: 255 };
@@ -215,10 +232,10 @@ mod tests {
         let l = reactive(ReactiveMode::Fade, 0.6);
         let p = positions();
         let hits = [Hit { code: 0x04, t: 1.0 }];
-        assert_eq!(color(&l, &p, 0x04, 1.0, &hits), Rgb { r: 255, g: 255, b: 255 });
-        assert_eq!(color(&l, &p, 0x04, 1.3, &hits), Rgb { r: 128, g: 128, b: 128 });
-        assert_eq!(color(&l, &p, 0x04, 1.6, &hits), Rgb::default(), "gone after the duration");
-        assert_eq!(color(&l, &p, 0x05, 1.0, &hits), Rgb::default(), "other keys untouched");
+        assert_eq!(color(&l, &p, 0x04, 1.0, &hits, &[]), Rgb { r: 255, g: 255, b: 255 });
+        assert_eq!(color(&l, &p, 0x04, 1.3, &hits, &[]), Rgb { r: 128, g: 128, b: 128 });
+        assert_eq!(color(&l, &p, 0x04, 1.6, &hits, &[]), Rgb::default(), "gone after the duration");
+        assert_eq!(color(&l, &p, 0x05, 1.0, &hits, &[]), Rgb::default(), "other keys untouched");
     }
 
     #[test]
@@ -242,7 +259,7 @@ mod tests {
         let p = positions();
         let hits = [Hit { code: 0x04, t: 0.0 }, Hit { code: 0x04, t: 0.3 }];
         assert_eq!(reactive_weight(&l.reactive, &p, 0x04, 0.3, &hits), 1.0);
-        assert_eq!(color(&l, &p, 0x04, 0.3, &hits), Rgb { r: 255, g: 255, b: 255 });
+        assert_eq!(color(&l, &p, 0x04, 0.3, &hits, &[]), Rgb { r: 255, g: 255, b: 255 });
     }
 
     #[test]
@@ -252,9 +269,9 @@ mod tests {
         l.reactive.color = BLUE;
         let p = positions();
         let hits = [Hit { code: 0x04, t: 0.0 }];
-        assert_eq!(color(&l, &p, 0x04, 0.5, &hits), Rgb { r: 128, g: 0, b: 128 });
+        assert_eq!(color(&l, &p, 0x04, 0.5, &hits, &[]), Rgb { r: 128, g: 0, b: 128 });
         l.brightness = 50;
-        assert_eq!(color(&l, &p, 0x04, 0.5, &hits), Rgb { r: 64, g: 0, b: 64 });
+        assert_eq!(color(&l, &p, 0x04, 0.5, &hits, &[]), Rgb { r: 64, g: 0, b: 64 });
     }
 
     #[test]
@@ -262,9 +279,9 @@ mod tests {
         let mut l = reactive(ReactiveMode::Ripple, 1.0);
         let p = positions();
         let unknown = [Hit { code: 0x7F, t: 0.0 }]; // not on the TKL
-        assert_eq!(color(&l, &p, 0x29, 0.0, &unknown), Rgb::default());
+        assert_eq!(color(&l, &p, 0x29, 0.0, &unknown, &[]), Rgb::default());
         l.reactive.enabled = false;
-        assert_eq!(color(&l, &p, 0x29, 0.0, &[Hit { code: 0x29, t: 0.0 }]), Rgb::default());
+        assert_eq!(color(&l, &p, 0x29, 0.0, &[Hit { code: 0x29, t: 0.0 }], &[]), Rgb::default());
     }
 
     #[test]
@@ -275,7 +292,7 @@ mod tests {
             for mode in [ReactiveMode::Fade, ReactiveMode::Ripple] {
                 let l = reactive(mode, d);
                 assert_eq!(reactive_weight(&l.reactive, &p, 0x04, 0.0, &hits), 0.0, "{mode:?} {d}");
-                assert_eq!(color(&l, &p, 0x04, 0.0, &hits), Rgb::default());
+                assert_eq!(color(&l, &p, 0x04, 0.0, &hits, &[]), Rgb::default());
             }
         }
     }
@@ -289,7 +306,7 @@ mod tests {
         let w = reactive_weight(&l.reactive, &p, 0x04, month + 0.3, &hits);
         assert!((w - 0.5).abs() < 0.01, "a month in, a fade is still smooth: {w}");
         let wave = lit(Effect::Wave { period_s: 4.0 });
-        assert_ne!(color(&wave, &p, 0x29, month, &[]), color(&wave, &p, 0x29, month + 1.0 / 30.0, &[]),
+        assert_ne!(color(&wave, &p, 0x29, month, &[], &[]), color(&wave, &p, 0x29, month + 1.0 / 30.0, &[], &[]),
             "and the wave still moves from one frame to the next");
     }
 
@@ -297,5 +314,33 @@ mod tests {
     fn dim_applies_the_brightness_to_overlay_colours() {
         assert_eq!(dim(Rgb { r: 200, g: 100, b: 0 }, 50), Rgb { r: 100, g: 50, b: 0 });
         assert_eq!(dim(Rgb { r: 200, g: 100, b: 0 }, 100), Rgb { r: 200, g: 100, b: 0 });
+    }
+
+    fn viz(sensitivity: f32) -> Lighting {
+        lit(Effect::Visualizer { sensitivity })
+    }
+
+    #[test]
+    fn the_visualizer_lights_bars_from_the_bottom_green_to_red() {
+        let p = positions();
+        let low = [0.2; 18];
+        let space = color(&viz(1.0), &p, 0x2C, 0.0, &[], &low);
+        assert_eq!(space, hsv(1.0 / 3.0), "the bottom row lights green at a low level");
+        assert_eq!(color(&viz(1.0), &p, 0x3A, 0.0, &[], &low), Rgb::default(), "the F-row stays dark");
+        let full = [1.0; 18];
+        assert_eq!(color(&viz(1.0), &p, 0x3A, 0.0, &[], &full), hsv(0.0), "a full bar reaches the F-row in red");
+        assert_eq!(color(&viz(1.0), &p, 0x3A, 0.0, &[], &[]), Rgb::default(), "no audio yet: dark");
+    }
+
+    #[test]
+    fn columns_are_bands_and_sensitivity_scales_the_bars() {
+        let p = positions();
+        let mut bands = [0.0; 18];
+        bands[0] = 1.0; // only the leftmost band
+        assert_ne!(color(&viz(1.0), &p, 0x29, 0.0, &[], &bands), Rgb::default(), "Esc is in band 0");
+        assert_eq!(color(&viz(1.0), &p, 0x48, 0.0, &[], &bands), Rgb::default(), "Pause is in band 17");
+        let quiet = [0.1; 18];
+        assert_eq!(color(&viz(1.0), &p, 0x2C, 0.0, &[], &quiet), Rgb::default(), "0.1·6 < 1 row");
+        assert_ne!(color(&viz(2.0), &p, 0x2C, 0.0, &[], &quiet), Rgb::default(), "doubled: 0.2·6 ≥ 1 row");
     }
 }
