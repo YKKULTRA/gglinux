@@ -478,6 +478,18 @@ async fn dispatch(
                 .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
                 .await,
         ),
+        Request::SetSwitches { switches } => outcome(
+            workers
+                .keyboard
+                .send::<()>(|reply| KeyboardCommand::SetSwitches { switches, reply })
+                .await,
+        ),
+        Request::SetScreen { screen } => outcome(
+            workers
+                .keyboard
+                .send::<()>(|reply| KeyboardCommand::SetScreen { screen, reply })
+                .await,
+        ),
         Request::GetGamesenseState => {
             match workers.gamesense.send(GamesenseCommand::GetState).await {
                 Ok(state) => ResponseData::Gamesense { state },

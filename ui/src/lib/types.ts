@@ -274,12 +274,58 @@ export interface KeyInfo {
   w: number;
 }
 
+/** What the keyboard's screen shows. */
+export type KeyboardScreen =
+  | { kind: "keyboard" }
+  | { kind: "text"; text: string }
+  | { kind: "clock"; seconds: boolean; h24: boolean; date: boolean }
+  /** 640 bytes: 16 a row from the top, the leftmost pixel in each byte's high bit. */
+  | { kind: "image"; pixels: number[] };
+
+/** How a Rapid Tap pair settles both keys held at once (not checked on hardware). */
+export type TapMode = "last_wins" | "neither" | "first_wins" | "second_wins";
+
+export interface TapPair {
+  a: number;
+  b: number;
+  mode: TapMode;
+  report_both: boolean;
+}
+
+export interface KeyActuation {
+  code: number;
+  /** Tenths of a millimetre, 1..=40. */
+  actuation: number;
+}
+
+export interface Switches {
+  /** false: gglinux sends nothing, and the keyboard keeps what it has until it loses power. */
+  enabled: boolean;
+  /** Tenths of a millimetre, 1..=40, for every key not in `keys`. */
+  actuation: number;
+  keys: KeyActuation[];
+  rapid_trigger: {
+    enabled: boolean;
+    /** Empty: every adjustable key. */
+    keys: number[];
+    /** Tenths of a millimetre, 1..=20. */
+    sensitivity: number;
+  };
+  rapid_tap: { enabled: boolean; pairs: TapPair[] };
+}
+
 export interface KeyboardState {
   connected: boolean;
   layout: KeyInfo[];
   lighting: Lighting;
   /** Whether the daemon is reading key presses for reactive lighting. */
   reactive: "off" | "reading" | "no_access";
+  /** The keys with adjustable switches, by HID code. */
+  analog_keys: number[];
+  switches: Switches;
+  switches_error: string | null;
+  screen: KeyboardScreen;
+  screen_error: string | null;
 }
 
 export interface GameInfo {
@@ -388,6 +434,8 @@ export type Request =
   | { method: "set_smart_volume"; params: { channel: Channel; settings: SmartVolume } }
   | { method: "get_keyboard_state" }
   | { method: "set_lighting"; params: { lighting: Lighting } }
+  | { method: "set_switches"; params: { switches: Switches } }
+  | { method: "set_screen"; params: { screen: KeyboardScreen } }
   | { method: "get_gamesense_state" }
   | { method: "set_gamesense_enabled"; params: { enabled: boolean } }
   | { method: "set_game_enabled"; params: { game: string; enabled: boolean } }

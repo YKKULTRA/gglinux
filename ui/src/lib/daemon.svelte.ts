@@ -18,6 +18,7 @@ import type {
   HeadphoneEq,
   HeadsetChange,
   HeadsetState,
+  KeyboardScreen,
   KeyboardState,
   GameSenseState,
   GameRule,
@@ -31,6 +32,7 @@ import type {
   ServerMessage,
   SmartVolume,
   SonarState,
+  Switches,
 } from "./types";
 
 /** Reject a pending request if the daemon never answers. */
@@ -255,6 +257,18 @@ class Daemon {
 
   async setLighting(lighting: Lighting): Promise<void> {
     const res = await this.request({ method: "set_lighting", params: { lighting } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getKeyboardState();
+  }
+
+  async setSwitches(switches: Switches): Promise<void> {
+    const res = await this.request({ method: "set_switches", params: { switches } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getKeyboardState();
+  }
+
+  async setScreen(screen: KeyboardScreen): Promise<void> {
+    const res = await this.request({ method: "set_screen", params: { screen } });
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
     await this.getKeyboardState();
   }

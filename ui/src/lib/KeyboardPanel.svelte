@@ -1,10 +1,12 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
-  // Apex Pro TKL Gen 3 lighting: give it to gglinux or leave it to the
-  // keyboard, pick an effect, and paint keys for the static one.
+  // Apex Pro TKL Gen 3: its lighting (give it to gglinux or leave it to the keyboard,
+  // pick an effect, paint keys for the static one), its switches and its screen.
 
   import { SvelteSet } from "svelte/reactivity";
   import Icon from "./Icon.svelte";
+  import ScreenPanel from "./ScreenPanel.svelte";
+  import SwitchesPanel from "./SwitchesPanel.svelte";
   import { daemon } from "./daemon.svelte";
   import type { Effect, KeyColor, Lighting, Reactive, ReactiveMode, Rgb } from "./types";
 
@@ -192,7 +194,7 @@
             />
             <span class="unit">{sens.toFixed(2)}×</span>
           </div>
-          <p class="hint">What's playing is analysed live and never recorded; KDE may show that audio is being captured.</p>
+          <p class="hint">What's playing is analysed live and never recorded; your desktop may show that audio is being captured.</p>
         {/if}
         <div class="row">
           <span class="label">Brightness</span>
@@ -337,6 +339,9 @@ sudo udevadm control --reload</code></pre>
         </section>
       {/if}
     {/if}
+
+    <SwitchesPanel {kb} />
+    <ScreenPanel {kb} />
   {/if}
 
   {#if error}

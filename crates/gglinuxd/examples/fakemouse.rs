@@ -352,6 +352,20 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.keyboard.lighting = lighting;
             ResponseData::Success
         }
+        Request::SetSwitches { switches } => match switches.validate() {
+            Ok(()) => {
+                s.keyboard.switches = switches;
+                ResponseData::Success
+            }
+            Err(message) => ResponseData::Error { message },
+        },
+        Request::SetScreen { screen } => match screen.validate() {
+            Ok(()) => {
+                s.keyboard.screen = screen;
+                ResponseData::Success
+            }
+            Err(message) => ResponseData::Error { message },
+        },
         Request::GetGamesenseState => ResponseData::Gamesense {
             state: s.gamesense.clone(),
         },
@@ -571,6 +585,11 @@ fn fake_keyboard() -> KeyboardState {
             .collect(),
         lighting: Lighting::default(),
         reactive: ReactiveStatus::Off,
+        analog_keys: gg_device_keyboard::proto::ANALOG_KEYS.to_vec(),
+        switches: Default::default(),
+        switches_error: None,
+        screen: Default::default(),
+        screen_error: None,
     }
 }
 
@@ -644,6 +663,8 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetSmartVolume { .. } => "set_smart_volume",
         Request::GetKeyboardState => "get_keyboard_state",
         Request::SetLighting { .. } => "set_lighting",
+        Request::SetSwitches { .. } => "set_switches",
+        Request::SetScreen { .. } => "set_screen",
         Request::GetGamesenseState => "get_gamesense_state",
         Request::SetGamesenseEnabled { .. } => "set_gamesense_enabled",
         Request::SetGameEnabled { .. } => "set_game_enabled",

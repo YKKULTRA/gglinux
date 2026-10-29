@@ -192,7 +192,25 @@ to its LED — all but Menu, which types Application `0x65` (the HID usage; not 
 unit): the table has no `0x65` and lights Menu as `0xE7`. gglinux opens these read-only, and only
 with the optional `61-gglinux-reactive.rules` installed; the default udev rule leaves them root-only.
 
-### 3b. OLED — **90% there** (apex-tux) — 128×40 monochrome, header byte `0x61`
+### 3b. OLED — 128×40 monochrome — command `1F 81` (built 2026-10-29, untested here)
+
+> **Source, adapted:** Apex Control's protocol reference (github.com/Rikearon/apex-control,
+> `docs/PROTOCOL.md`, © 2026 Henrique Aron, CC BY 4.0, <https://creativecommons.org/licenses/by/4.0/>),
+> checked by its author on one `0x1642` at firmware 1.19.7; apex-pro-tkl-gen3-linux (MIT) gives the
+> same live-frame command. Condensed and reworded here.
+>
+> - Live frame: feature report on iface 1, report id 0, then `1F 81` and 640 bytes of pixels,
+>   zero-padded to the descriptor's 644 bytes (645 with the report id on Linux). Held until the next
+>   frame or a power cycle; doesn't touch flash.
+> - Release to the keyboard's own screen: 65-byte output report `00 1F 82`.
+> - Pixels: SSD1306 page order, 5 pages × 128 columns, the byte at `page*128 + x` holds rows
+>   `page*8 … page*8+7` of column `x`, bit 0 the top row.
+> - **Not used:** `38 83 00 <640 px>` stores an image in flash (apex-pro-tkl-gen3-linux sends it as
+>   `1F 83`). gglinux's allowlist refuses both.
+>
+> This also explains the 2026-09-27 attempts below: the device command is `1F`, not apex-tux's `61`.
+
+Earlier notes (apex-tux):
 apex-tux covers the Gen3 *family* but **not `0x1642` specifically** (it lists `0x1640` full-size,
 `0x1644` dongle, `0x1646` wireless-TKL). Two framings exist — **must confirm which `0x1642` uses on-device:**
 - **Single-report** (`ApexProGen3` 0x1640): one 642-byte feature report on **iface 1**, SSD1306
@@ -217,7 +235,29 @@ Reuse: `not-jan/apex-tux` `apex-hardware/src/usb.rs` + `device.rs` (Unlicense) �
 > `0x1642` is unknown** — capture it from SteelSeries GG on Windows alongside the M5 actuation
 > captures rather than guessing further on this interface.
 
-### 3c. Actuation / switch behavior — **UNSOLVED, fresh RE required**
+### 3c. Actuation / switch behavior — command `38` (built 2026-10-29, untested here)
+
+> **Source, adapted:** the same Apex Control reference (CC BY 4.0). All of these write the
+> keyboard's RAM only (checked there: the flash profile is unchanged afterwards), so a power cycle
+> brings the onboard profile back; gglinux re-sends on every connect.
+>
+> - 68 analog keys, by HID code: `04–28`, `2A–39`, `64`, `87–8B`, `E0–E7`, `F0` (no Escape, F-row,
+>   navigation cluster or arrows). Every table lists all 68.
+> - Actuation (feature, 645 bytes): `38 61 44 00` then `code, h, l` × 68. Byte 4 is the layer: `00`
+>   primary, `02` the second (dual) point, which gglinux doesn't write. Points are 0.1–4.0 mm in
+>   40 steps; the raw Hall thresholds per step (`l` release, `h` actuate) are the vendor's, as Apex
+>   Control lists them, from `(4,4)` at 0.1 mm to `(213,219)` at 4.0 mm (table in
+>   `crates/gg-device-keyboard/src/proto.rs`).
+> - Release mode (feature): `38 62 44` then `code, mode` × 68: `0` normal, `2` Rapid Trigger
+>   (`3`, `4` accepted, meaning unknown; not used).
+> - Rapid Trigger distance (feature): `38 65 44` then `code, tenths of a mm` × 68 (default 2).
+> - Rapid Tap (output, 65 bytes): `38 66 <0|1>` on/off; `38 67 <count>` then
+>   `index, key1, key2, mode | 0x80 if both report, 0, 0` per pair, at most 10. Modes 0–3 are
+>   documented as last-wins, neither, first-wins, second-wins; not verified anywhere.
+> - **Not built:** key bindings (`36`, which also replaces the Fn layer's shortcuts if written
+>   blank), and onboard profile images (`02` erase, `03` write: the flash commands below).
+
+Earlier notes:
 No public project implements OmniPoint / Rapid Trigger / Rapid Tap / Protection Mode for *any* Apex
 Pro generation on Linux. This is the project's one real reverse-engineering effort.
 - Vendor/config interface: **usage page `0xFFC0`, usage 1 → iface 1 (wired)**. Report length 64.
