@@ -205,9 +205,9 @@ compared against a real PipeWire graph.
 
 2026-10-02: a pass of 64 fixes after M7e, grouped here.
 
-- **Security-relevant** (details under Security, with the earlier udev rule fix `6e69098`): the
-  GameSense server caps connections and times out silent ones (`67b4eb7`), stored handlers have a
-  size limit (`5bdfb6f`), and clip tests run their stand-in only from a private folder (`aa593ac`).
+- **Security-relevant** (details under Security, with the earlier udev rule fix `a07eaa3`): the
+  GameSense server caps connections and times out silent ones (`844d7d8`), stored handlers have a
+  size limit (`07ea570`), and clip tests run their stand-in only from a private folder (`44e2786`).
 - **Daemon and IPC:** devices are enumerated and opened through hidapi one thread at a time (two
   such calls at once could free hidapi's shared error string twice). A second `gglinuxd` refuses to
   start while another is listening instead of taking its socket. A slow request no longer holds up
@@ -259,24 +259,24 @@ compared against a real PipeWire graph.
 
 ### Security
 
-- **Narrowed udev rule** (`6e69098`, 2026-09-28). The M0 rule opened every SteelSeries hidraw node to
+- **Narrowed udev rule** (`a07eaa3`, 2026-09-28). The M0 rule opened every SteelSeries hidraw node to
   the desktop user, including the Apex's two typing interfaces, so any program running as that user
   could read every keystroke typed on it. The default rule now opens only the control interfaces.
   Typing-interface access is opt-in through `61-gglinux-reactive.rules`, `install-local.sh` clears
   the access the old rule left behind, and `scripts/check-udev.sh` shows what the rules open. Rerun
   `./scripts/install-local.sh --no-build --no-ui` if you installed before 2026-09-28.
-- **Key presses stay in memory** (`1f9cf83`, `5572ebe`). Reactive lighting reads presses only while
+- **Key presses stay in memory** (`2e00f9f`, `bc6eb9d`). Reactive lighting reads presses only while
   lighting and reactive lighting are both on, never logs them, and drops each once drawn.
-- **Keyboard firmware safety** (`903756e`). Only seven vetted opcodes can be framed or written to
+- **Keyboard firmware safety** (`7958283`). Only seven vetted opcodes can be framed or written to
   the Apex, checked again at the write, so the firmware update commands on the same interface can
   never be sent.
-- **GameSense closed to web pages** (`5827dfb`). The server listens on loopback only, refuses any
+- **GameSense closed to web pages** (`96b7d46`). The server listens on loopback only, refuses any
   request carrying an `Origin` header, requires `Content-Type: application/json` on every POST, and
-  caps request bodies at 64 KiB. It never touches a `coreProps.json` it didn't write (`c440314`).
-- **GameSense resource limits** (`67b4eb7`, `5bdfb6f`). At most 32 connections at once; a connection
+  caps request bodies at 64 KiB. It never touches a `coreProps.json` it didn't write (`f7eae84`).
+- **GameSense resource limits** (`844d7d8`, `07ea570`). At most 32 connections at once; a connection
   that sends no headers within 5 seconds is dropped, and a request is ended after 10 seconds.
   Handlers kept for all games together are capped at 2 MiB.
-- **Clip tests** (`aa593ac`). Tests run their stand-in recorder only from a new private folder with
+- **Clip tests** (`44e2786`). Tests run their stand-in recorder only from a new private folder with
   an unguessable name, never one another account could have created first.
 - **Build dependencies** (2026-10-26). The UI lockfile takes patched `vite`, `devalue`,
   `nanoid` and `source-map-js`, clearing four high-severity `npm audit` advisories, all in build-time

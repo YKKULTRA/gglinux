@@ -41,7 +41,7 @@ Notes on the results:
 Build and test fixes:
 
 - **rustfmt** had never been applied: 53 files failed `cargo fmt --check`. Applied stock rustfmt in
-  one formatting-only commit (`88a6390`), listed in `.git-blame-ignore-revs`.
+  one formatting-only commit (`490edfa`), listed in `.git-blame-ignore-revs`.
 - **clippy** failed under `-D warnings` because an `allow` named a lint
   (`clippy::chunks_exact_to_as_chunks`) that clippy 1.97 and the 1.87 MSRV don't know. The
   attribute now also allows `unknown_lints`. No code change.

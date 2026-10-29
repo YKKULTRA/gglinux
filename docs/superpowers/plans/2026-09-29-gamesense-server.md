@@ -19,7 +19,7 @@ gglinux lighting is off.
 
 **Spec:** `docs/superpowers/specs/2026-09-29-gamesense-server-design.md`
 
-**Branch:** `m6a-gamesense` (exists; the spec is `52a2416`).
+**Branch:** `m6a-gamesense` (exists; the spec is `077bd23`).
 
 ## Global Constraints
 

@@ -15,7 +15,7 @@ list. Device enumeration (M0) is described as "seen working" only where PLAN.md 
 `cargo fmt --check` failed on 53 files (689 hunks): the workspace had never been formatted.
 A `rustfmt.toml` matching the house style (`max_width = 120`, `use_small_heuristics = "Max"`)
 would still have touched 46 files, so the default style was applied instead, which is what a
-contributor's `cargo fmt` does with no setup. The commit (`88a6390`) is formatting only and is
+contributor's `cargo fmt` does with no setup. The commit (`490edfa`) is formatting only and is
 listed in `.git-blame-ignore-revs`.
 
 ## D3. npm audit: lockfile-only bumps for four build-time packages
