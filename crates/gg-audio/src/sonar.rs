@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, MicSettings, MicState,
-    SonarState,
+    SonarState, StreamMix,
 };
 use tracing::{debug, info, warn};
 
@@ -37,6 +37,9 @@ pub struct Sonar<T: PwTools> {
     /// PipeWire has now. Cleared when they vanish, so a PipeWire restart gglinux
     /// did not do — a reboot, say — gets the levels back once they reappear.
     levels_applied: bool,
+    /// The same for the stream mix, kept apart so a stream that's late or
+    /// missing never holds back the channels' own levels.
+    stream_levels_applied: bool,
 }
 
 impl<T: PwTools> Sonar<T> {
@@ -54,6 +57,7 @@ impl<T: PwTools> Sonar<T> {
             routed: HashMap::new(),
             available: false,
             levels_applied: false,
+            stream_levels_applied: false,
         };
         sonar.refresh();
         if sonar.settings.enabled && !sonar.dropin_path.exists() {
@@ -144,6 +148,12 @@ impl<T: PwTools> Sonar<T> {
                 volume: self.graph.node(mic::SOURCE).and_then(|n| n.volume),
                 settings: self.settings.mic,
             },
+            stream: StreamMix {
+                enabled: self.settings.streamer,
+                present: self.graph.node(config::STREAM_SINK).is_some(),
+                volumes: Channel::ALL.iter().map(|&c| self.settings.stream_volume(c)).collect(),
+                master: self.settings.stream_master,
+            },
         }
     }
 
@@ -161,7 +171,7 @@ impl<T: PwTools> Sonar<T> {
         let output = self.choose_output().context("no output device for the channels to play into")?;
         let mic_input = self.choose_mic();
 
-        let text = config::dropin(&output, mic_input.as_deref())?;
+        let text = config::dropin(&output, mic_input.as_deref(), self.settings.streamer)?;
         if let Some(dir) = self.dropin_path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
@@ -187,12 +197,7 @@ impl<T: PwTools> Sonar<T> {
                 );
             }
         }
-        if let Some(node) = self.graph.node(&config::sink_name(Channel::Game)) {
-            self.tools.run(&tools::set_default(node.id))?;
-        }
-        if let Some(node) = self.graph.node(mic::SOURCE) {
-            self.tools.run(&tools::set_default(node.id))?;
-        }
+        self.take_defaults()?;
 
         self.settings.enabled = true;
         self.settings.output = Some(output);
@@ -202,6 +207,7 @@ impl<T: PwTools> Sonar<T> {
         self.persist();
         self.apply_levels()?;
         self.levels_applied = true;
+        self.keep_levels(); // the stream levels, if the stream mix is up yet
         self.routed.clear();
         self.route();
         Ok(())
@@ -222,6 +228,7 @@ impl<T: PwTools> Sonar<T> {
         self.settings.enabled = false;
         self.routed.clear();
         self.levels_applied = false;
+        self.stream_levels_applied = false;
         let previous = self.settings.previous_default.take();
         self.persist();
         if let Some(name) = previous {
@@ -366,7 +373,79 @@ impl<T: PwTools> Sonar<T> {
         Ok(())
     }
 
+    /// Turn streamer mode on or off. While Sonar is on this rewrites the
+    /// drop-in and restarts PipeWire (1–2 s of silence), like turning Sonar on.
+    pub fn set_streamer(&mut self, enabled: bool) -> Result<()> {
+        if self.settings.streamer == enabled {
+            return Ok(());
+        }
+        self.settings.streamer = enabled;
+        self.persist();
+        if !self.settings.enabled {
+            return Ok(());
+        }
+        let output = self.settings.output.clone().context("Sonar has no output device")?;
+        let text = self.expected_dropin(&output)?;
+        std::fs::write(&self.dropin_path, text)
+            .with_context(|| format!("writing {}", self.dropin_path.display()))?;
+        info!(enabled, "streamer mode changed; restarting PipeWire");
+        self.tools.run(&tools::restart_pipewire())?;
+        let ready = |g: &Graph| {
+            Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some())
+                && (!enabled || g.node(config::STREAM_SINK).is_some())
+        };
+        if !self.wait_until(ready) {
+            // Never undone for this: the channels may be fine without the stream.
+            warn!(enabled, "the channels or the stream mix did not appear after the restart");
+        }
+        self.take_defaults()?;
+        self.levels_applied = false;
+        self.stream_levels_applied = false;
+        self.keep_levels();
+        self.routed.clear();
+        self.route();
+        Ok(())
+    }
+
+    /// A channel's level in the stream mix, independent of its own volume.
+    pub fn set_stream_volume(&mut self, channel: Channel, volume: f32) -> Result<()> {
+        if !volume.is_finite() {
+            bail!("volume must be a number");
+        }
+        let volume = volume.clamp(0.0, 1.0);
+        self.settings.stream_volumes.insert(channel, volume);
+        self.persist();
+        if let Some(node) = self.graph.node(&config::stream_feed_name(channel)) {
+            self.tools.run(&tools::set_volume(node.id, volume))?;
+        }
+        Ok(())
+    }
+
+    /// The stream mix's master level: the stream device's own volume.
+    pub fn set_stream_master(&mut self, volume: f32) -> Result<()> {
+        if !volume.is_finite() {
+            bail!("volume must be a number");
+        }
+        self.settings.stream_master = volume.clamp(0.0, 1.0);
+        self.persist();
+        if let Some(node) = self.graph.node(config::STREAM_SINK) {
+            self.tools.run(&tools::set_volume(node.id, self.settings.stream_master))?;
+        }
+        Ok(())
+    }
+
     // --- internals ------------------------------------------------------------
+
+    /// Make the Game channel the default output and gglinux Mic the default input.
+    fn take_defaults(&self) -> Result<()> {
+        if let Some(node) = self.graph.node(&config::sink_name(Channel::Game)) {
+            self.tools.run(&tools::set_default(node.id))?;
+        }
+        if let Some(node) = self.graph.node(mic::SOURCE) {
+            self.tools.run(&tools::set_default(node.id))?;
+        }
+        Ok(())
+    }
 
     /// The input the mic should read, if the plugins exist: the saved one if it
     /// is still there, else the default input if it is a real one, else the first.
@@ -386,7 +465,7 @@ impl<T: PwTools> Sonar<T> {
     /// The drop-in this version writes for the saved output and mic.
     fn expected_dropin(&self, output: &str) -> Result<String> {
         let mic = self.settings.mic_input.as_deref().filter(|_| self.tools.mic_plugins_present());
-        config::dropin(output, mic)
+        config::dropin(output, mic, self.settings.streamer)
     }
 
     fn apply_mic(&self) -> Result<()> {
@@ -485,10 +564,12 @@ impl<T: PwTools> Sonar<T> {
         }
     }
 
-    /// Push the saved levels once per appearance of the channels.
+    /// Push the saved levels once per appearance of the channels, and the
+    /// stream levels once per appearance of the stream mix (while streamer mode
+    /// is on). Each waits only for its own nodes.
     fn keep_levels(&mut self) {
-        let present = Channel::ALL.iter().all(|&c| self.graph.node(&config::sink_name(c)).is_some());
-        if !present {
+        let channels = Channel::ALL.iter().all(|&c| self.graph.node(&config::sink_name(c)).is_some());
+        if !channels {
             self.levels_applied = false;
         } else if !self.levels_applied {
             match self.apply_levels() {
@@ -496,9 +577,20 @@ impl<T: PwTools> Sonar<T> {
                 Err(e) => warn!(error = %format!("{e:#}"), "could not restore Sonar volumes"),
             }
         }
+        let stream = self.settings.streamer
+            && self.graph.node(config::STREAM_SINK).is_some()
+            && Channel::ALL.iter().all(|&c| self.graph.node(&config::stream_feed_name(c)).is_some());
+        if !stream {
+            self.stream_levels_applied = false;
+        } else if !self.stream_levels_applied {
+            match self.apply_stream_levels() {
+                Ok(()) => self.stream_levels_applied = true,
+                Err(e) => warn!(error = %format!("{e:#}"), "could not restore the stream levels"),
+            }
+        }
     }
 
-    /// Push saved channel volumes, EQ and ChatMix to PipeWire.
+    /// Push saved channel volumes, EQ, the mic and ChatMix to PipeWire.
     fn apply_levels(&self) -> Result<()> {
         for (&channel, &volume) in &self.settings.volumes {
             if let Some(node) = self.graph.node(&config::sink_name(channel)) {
@@ -510,6 +602,20 @@ impl<T: PwTools> Sonar<T> {
         }
         self.apply_mic()?;
         self.apply_chatmix()
+    }
+
+    /// Push the saved stream levels to the feeds and the master to the stream
+    /// device.
+    fn apply_stream_levels(&self) -> Result<()> {
+        for channel in Channel::ALL {
+            if let Some(node) = self.graph.node(&config::stream_feed_name(channel)) {
+                self.tools.run(&tools::set_volume(node.id, self.settings.stream_volume(channel)))?;
+            }
+        }
+        if let Some(node) = self.graph.node(config::STREAM_SINK) {
+            self.tools.run(&tools::set_volume(node.id, self.settings.stream_master))?;
+        }
+        Ok(())
     }
 
     /// Set a channel's whole filter chain, if PipeWire has the channel now.
@@ -560,6 +666,8 @@ mod tests {
         channels_come_up: bool,
         mic_plugins: bool,
         mic_comes_up: bool,
+        /// Off holds the stream mix back while the channels are up.
+        stream_comes_up: RefCell<bool>,
         runs: RefCell<Vec<Vec<String>>>,
     }
 
@@ -572,6 +680,7 @@ mod tests {
                 channels_come_up: true,
                 mic_plugins: true,
                 mic_comes_up: true,
+                stream_comes_up: RefCell::new(true),
                 runs: RefCell::new(Vec::new()),
             }
         }
@@ -608,6 +717,20 @@ mod tests {
                     nodes.extend([
                         (24, "gglinux_mic", "Audio/Source", None),
                         (34, "gglinux_mic.in", "Stream/Input/Audio", None),
+                    ]);
+                }
+                let wrote_stream = std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("gglinux_stream"));
+                if wrote_stream && *self.stream_comes_up.borrow() {
+                    nodes.extend([
+                        (25, "gglinux_stream", "Audio/Sink", None),
+                        (35, "gglinux_game.stream", "Stream/Output/Audio", None),
+                        (36, "gglinux_chat.stream", "Stream/Output/Audio", None),
+                        (37, "gglinux_media.stream", "Stream/Output/Audio", None),
+                        (38, "gglinux_aux.stream", "Stream/Output/Audio", None),
+                        (45, "gglinux_game.stream_in", "Stream/Input/Audio", None),
+                        (46, "gglinux_chat.stream_in", "Stream/Input/Audio", None),
+                        (47, "gglinux_media.stream_in", "Stream/Input/Audio", None),
+                        (48, "gglinux_aux.stream_in", "Stream/Input/Audio", None),
                     ]);
                 }
             }
@@ -883,7 +1006,7 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let sonar = Sonar::new(&fake, settings_path, dropin.clone());
         assert!(sonar.is_enabled());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC)).unwrap());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false).unwrap());
         assert_eq!(fake.count("systemctl"), 1);
     }
 
@@ -898,7 +1021,7 @@ mod tests {
         };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
-        std::fs::write(&dropin, config::dropin(BT, Some(MIC)).unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let _sonar = Sonar::new(&fake, settings_path, dropin);
         assert_eq!(fake.count("systemctl"), 0);
@@ -988,11 +1111,118 @@ mod tests {
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
-        std::fs::write(&dropin, config::dropin(BT, None).unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, None, false).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let _sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_mic"));
         assert_eq!(fake.count("systemctl"), 1);
         assert_eq!(settings::load(&settings_path).mic_input.as_deref(), Some(MIC));
+    }
+
+    #[test]
+    fn streamer_while_sonar_is_off_only_saves() {
+        let (settings_path, dropin) = paths("streamer-off");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        sonar.set_streamer(true).unwrap();
+        assert_eq!(fake.count("systemctl"), 0, "no PipeWire restart");
+        assert!(settings::load(&settings_path).streamer);
+        sonar.enable().unwrap();
+        assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_stream"), "applied at the next enable");
+    }
+
+    #[test]
+    fn streamer_on_with_sonar_on_rewrites_restarts_and_sets_levels() {
+        let (settings_path, dropin) = paths("streamer-on");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        sonar.enable().unwrap();
+        sonar.set_stream_volume(Channel::Chat, 0.2).unwrap();
+        let restarts = fake.count("systemctl");
+        sonar.set_streamer(true).unwrap();
+        assert_eq!(fake.count("systemctl"), restarts + 1, "one restart");
+        assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_stream"));
+        assert!(fake.ran(&["wpctl", "set-volume", "36", "0.200"]), "Chat's stream level");
+        assert!(fake.ran(&["wpctl", "set-volume", "25", "1.000"]), "the master level");
+        let defaults = fake.runs.borrow().iter().filter(|r| r[..] == ["wpctl", "set-default", "20"]).count();
+        assert!(defaults >= 2, "Game is made the default again after the extra restart");
+        let s = sonar.snapshot();
+        assert!(s.stream.enabled && s.stream.present);
+        assert_eq!(s.stream.volumes, vec![1.0, 0.2, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn stream_volumes_go_to_the_feed_nodes() {
+        let (settings_path, dropin) = paths("stream-volumes");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_streamer(true).unwrap();
+        sonar.set_stream_volume(Channel::Game, 0.5).unwrap();
+        sonar.set_stream_master(0.8).unwrap();
+        assert!(fake.ran(&["wpctl", "set-volume", "35", "0.500"]));
+        assert!(fake.ran(&["wpctl", "set-volume", "25", "0.800"]));
+        assert!(sonar.set_stream_volume(Channel::Game, f32::NAN).is_err());
+    }
+
+    #[test]
+    fn routing_ignores_the_stream_feeds() {
+        let (settings_path, dropin) = paths("stream-routing");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_streamer(true).unwrap();
+        sonar.tick();
+        for id in [35, 36, 37, 38, 45, 46, 47, 48] {
+            assert!(
+                !fake.runs.borrow().iter().any(|r| r[0] == "pw-metadata" && r[1] == id.to_string()),
+                "node {id} was routed"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_levels_come_back_after_a_restart() {
+        let (settings_path, dropin) = paths("stream-restart");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_streamer(true).unwrap();
+        sonar.set_stream_volume(Channel::Media, 0.3).unwrap();
+        let media = |fake: &Fake| fake.runs.borrow().iter().filter(|r| r[..] == ["wpctl", "set-volume", "37", "0.300"]).count();
+        let before = media(&fake);
+        *fake.up.borrow_mut() = false; // PipeWire restarted elsewhere…
+        sonar.tick();
+        *fake.stream_comes_up.borrow_mut() = false;
+        *fake.up.borrow_mut() = true; // …the channels are back first…
+        sonar.tick();
+        *fake.stream_comes_up.borrow_mut() = true; // …then the stream mix
+        sonar.tick();
+        assert_eq!(media(&fake), before + 1);
+    }
+
+    #[test]
+    fn a_missing_stream_mix_leaves_the_channels_their_levels() {
+        let (settings_path, dropin) = paths("stream-missing");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_volume(Channel::Chat, 0.4).unwrap();
+        sonar.set_chatmix(0.5).unwrap();
+        *fake.stream_comes_up.borrow_mut() = false;
+        fake.runs.borrow_mut().clear();
+        sonar.set_streamer(true).unwrap();
+        assert!(sonar.is_enabled(), "never rolled back for the stream");
+        assert!(!sonar.snapshot().stream.present);
+        assert!(fake.ran(&["wpctl", "set-volume", "21", "0.400"]), "Chat's own volume");
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
+
+        // The stream mix turns up later: only its own levels are pushed.
+        fake.runs.borrow_mut().clear();
+        *fake.stream_comes_up.borrow_mut() = true;
+        sonar.tick();
+        assert!(fake.ran(&["wpctl", "set-volume", "25", "1.000"]), "the master level");
+        assert!(!fake.ran(&["wpctl", "set-volume", "21", "0.400"]), "the channels are not pushed again");
     }
 }

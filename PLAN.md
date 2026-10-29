@@ -296,6 +296,10 @@ recognises Proton games' `.exe` names. Not yet verified on hardware.
 supervised `gpu-screen-recorder` replay buffer (off by default), saved by the GlobalShortcuts
 portal hotkey (Alt+S), the UI or `ggctl`, and a clip library on the Moments page. Needs
 `sudo pacman -S gpu-screen-recorder` (not installed yet). Not yet verified.
+
+**M7c streamer mode done in software** (spec `docs/superpowers/specs/2026-09-29-streamer-mode-design.md`):
+a second, independent Stream mix of Sonar's channels on a "gglinux Stream" device (per-channel and
+master levels) for OBS to record. Builds on Sonar, which is still unverified live.
 across all three devices; `makepkg -si` installs a working daemon+UI from clean.
 
 ---

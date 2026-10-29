@@ -228,6 +228,19 @@ class Daemon {
     return this.#sonarCommand({ method: "set_mic_volume", params: { volume } });
   }
 
+  /** Restarts PipeWire while Sonar is on, so it gets the same longer timeout. */
+  setStreamer(enabled: boolean): Promise<void> {
+    return this.#sonarCommand({ method: "set_streamer", params: { enabled } }, 15000);
+  }
+
+  setStreamVolume(channel: Channel, volume: number): Promise<void> {
+    return this.#sonarCommand({ method: "set_stream_volume", params: { channel, volume } });
+  }
+
+  setStreamMaster(volume: number): Promise<void> {
+    return this.#sonarCommand({ method: "set_stream_master", params: { volume } });
+  }
+
   async getKeyboardState(): Promise<KeyboardState> {
     const res = await this.request({ method: "get_keyboard_state" });
     if (res.type !== "keyboard") throw new Error(`unexpected response: ${res.type}`);

@@ -34,6 +34,12 @@ pub struct Settings {
     pub mic: MicSettings,
     /// Virtual mic volume on the mixer's 0..=1 scale.
     pub mic_volume: Option<f32>,
+    /// Streamer mode: a second mix of the channels for OBS.
+    pub streamer: bool,
+    /// Per-channel stream level, 0..=1; 1.0 when unset.
+    pub stream_volumes: BTreeMap<Channel, f32>,
+    /// The stream mix's master level, 0..=1.
+    pub stream_master: f32,
 }
 
 impl Default for Settings {
@@ -51,6 +57,9 @@ impl Default for Settings {
             previous_default_source: None,
             mic: MicSettings::default(),
             mic_volume: None,
+            streamer: false,
+            stream_volumes: BTreeMap::new(),
+            stream_master: 1.0,
         }
     }
 }
@@ -59,6 +68,11 @@ impl Settings {
     /// A channel's bands, flat if never set.
     pub fn channel_eq(&self, channel: Channel) -> Vec<EqBand> {
         self.eq.get(&channel).cloned().unwrap_or_else(eq::flat_channel)
+    }
+
+    /// A channel's stream level, full if never set.
+    pub fn stream_volume(&self, channel: Channel) -> f32 {
+        self.stream_volumes.get(&channel).copied().unwrap_or(1.0)
     }
 }
 
