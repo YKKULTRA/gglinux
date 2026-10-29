@@ -648,6 +648,32 @@ impl Screen {
     }
 }
 
+/// Burn-in care for the keyboard's screen. An OLED pixel wears while it's lit, so one
+/// picture held for hours leaves its ghost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScreenCare {
+    /// Move gglinux's picture a pixel at a time, within two pixels of where it's drawn,
+    /// every couple of minutes, so no pixel stays lit for hours.
+    pub shift: bool,
+    /// Turn gglinux's picture dark while nobody is at the computer: the session locked,
+    /// another one switched to, the computer going to sleep, or nobody logged in.
+    pub dark_when_away: bool,
+    /// Turn the keyboard's own screen dark then too. This draws on a screen gglinux
+    /// otherwise leaves alone, and hands it back when someone's there again.
+    pub own_screen_too: bool,
+}
+
+impl Default for ScreenCare {
+    fn default() -> Self {
+        ScreenCare {
+            shift: true,
+            dark_when_away: true,
+            own_screen_too: false,
+        }
+    }
+}
+
 /// How a Rapid Tap pair settles both keys held at once. What each does is as documented
 /// by others; it hasn't been checked on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -859,6 +885,11 @@ pub struct KeyboardState {
     /// Why the keyboard didn't take the screen, if it didn't.
     #[serde(default)]
     pub screen_error: Option<String>,
+    #[serde(default)]
+    pub screen_care: ScreenCare,
+    /// The screen is dark right now because nobody is at the computer.
+    #[serde(default)]
+    pub screen_resting: bool,
 }
 
 /// A game that has talked to the GameSense server.
@@ -1134,6 +1165,10 @@ pub enum Request {
     SetScreen {
         screen: Screen,
     },
+    /// Replace the keyboard screen's burn-in care.
+    SetScreenCare {
+        care: ScreenCare,
+    },
     GetGamesenseState,
     /// Start or stop the GameSense server (and its files in Proton prefixes).
     SetGamesenseEnabled {
@@ -1172,6 +1207,177 @@ pub enum Request {
     DeleteClip {
         name: String,
     },
+    /// Which parts of gglinux run.
+    GetParts,
+    /// Save which parts run. A change restarts the daemon, which answers first.
+    SetParts {
+        parts: Parts,
+    },
+}
+
+impl Request {
+    /// The part of gglinux that answers this request; `None` for the daemon itself.
+    pub fn part(&self) -> Option<Part> {
+        use Request as R;
+        Some(match self {
+            R::ListDevices | R::Ping | R::GetParts | R::SetParts { .. } => return None,
+            R::GetMouseState
+            | R::SetMouseDpi { .. }
+            | R::SetMousePolling { .. }
+            | R::SetMouseButtons { .. }
+            | R::SaveMouse => Part::Mouse,
+            R::GetHeadsetState | R::SetHeadsetScreen { .. } | R::SetHeadset { .. } => Part::Headset,
+            R::GetSonarState
+            | R::SetSonarEnabled { .. }
+            | R::SetSonarOutput { .. }
+            | R::SetChannelVolume { .. }
+            | R::SetChatMix { .. }
+            | R::SetAppChannel { .. }
+            | R::SetChannelEq { .. }
+            | R::SetHeadphoneEq { .. }
+            | R::ImportAutoEq { .. }
+            | R::SetMicInput { .. }
+            | R::SetMicSettings { .. }
+            | R::SetMicVolume { .. }
+            | R::SetStreamer { .. }
+            | R::SetStreamVolume { .. }
+            | R::SetStreamMaster { .. }
+            | R::SetSmartVolume { .. } => Part::Sonar,
+            R::GetKeyboardState
+            | R::SetLighting { .. }
+            | R::SetSwitches { .. }
+            | R::SetScreen { .. }
+            | R::SetScreenCare { .. } => Part::Keyboard,
+            R::GetGamesenseState
+            | R::SetGamesenseEnabled { .. }
+            | R::SetGameEnabled { .. }
+            | R::RemoveGame { .. }
+            | R::GamesenseTest => Part::Gamesense,
+            R::GetProfiles
+            | R::SaveProfile { .. }
+            | R::ApplyProfile { .. }
+            | R::DeleteProfile { .. }
+            | R::SetGameRules { .. } => Part::Profiles,
+            R::GetClipsState | R::SetClipsSettings { .. } | R::SaveClip | R::DeleteClip { .. } => {
+                Part::Clips
+            }
+        })
+    }
+}
+
+/// One part of gglinux that can be turned off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Part {
+    Keyboard,
+    Headset,
+    Mouse,
+    Sonar,
+    Gamesense,
+    Profiles,
+    Clips,
+}
+
+impl Part {
+    pub const ALL: [Part; 7] = [
+        Part::Keyboard,
+        Part::Headset,
+        Part::Mouse,
+        Part::Sonar,
+        Part::Gamesense,
+        Part::Profiles,
+        Part::Clips,
+    ];
+
+    /// Its name, as Settings shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Part::Keyboard => "Keyboard",
+            Part::Headset => "Headset",
+            Part::Mouse => "Mouse",
+            Part::Sonar => "Sonar",
+            Part::Gamesense => "GameSense",
+            Part::Profiles => "Profiles",
+            Part::Clips => "Clips",
+        }
+    }
+}
+
+/// Which parts of gglinux run. A part that's off isn't started at all: its device is
+/// left alone, nothing of it runs in the background, and its page is hidden. Its settings
+/// are kept for when it's turned back on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Parts {
+    pub keyboard: bool,
+    pub headset: bool,
+    pub mouse: bool,
+    pub sonar: bool,
+    pub gamesense: bool,
+    pub profiles: bool,
+    pub clips: bool,
+}
+
+impl Default for Parts {
+    fn default() -> Self {
+        Parts {
+            keyboard: true,
+            headset: true,
+            mouse: true,
+            sonar: true,
+            gamesense: true,
+            profiles: true,
+            clips: true,
+        }
+    }
+}
+
+impl Parts {
+    pub fn on(&self, part: Part) -> bool {
+        match part {
+            Part::Keyboard => self.keyboard,
+            Part::Headset => self.headset,
+            Part::Mouse => self.mouse,
+            Part::Sonar => self.sonar,
+            Part::Gamesense => self.gamesense,
+            Part::Profiles => self.profiles,
+            Part::Clips => self.clips,
+        }
+    }
+
+    pub fn set(&mut self, part: Part, on: bool) {
+        match part {
+            Part::Keyboard => self.keyboard = on,
+            Part::Headset => self.headset = on,
+            Part::Mouse => self.mouse = on,
+            Part::Sonar => self.sonar = on,
+            Part::Gamesense => self.gamesense = on,
+            Part::Profiles => self.profiles = on,
+            Part::Clips => self.clips = on,
+        }
+    }
+
+    /// What actually runs: GameSense draws only on the keyboard, so it needs that too.
+    pub fn running(&self) -> Parts {
+        Parts {
+            gamesense: self.gamesense && self.keyboard,
+            ..*self
+        }
+    }
+
+    /// Why a request for `part` can't be answered, or `None` if it runs.
+    pub fn refusal(&self, part: Part) -> Option<String> {
+        if self.running().on(part) {
+            None
+        } else if part == Part::Gamesense && self.gamesense {
+            Some("GameSense draws on the keyboard, which is turned off in Settings → Parts".into())
+        } else {
+            Some(format!(
+                "{} is turned off in Settings → Parts",
+                part.label()
+            ))
+        }
+    }
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -1209,6 +1415,9 @@ pub enum ResponseData {
     },
     Clips {
         state: ClipsState,
+    },
+    Parts {
+        parts: Parts,
     },
     /// A command was accepted and applied.
     Success,
@@ -2086,5 +2295,92 @@ mod tests {
         let state: KeyboardState = serde_json::from_str(json).unwrap();
         assert_eq!(state.screen, Screen::Keyboard);
         assert!(!state.switches.enabled);
+        assert_eq!(state.screen_care, ScreenCare::default());
+        assert!(!state.screen_resting);
+    }
+
+    #[test]
+    fn screen_care_moves_and_rests_gglinuxs_picture_but_leaves_the_keyboards_own_alone() {
+        let care = ScreenCare::default();
+        assert!(care.shift && care.dark_when_away && !care.own_screen_too);
+        let parsed: Request = serde_json::from_str(
+            r#"{"method":"set_screen_care","params":{"care":{"shift":false}}}"#,
+        )
+        .unwrap();
+        match parsed {
+            Request::SetScreenCare { care } => assert_eq!(
+                care,
+                ScreenCare {
+                    shift: false,
+                    ..ScreenCare::default()
+                },
+                "a missing field keeps its default"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_part_is_on_until_turned_off_and_old_files_still_load() {
+        let parts = Parts::default();
+        assert!(Part::ALL.iter().all(|&p| parts.on(p)));
+        let saved: Parts = serde_json::from_str(r#"{"sonar":false,"clips":false}"#).unwrap();
+        assert!(!saved.sonar && !saved.clips && saved.keyboard && saved.headset);
+        let mut toggled = Parts::default();
+        for part in Part::ALL {
+            toggled.set(part, false);
+            assert!(!toggled.on(part), "{part:?}");
+        }
+        assert_eq!(
+            serde_json::to_string(&Request::SetParts { parts: saved }).unwrap(),
+            r#"{"method":"set_parts","params":{"parts":{"keyboard":true,"headset":true,"mouse":true,"sonar":false,"gamesense":true,"profiles":true,"clips":false}}}"#
+        );
+        let r = serde_json::to_value(ResponseData::Parts { parts }).unwrap();
+        assert_eq!(r["type"], "parts");
+    }
+
+    #[test]
+    fn gamesense_needs_the_keyboard_and_a_refusal_says_where_to_turn_it_on() {
+        let parts = Parts {
+            keyboard: false,
+            ..Parts::default()
+        };
+        assert!(!parts.running().gamesense && parts.gamesense);
+        assert!(parts
+            .refusal(Part::Gamesense)
+            .unwrap()
+            .contains("draws on the keyboard"));
+        assert!(parts
+            .refusal(Part::Keyboard)
+            .unwrap()
+            .contains("Keyboard is turned off"));
+        assert_eq!(parts.refusal(Part::Mouse), None);
+    }
+
+    #[test]
+    fn requests_name_the_part_that_answers_them() {
+        assert_eq!(Request::GetSonarState.part(), Some(Part::Sonar));
+        assert_eq!(Request::SaveClip.part(), Some(Part::Clips));
+        assert_eq!(
+            Request::SetScreenCare {
+                care: ScreenCare::default()
+            }
+            .part(),
+            Some(Part::Keyboard)
+        );
+        assert_eq!(Request::GamesenseTest.part(), Some(Part::Gamesense));
+        assert_eq!(Request::GetHeadsetState.part(), Some(Part::Headset));
+        assert_eq!(Request::SaveMouse.part(), Some(Part::Mouse));
+        assert_eq!(Request::GetProfiles.part(), Some(Part::Profiles));
+        // The daemon's own requests work whatever is off, or a part could never come back.
+        assert_eq!(Request::GetParts.part(), None);
+        assert_eq!(
+            Request::SetParts {
+                parts: Parts::default()
+            }
+            .part(),
+            None
+        );
+        assert_eq!(Request::ListDevices.part(), None);
     }
 }

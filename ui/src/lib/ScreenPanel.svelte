@@ -1,10 +1,12 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
   // The Apex's 128 × 40 screen: the keyboard's own menus, text, a clock, or a picture.
-  // gglinux draws it while the daemon runs and hands it back when it stops.
+  // gglinux draws it while the daemon runs and hands it back when it stops. Screen care
+  // keeps the OLED from burning in: the picture moves a pixel now and then, and goes
+  // dark while nobody is at the computer.
 
   import { daemon } from "./daemon.svelte";
-  import type { KeyboardScreen, KeyboardState } from "./types";
+  import type { KeyboardScreen, KeyboardState, ScreenCare } from "./types";
 
   let { kb }: { kb: KeyboardState } = $props();
 
@@ -19,6 +21,8 @@
   ];
 
   let screen = $derived(kb.screen);
+  /** A daemon older than screen care sends none; its controls are hidden then. */
+  let care = $derived(kb.screen_care ?? null);
   let busy = $state(false);
   let error = $state<string | null>(null);
   /** The tab picked but not sent yet (text and pictures wait for "Show"). */
@@ -60,6 +64,18 @@
     try {
       await daemon.setScreen(s);
       picked = null;
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function setCare(c: ScreenCare) {
+    busy = true;
+    error = null;
+    try {
+      await daemon.setScreenCare(c);
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -214,6 +230,42 @@
     {/if}
   {/if}
 
+  {#if care}
+    <div class="care">
+      <span class="label">Burn-in care</span>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={care.shift}
+          disabled={busy}
+          onchange={(e) => setCare({ ...care!, shift: e.currentTarget.checked })}
+        />
+        Move the picture a pixel every couple of minutes
+      </label>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={care.dark_when_away}
+          disabled={busy}
+          onchange={(e) => setCare({ ...care!, dark_when_away: e.currentTarget.checked })}
+        />
+        Dark while nobody's at the computer (locked, asleep, or logged out)
+      </label>
+      <label class="toggle sub">
+        <input
+          type="checkbox"
+          checked={care.own_screen_too}
+          disabled={busy || !care.dark_when_away}
+          onchange={(e) => setCare({ ...care!, own_screen_too: e.currentTarget.checked })}
+        />
+        The keyboard's own screen too
+      </label>
+      {#if kb.screen_resting}
+        <p class="hint">Resting now: nobody's at the computer.</p>
+      {/if}
+    </div>
+  {/if}
+
   {#if kb.screen_error}
     <p class="error">The keyboard refused the picture: {kb.screen_error}</p>
   {/if}
@@ -238,6 +290,9 @@
   .ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   .ghost:disabled { opacity: 0.4; cursor: default; }
   .hint.warn { color: var(--danger); }
+  .care { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.9rem; }
+  .care .label { width: auto; color: var(--text); font-weight: 550; }
+  .toggle.sub { margin-left: 1.5rem; }
   textarea { font-family: ui-monospace, monospace; font-size: 0.9rem; color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 0.4rem 0.5rem; resize: none; }
   .preview { display: block; width: 384px; height: 120px; margin-top: 0.7rem; image-rendering: pixelated; border: 1px solid var(--line); border-radius: 6px; background: #0a0a0a; }
   .apply { margin-top: 0.75rem; padding: 0.4rem 0.85rem; font-size: 0.83rem; font-weight: 500; color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }

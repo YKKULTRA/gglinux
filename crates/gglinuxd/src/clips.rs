@@ -55,6 +55,12 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// A handle with no worker, for when this part is off: every send fails.
+    pub fn off() -> Handle {
+        let (tx, _) = mpsc::unbounded_channel();
+        Handle { tx }
+    }
+
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx

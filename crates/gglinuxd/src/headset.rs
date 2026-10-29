@@ -60,6 +60,12 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// A handle with no worker, for when this part is off: every send fails.
+    pub fn off() -> Handle {
+        let (tx, _) = mpsc::channel();
+        Handle { tx }
+    }
+
     /// Send a command and await its reply. A worker that has gone away reports
     /// as an error rather than hanging the client.
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {

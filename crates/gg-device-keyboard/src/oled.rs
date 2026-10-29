@@ -52,6 +52,28 @@ impl Bitmap {
         }
     }
 
+    /// The same picture moved `dx` right and `dy` down; what moves off the screen is lost
+    /// and what comes in is dark.
+    pub fn shifted(&self, dx: i32, dy: i32) -> Bitmap {
+        let mut out = Bitmap::default();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                if self.px[y * WIDTH + x] {
+                    let (nx, ny) = (x as i64 + i64::from(dx), y as i64 + i64::from(dy));
+                    if nx >= 0 && ny >= 0 {
+                        out.set(nx as usize, ny as usize, true);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether any pixel is lit.
+    pub fn is_dark(&self) -> bool {
+        !self.px.iter().any(|&p| p)
+    }
+
     /// A picture given row by row, top first: 16 bytes a row, the leftmost pixel in each
     /// byte's high bit (the layout of a PBM file's raster, or a canvas thresholded to bits).
     pub fn from_rows(rows: &[u8]) -> Result<Self> {
@@ -184,6 +206,28 @@ mod tests {
         assert!(b.get(0, 0) && b.get(127, 39));
         assert!(!b.get(1, 0));
         assert!(Bitmap::from_rows(&rows[..639]).is_err());
+    }
+
+    #[test]
+    fn a_shift_moves_every_pixel_and_drops_what_falls_off() {
+        let mut b = Bitmap::default();
+        b.set(0, 0, true);
+        b.set(5, 7, true);
+        b.set(WIDTH - 1, HEIGHT - 1, true);
+        let moved = b.shifted(2, -1);
+        assert!(moved.get(7, 6), "(5, 7) moved right 2, up 1");
+        assert!(!moved.get(5, 7));
+        assert!(
+            !moved.get(2, 0) && !moved.get(1, 0),
+            "(0, 0) went up off the screen"
+        );
+        assert_eq!(
+            moved.px.iter().filter(|&&p| p).count(),
+            1,
+            "the corner pixels fell off"
+        );
+        assert_eq!(b.shifted(0, 0), b);
+        assert!(Bitmap::default().is_dark() && !b.is_dark());
     }
 
     #[test]

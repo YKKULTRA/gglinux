@@ -26,14 +26,17 @@ import type {
   Lighting,
   MicSettings,
   MouseState,
+  Parts,
   Request,
   ResponseData,
+  ScreenCare,
   ScreenSettings,
   ServerMessage,
   SmartVolume,
   SonarState,
   Switches,
 } from "./types";
+import { ALL_PARTS } from "./types";
 
 /** Reject a pending request if the daemon never answers. */
 const REQUEST_TIMEOUT_MS = 5000;
@@ -63,6 +66,10 @@ class Daemon {
   profiles = $state<ProfilesState | null>(null);
   /** The replay recorder, its settings and the clip library; null until first fetched. */
   clips = $state<ClipsState | null>(null);
+  /** Which parts of gglinux run; null until fetched. A daemon too old to say runs them all. */
+  parts = $state<Parts | null>(null);
+  /** A change of parts was sent and the daemon is starting again with it. */
+  restarting = $state(false);
 
   #pending = new Map<number, Pending>();
   #nextId = 1;
@@ -76,7 +83,9 @@ class Daemon {
     await listen<ServerMessage>("daemon://message", (e) => this.#onMessage(e.payload));
     await listen<{ connected: boolean }>("daemon://status", (e) => {
       this.connected = e.payload.connected;
-      if (!this.connected) {
+      if (this.connected) {
+        void this.getParts();
+      } else {
         this.devices = [];
         // `applied` describes what *that* daemon process wrote. If it restarted it
         // has written nothing, so keeping the old value would be a lie.
@@ -87,6 +96,8 @@ class Daemon {
         this.gamesense = null;
         this.profiles = null;
         this.clips = null;
+        // `parts` stays: a restart for a change of parts shouldn't flash the hidden pages
+        // back; the reconnect reads them again.
         this.#failAllPending("daemon disconnected");
       }
     });
@@ -95,7 +106,34 @@ class Daemon {
     this.connected = await invoke<boolean>("daemon_status");
     if (this.connected) {
       void this.listDevices();
+      void this.getParts();
     }
+  }
+
+  /** The parts that run, as the daemon has them; every part, for a daemon too old to say. */
+  async getParts(): Promise<Parts> {
+    try {
+      const res = await this.request({ method: "get_parts" });
+      this.parts = res.type === "parts" ? res.parts : { ...ALL_PARTS };
+    } catch {
+      this.parts = { ...ALL_PARTS };
+    }
+    this.restarting = false;
+    return this.parts;
+  }
+
+  /** Save which parts run. A change restarts the daemon; the UI reconnects by itself and
+   *  reads the parts again then. */
+  async setParts(parts: Parts): Promise<void> {
+    const res = await this.request({ method: "set_parts", params: { parts } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    const changed = (Object.keys(parts) as (keyof Parts)[]).some((k) => parts[k] !== this.parts?.[k]);
+    if (!changed) return;
+    this.restarting = true;
+    // The reconnect normally reads the parts again; if no restart came, read them anyway.
+    setTimeout(() => {
+      if (this.restarting && this.connected) void this.getParts();
+    }, 10000);
   }
 
   /** Send a request and resolve with the daemon's response. */
@@ -269,6 +307,12 @@ class Daemon {
 
   async setScreen(screen: KeyboardScreen): Promise<void> {
     const res = await this.request({ method: "set_screen", params: { screen } });
+    if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
+    await this.getKeyboardState();
+  }
+
+  async setScreenCare(care: ScreenCare): Promise<void> {
+    const res = await this.request({ method: "set_screen_care", params: { care } });
     if (res.type !== "success") throw new Error(`unexpected response: ${res.type}`);
     await this.getKeyboardState();
   }

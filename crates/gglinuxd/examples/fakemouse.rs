@@ -33,7 +33,7 @@ use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, ClipInfo,
     ClipsState, DeviceInfo, DeviceKind, EqBand, Event, GameInfo, GameSenseState, HeadphoneEq,
     HeadsetChange, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyInfo,
-    KeyboardState, Lighting, MicSettings, MicState, MouseDpi, MouseSettings, MouseState,
+    KeyboardState, Lighting, MicSettings, MicState, MouseDpi, MouseSettings, MouseState, Parts,
     ProfilesState, ReactiveStatus, Request, RequestFrame, ResponseData, ScreenSettings,
     ServerMessage, SmartVolume, SmartVolumeState, SonarState, StreamMix,
 };
@@ -61,6 +61,9 @@ struct Fake {
     devices: Vec<DeviceInfo>,
     /// Method name that should return an error instead of succeeding.
     fail: Option<String>,
+    /// Which parts run; set from the client, refused as the daemon refuses, but no
+    /// restart: a change applies at once.
+    parts: Parts,
 }
 
 fn main() -> Result<()> {
@@ -116,6 +119,7 @@ fn main() -> Result<()> {
         },
         devices: devices(with_mouse),
         fail: value("--fail"),
+        parts: Parts::default(),
     }));
 
     eprintln!("fakemouse listening on {}", path.display());
@@ -213,6 +217,9 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
     // string the UI sends.
     if s.fail.as_deref() == Some(method_name(&req)) {
         return error(format!("simulated failure for {}", method_name(&req)));
+    }
+    if let Some(message) = req.part().and_then(|p| s.parts.refusal(p)) {
+        return error(message);
     }
 
     match req {
@@ -366,6 +373,15 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             }
             Err(message) => ResponseData::Error { message },
         },
+        Request::SetScreenCare { care } => {
+            s.keyboard.screen_care = care;
+            ResponseData::Success
+        }
+        Request::GetParts => ResponseData::Parts { parts: s.parts },
+        Request::SetParts { parts } => {
+            s.parts = parts;
+            ResponseData::Success
+        }
         Request::GetGamesenseState => ResponseData::Gamesense {
             state: s.gamesense.clone(),
         },
@@ -590,6 +606,8 @@ fn fake_keyboard() -> KeyboardState {
         switches_error: None,
         screen: Default::default(),
         screen_error: None,
+        screen_care: Default::default(),
+        screen_resting: false,
     }
 }
 
@@ -665,6 +683,9 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetLighting { .. } => "set_lighting",
         Request::SetSwitches { .. } => "set_switches",
         Request::SetScreen { .. } => "set_screen",
+        Request::SetScreenCare { .. } => "set_screen_care",
+        Request::GetParts => "get_parts",
+        Request::SetParts { .. } => "set_parts",
         Request::GetGamesenseState => "get_gamesense_state",
         Request::SetGamesenseEnabled { .. } => "set_gamesense_enabled",
         Request::SetGameEnabled { .. } => "set_game_enabled",

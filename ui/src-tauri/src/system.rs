@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-pub const BACKUP_FILES: [&str; 5] = [
+pub const BACKUP_FILES: [&str; 9] = [
     "lighting.json",
+    "switches.json",
+    "screen.json",
+    "screen-care.json",
     "gamesense.json",
     "profiles.json",
     "clips.json",
     "sonar.json",
+    "parts.json",
 ];
 const ENTRY: &str = "gglinux.desktop";
 const SERVICE: &str = "gglinuxd.service";

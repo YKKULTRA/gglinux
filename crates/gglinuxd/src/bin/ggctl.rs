@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    DpiStage, KeyboardState, MouseDpi, Request, RequestFrame, ResponseData, Screen, ServerMessage,
-    Switches,
+    DpiStage, KeyboardState, MouseDpi, Part, Parts, Request, RequestFrame, ResponseData, Screen,
+    ScreenCare, ServerMessage, Switches,
 };
 
 /// What `ggctl --help` prints.
@@ -37,6 +37,11 @@ ggctl screen keyboard                   # hand the screen back to the keyboard's
 ggctl screen clock [seconds] [12h] [date]
 ggctl screen text Hello|world           # up to 5 lines of 16 characters; | starts a line
 ggctl screen image picture.pbm          # a 128x40 PBM (P1 or P4)
+ggctl screen care shift|away|own on|off # burn-in care: move the picture; dark while away;
+                                        #   the keyboard's own screen dark while away too
+ggctl parts                             # which parts of gglinux run
+ggctl parts sonar off                   # turn a part off or on (keyboard, headset, mouse,
+                                        #   sonar, gamesense, profiles, clips); restarts the daemon
 ";
 
 fn main() -> Result<()> {
@@ -57,6 +62,22 @@ fn main() -> Result<()> {
             let mut switches = state.switches;
             edit.apply(&mut switches);
             Request::SetSwitches { switches }
+        }
+        Action::EditCare(edit) => {
+            let ResponseData::Keyboard { state } = send(connect()?, Request::GetKeyboardState)?
+            else {
+                bail!("the daemon did not send the keyboard state");
+            };
+            let mut care = state.screen_care;
+            edit.apply(&mut care);
+            Request::SetScreenCare { care }
+        }
+        Action::SetPart(part, on) => {
+            let ResponseData::Parts { mut parts } = send(connect()?, Request::GetParts)? else {
+                bail!("the daemon did not send its parts (is it older than ggctl?)");
+            };
+            parts.set(part, on);
+            Request::SetParts { parts }
         }
     };
 
@@ -94,6 +115,7 @@ fn main() -> Result<()> {
             }
         }
         ResponseData::Keyboard { state } => print_keyboard(&state),
+        ResponseData::Parts { parts } => print_parts(&parts),
         ResponseData::Profiles { state } => {
             for name in state.profiles {
                 println!("{name}");
@@ -113,6 +135,9 @@ fn main() -> Result<()> {
                     "note: the keyboard keeps the switch settings it has until it's unplugged"
                 );
             }
+            if matches!(positional(&args)?.as_slice(), ["parts", ..]) {
+                println!("the daemon is starting again with that change");
+            }
         }
         other => println!("{other:?}"),
     }
@@ -128,6 +153,73 @@ enum Action {
     Help,
     /// Read the switch settings, change them, and send them back.
     EditSwitches(SwitchEdit),
+    /// Read the screen care, change one setting, and send it back.
+    EditCare(CareEdit),
+    /// Read the parts, turn one on or off, and send them back.
+    SetPart(Part, bool),
+}
+
+/// One change to the screen care.
+#[derive(Debug, PartialEq)]
+enum CareEdit {
+    Shift(bool),
+    DarkWhenAway(bool),
+    OwnScreenToo(bool),
+}
+
+impl CareEdit {
+    fn apply(self, c: &mut ScreenCare) {
+        match self {
+            CareEdit::Shift(on) => c.shift = on,
+            CareEdit::DarkWhenAway(on) => c.dark_when_away = on,
+            CareEdit::OwnScreenToo(on) => c.own_screen_too = on,
+        }
+    }
+}
+
+fn on_off(word: &str) -> Result<bool> {
+    match word {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => bail!("'{other}' is not on or off"),
+    }
+}
+
+fn care_action(rest: &[&str]) -> Result<Action> {
+    Ok(Action::EditCare(match rest {
+        ["shift", v] => CareEdit::Shift(on_off(v)?),
+        ["away", v] => CareEdit::DarkWhenAway(on_off(v)?),
+        ["own", v] => CareEdit::OwnScreenToo(on_off(v)?),
+        _ => bail!("usage: ggctl screen care shift|away|own on|off"),
+    }))
+}
+
+fn parts_action(rest: &[&str]) -> Result<Action> {
+    Ok(match rest {
+        [] => Action::Send(Request::GetParts),
+        [name, v] => {
+            let part = Part::ALL
+                .into_iter()
+                .find(|p| p.label().eq_ignore_ascii_case(name))
+                .with_context(|| {
+                    format!("no part '{name}' (try: keyboard, headset, mouse, sonar, gamesense, profiles, clips)")
+                })?;
+            Action::SetPart(part, on_off(v)?)
+        }
+        _ => bail!("usage: ggctl parts [<part> on|off]"),
+    })
+}
+
+fn print_parts(parts: &Parts) {
+    let running = parts.running();
+    for part in Part::ALL {
+        let state = match (parts.on(part), running.on(part)) {
+            (true, true) => "on",
+            (true, false) => "on, but needs the keyboard",
+            (false, _) => "off",
+        };
+        println!("{:<10} {state}", part.label().to_lowercase());
+    }
 }
 
 /// One change to the switch settings.
@@ -339,6 +431,19 @@ fn print_keyboard(state: &KeyboardState) {
     if let Some(e) = &state.screen_error {
         println!("           the keyboard refused it: {e}");
     }
+    let c = &state.screen_care;
+    let on = |b: bool| if b { "on" } else { "off" };
+    println!(
+        "care:      shift {}; dark while away {}; the keyboard's own too {}{}",
+        on(c.shift),
+        on(c.dark_when_away),
+        on(c.own_screen_too),
+        if state.screen_resting {
+            " (resting now: nobody's at the computer)"
+        } else {
+            ""
+        }
+    );
 }
 
 fn parse(args: &[String]) -> Result<Action> {
@@ -363,9 +468,11 @@ fn parse(args: &[String]) -> Result<Action> {
         Some((&"gamesense", _)) => bail!("usage: ggctl gamesense test|on|off"),
         Some((&"keyboard", [])) => Request::GetKeyboardState,
         Some((&"switches", rest)) => return switches_action(rest),
+        Some((&"screen", ["care", rest @ ..])) => return care_action(rest),
         Some((&"screen", rest)) => screen_request(rest)?,
+        Some((&"parts", rest)) => return parts_action(rest),
         Some((other, _)) => {
-            bail!("unknown command '{other}' (try: mouse, clip, profile, gamesense, keyboard, switches, screen, or nothing to watch)")
+            bail!("unknown command '{other}' (try: mouse, clip, profile, gamesense, keyboard, switches, screen, parts, or nothing to watch)")
         }
     }))
 }
@@ -542,7 +649,34 @@ mod tests {
             Action::Watch => panic!("{line} parsed as watch"),
             Action::Help => panic!("{line} parsed as help"),
             Action::EditSwitches(e) => panic!("{line} parsed as a switch edit {e:?}"),
+            Action::EditCare(e) => panic!("{line} parsed as a care edit {e:?}"),
+            Action::SetPart(p, on) => panic!("{line} parsed as part {p:?} {on}"),
         }
+    }
+
+    #[test]
+    fn screen_care_and_parts_read_their_settings_first() {
+        match parse(&args("screen care shift off")).unwrap() {
+            Action::EditCare(e) => assert_eq!(e, CareEdit::Shift(false)),
+            _ => panic!("not a care edit"),
+        }
+        match parse(&args("screen care own on")).unwrap() {
+            Action::EditCare(e) => assert_eq!(e, CareEdit::OwnScreenToo(true)),
+            _ => panic!("not a care edit"),
+        }
+        assert!(parse(&args("screen care shift maybe")).is_err());
+        assert!(matches!(sends("parts"), Request::GetParts));
+        match parse(&args("parts Sonar off")).unwrap() {
+            Action::SetPart(p, on) => assert_eq!((p, on), (Part::Sonar, false)),
+            _ => panic!("not a part change"),
+        }
+        match parse(&args("parts gamesense on")).unwrap() {
+            Action::SetPart(p, on) => assert_eq!((p, on), (Part::Gamesense, true)),
+            _ => panic!("not a part change"),
+        }
+        assert!(parse(&args("parts radio off")).is_err());
+        // `screen clock` is still a screen, not care.
+        assert!(matches!(sends("screen clock"), Request::SetScreen { .. }));
     }
 
     #[test]
