@@ -54,6 +54,12 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// A handle with no worker, for when this part is off: every send fails.
+    pub fn off() -> Handle {
+        let (tx, _) = mpsc::unbounded_channel();
+        Handle { tx }
+    }
+
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -62,6 +68,25 @@ impl Handle {
         reply_rx
             .await
             .map_err(|_| "GameSense dropped the request".to_string())?
+    }
+}
+
+/// With GameSense's part off: take gglinux's files out of the Proton prefixes, so no
+/// game looks for a server that won't come. Blocking; other files are left alone.
+pub fn clear_files() {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let libraries = prefixes::libraries(&prefixes::steam_roots(&home));
+    let removed = prefixes::program_data_dirs(&libraries)
+        .iter()
+        .filter(|pd| prefixes::remove(pd).unwrap_or(false))
+        .count();
+    if removed > 0 {
+        info!(
+            removed,
+            "GameSense is turned off: took coreProps.json out of the Proton prefixes"
+        );
     }
 }
 

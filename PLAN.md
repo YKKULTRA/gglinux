@@ -241,9 +241,10 @@ back to the keyboard when off or on exit; a Keyboard panel with a per-key editor
 `docs/superpowers/specs/2026-09-27-keyboard-lighting-design.md`). **Accepted on hardware
 2026-09-27**: static per-key, wave, and hand-back to onboard lighting all seen by the owner.
 
-M4b OLED is **blocked**: none of apex-tux's framings (`0x61` numbered, unnumbered, after init;
-`0x0C` chunked) changed the OLED on `0x1642` (see `docs/PROTOCOLS.md`). The next step is a GG USB
-capture on Windows, in the same session as M5 — no more opcode guessing on that interface.
+M4b OLED was **blocked**: none of apex-tux's framings (`0x61` numbered, unnumbered, after init;
+`0x0C` chunked) changed the OLED on `0x1642`. **Built 2026-10-29** from Apex Control's published
+protocol reference (the live frame is `1F 81`; see `docs/PROTOCOLS.md` §3b), together with M5's
+actuation, Rapid Trigger and Rapid Tap (§3c). Neither has been tried on this keyboard yet.
 **Reactive lighting done in software** (2026-09-28; spec:
 `docs/superpowers/specs/2026-09-28-reactive-lighting-design.md`): Fade or Ripple over any effect,
 from key presses read on the Apex's typing interfaces. The same change narrowed the udev rule,
@@ -333,8 +334,10 @@ owner's decision).
 **Engine:**
 - Apex per-key RGB, the wave effect, and hand-back to onboard lighting: **verified** (M4a).
   Breathing, spectrum and reactive lighting: **built**.
-- Apex actuation, Rapid Trigger, Rapid Tap, Protection, Dual actuation, key remap and macros:
-  **blocked** (M5) — needs a GG USB capture on Windows.
+- Apex actuation (global and per key), Rapid Trigger and Rapid Tap: **built** (M5, RAM only,
+  re-sent on connect). Protection mode, dual actuation, key remap, macros and saving to the
+  keyboard's flash: **not built** (the commands are documented, but remapping can wipe the Fn
+  layer's shortcuts and flash writes share opcodes with the firmware updater).
 - Rival 3 DPI, polling, button remap and onboard save: **parked** (M1); its battery: **verified**.
 - Lighting profiles and per-game switching: **built** (M7a). Profiles are lighting profiles only.
 - Settings backup and restore, in place of cloud sync (which GG dropped anyway): **built** (M7d).
@@ -357,15 +360,15 @@ owner's decision).
   **built** — not yet tried from the UI.
 - Kernel backend (prefer `hid-steelseries` when present): **deferred** — see M2.
 
-**OLED:** the Apex OLED is **blocked** (M4b) on the same Windows capture as M5. The base
-station's screen is kept dark on purpose (burn-in protection).
+**OLED:** the Apex screen shows text, a clock or a picture: **built** (M4b). The base station's
+screen is kept dark on purpose (burn-in protection).
 
 **GameSense / Engine Apps:**
 - Event server, colour handlers on the keyboard, `coreProps.json` in Proton prefixes: **built**
-  (M6a). Screen and tactile handlers are accepted but never drawn (OLED blocked; no tactile
-  hardware).
-- Built-in apps — the audio visualizer and the mic-mute light: **built** (M6b). A clock needs the
-  blocked OLED.
+  (M6a). Screen and tactile handlers are accepted but not drawn yet (the screen works since M4b;
+  drawing GameSense screen events on it is still to do; no tactile hardware).
+- Built-in apps — the audio visualizer and the mic-mute light: **built** (M6b); a clock on the
+  keyboard screen: **built** (M4b).
 - CS2 Game State Integration and Discord mute: **skipped**.
 - PrismSync: **skipped** — the keyboard is the only RGB device.
 

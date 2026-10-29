@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Control for the SteelSeries **Apex Pro TKL Gen 3** (`1038:1642`) lighting.
+//! Control for the SteelSeries **Apex Pro TKL Gen 3** (`1038:1642`): its lighting, its
+//! screen and its switches.
 //!
-//! Everything sent is framed by [`proto`], which only frames opcodes on its
-//! allowlist, and checked against it once more at the write.
+//! Everything sent is framed by [`proto`], which only frames commands on its
+//! allowlist, and checked against it once more at the write. Nothing here writes the
+//! keyboard's flash: the screen and switch settings last until it loses power.
 
 use std::ffi::CString;
 
@@ -10,11 +12,14 @@ use anyhow::{anyhow, Context, Result};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 use tracing::debug;
 
+pub mod font;
 pub mod keys;
 pub mod layout;
+pub mod oled;
 pub mod proto;
 
-pub use proto::Rgb;
+pub use oled::Bitmap;
+pub use proto::{Rgb, TapMode, TapPair};
 
 pub const VENDOR_ID: u16 = 0x1038;
 pub const PRODUCT_ID: u16 = 0x1642;
@@ -24,6 +29,17 @@ const CONTROL_INTERFACE: i32 = 1;
 const VENDOR_USAGE_PAGE: u16 = 0xffc0;
 
 const READ_TIMEOUT_MS: i32 = 200;
+
+/// What [`Keyboard::set_switches`] sends, per analog key by HID code.
+pub struct Switches<'a> {
+    /// Actuation point, tenths of a millimetre (1..=40).
+    pub actuation: &'a dyn Fn(u8) -> u8,
+    pub rapid_trigger: &'a dyn Fn(u8) -> bool,
+    /// Rapid Trigger's re-trigger distance, tenths of a millimetre (1..=20).
+    pub sensitivity: &'a dyn Fn(u8) -> u8,
+    pub rapid_tap: bool,
+    pub tap_pairs: &'a [TapPair],
+}
 
 pub struct Keyboard {
     device: HidDevice,
@@ -89,17 +105,40 @@ impl Keyboard {
         Ok(proto::decode_region(&buf[..n]))
     }
 
+    /// Show a picture on the screen until the next one, or until the screen is released.
+    pub fn show_screen(&self, picture: &Bitmap) -> Result<()> {
+        self.feature(&proto::oled_frame(&picture.packed()))
+    }
+
+    /// Give the screen back to the keyboard's own menus.
+    pub fn release_screen(&self) -> Result<()> {
+        self.output(&proto::oled_release())
+    }
+
+    /// Set every analog key's switch: its actuation point and Rapid Trigger distance in
+    /// tenths of a millimetre, whether it has Rapid Trigger, and Rapid Tap. Lasts until
+    /// the keyboard loses power.
+    pub fn set_switches(&self, switches: &Switches<'_>) -> Result<()> {
+        // Built first, so a bad pair list sends nothing at all.
+        let pairs = proto::rapid_tap_pairs(switches.tap_pairs)?;
+        self.feature(&proto::actuation_table(switches.actuation))?;
+        self.feature(&proto::release_mode_table(switches.rapid_trigger))?;
+        self.feature(&proto::sensitivity_table(switches.sensitivity))?;
+        self.output(&pairs)?;
+        self.output(&proto::rapid_tap_enable(switches.rapid_tap))
+    }
+
     /// Send a feature report. The allowlist is checked again here, at the one
     /// place bytes reach the wire.
     fn feature(&self, report: &[u8]) -> Result<()> {
-        proto::check(report[1])?;
+        proto::check_report(report)?;
         self.device
             .send_feature_report(report)
             .with_context(|| format!("sending keyboard command {:#04x}", report[1]))
     }
 
     fn output(&self, report: &[u8]) -> Result<()> {
-        proto::check(report[1])?;
+        proto::check_report(report)?;
         self.device
             .write(report)
             .map(|_| ())

@@ -20,12 +20,53 @@ Pro TKL Gen 3 keyboard (`1038:1642`), Arctis Nova Pro Wireless headset and base 
 - **Built, untested on hardware:** everything else, including all of Sonar, every headset setting
   write, the other lighting effects, reactive lighting, GameSense, profiles, clips, streamer mode,
   Smart Volume, start at login and the Arch package.
-- **Blocked:** M4b (the Apex OLED) and M5 (actuation and Rapid Trigger) need a USB capture of
-  SteelSeries GG on Windows.
+- **Built from published protocol notes, untested on this keyboard:** M4b (the Apex screen) and M5
+  (actuation, Rapid Trigger, Rapid Tap). Key remapping and saving to the keyboard's flash are not
+  built.
 - **Parked:** M1 (the Rival 3 Wireless Gen 2 mouse) is built, but no write was ever confirmed on the
   device and the mouse is no longer in use.
 
 ## [Unreleased]
+
+### Keyboard screen and switches (M4b, M5), screen care, parts, Hyprland
+
+2026-10-29.
+
+- The Apex's 128 × 40 screen shows text (up to five lines, as big as they fit), a clock (seconds,
+  24-hour and date optional) or a picture (any image, fitted and dithered in the app, or a PBM through
+  `ggctl screen image`). It's drawn while the daemon runs and handed back to the keyboard's own menus
+  when set to *Keyboard's own* or when the daemon stops.
+- Switches: the actuation point (0.1 to 4.0 mm) for every key and per key, Rapid Trigger on all or
+  some keys with its distance (0.1 to 2.0 mm), and Rapid Tap (SOCD) pairs. The keyboard keeps them
+  in RAM only, so the daemon sends them again whenever it connects; nothing is written to flash.
+  Off by default.
+- The keyboard's allowlist now checks sub-commands too: only the screen frame and release
+  (`1F 81`, `1F 82`) and five switch tables (`38 61` primary layer only, `62`, `65`, `66`, `67`)
+  are added; flash writes (`02`, `03`, `04`, `38 83`) stay impossible to frame.
+- `ggctl keyboard`, `ggctl switches ...` and `ggctl screen ...`.
+- The commands come from Apex Control's protocol reference (CC BY 4.0); see
+  [docs/PROTOCOLS.md](docs/PROTOCOLS.md) §3b–3c. Not yet tried on this keyboard.
+- **Clip hotkey fix:** current desktop portals (xdg-desktop-portal 1.20 and later) refuse a
+  shortcut session from an app they can't name, and they name it only from a desktop entry called
+  after its app id. The entry is now `io.github.ykk.gglinux.desktop` (was `gglinux.desktop`), and
+  the hotkey's error says so when the portal refuses.
+- **Hyprland:** the clip hotkey's message gives the `global` bind line for `hyprland.lua` and
+  `hyprland.conf`; Settings explains that Hyprland doesn't run autostart entries and shows the
+  line that starts the tray window; the README has a Hyprland section.
+- **Screen burn-in care.** A picture of gglinux's moves a pixel every two minutes (a 5 × 5 walk
+  around where it's drawn) and goes dark while nobody is at the computer: no active, unlocked
+  session of the user on a seat (logind), the screensaver service says locked (hypridle and
+  Plasma's locker answer `org.freedesktop.ScreenSaver.GetActive`; hypridle never tells logind), the
+  computer going to sleep (a logind delay lock holds sleep until the screen is dark), or nobody
+  logged in. Optionally the keyboard's own screen goes dark then too (off by default). Both on by
+  default for gglinux's pictures; `ggctl screen care ...`.
+- **Parts.** Every part (keyboard, headset, mouse, Sonar, GameSense, profiles, clips) can be
+  turned off in Settings or with `ggctl parts <part> off`. One that's off isn't started: its
+  device is left alone, its page is hidden, and its requests are refused with where to turn it
+  back on. GameSense needs the keyboard. Applying a change restarts the daemon in place (same
+  process, so systemd keeps tracking it). Turning Sonar off takes its channels out of PipeWire;
+  turning GameSense off takes its files out of the Proton prefixes.
+- Backups now include the switch, screen, screen-care and parts settings (they were left out).
 
 ### Device daemon and IPC (M0)
 
@@ -117,7 +158,8 @@ compared against a real PipeWire graph.
   (`install-local.sh --reactive`), and the UI warns what that access allows. Untested on hardware.
 - Lighting time is kept in 64-bit floats, so fades and the wave no longer stutter after the daemon
   has run for days.
-- The Apex OLED (M4b) is blocked: none of the known framings changed the screen on `0x1642`.
+- The Apex OLED (M4b) was blocked here: none of the known framings changed the screen on
+  `0x1642` (built later, see the screen and switches section).
 
 ### GameSense (M6a)
 

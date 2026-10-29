@@ -274,12 +274,95 @@ export interface KeyInfo {
   w: number;
 }
 
+/** What the keyboard's screen shows. */
+export type KeyboardScreen =
+  | { kind: "keyboard" }
+  | { kind: "text"; text: string }
+  | { kind: "clock"; seconds: boolean; h24: boolean; date: boolean }
+  /** 640 bytes: 16 a row from the top, the leftmost pixel in each byte's high bit. */
+  | { kind: "image"; pixels: number[] };
+
+/** How a Rapid Tap pair settles both keys held at once (not checked on hardware). */
+export type TapMode = "last_wins" | "neither" | "first_wins" | "second_wins";
+
+export interface TapPair {
+  a: number;
+  b: number;
+  mode: TapMode;
+  report_both: boolean;
+}
+
+export interface KeyActuation {
+  code: number;
+  /** Tenths of a millimetre, 1..=40. */
+  actuation: number;
+}
+
+export interface Switches {
+  /** false: gglinux sends nothing, and the keyboard keeps what it has until it loses power. */
+  enabled: boolean;
+  /** Tenths of a millimetre, 1..=40, for every key not in `keys`. */
+  actuation: number;
+  keys: KeyActuation[];
+  rapid_trigger: {
+    enabled: boolean;
+    /** Empty: every adjustable key. */
+    keys: number[];
+    /** Tenths of a millimetre, 1..=20. */
+    sensitivity: number;
+  };
+  rapid_tap: { enabled: boolean; pairs: TapPair[] };
+}
+
+/** Burn-in care for the keyboard's screen. */
+export interface ScreenCare {
+  /** Move gglinux's picture a pixel at a time, within two pixels, every couple of minutes. */
+  shift: boolean;
+  /** Dark while nobody is at the computer: locked, switched away, asleep, or not logged in. */
+  dark_when_away: boolean;
+  /** The keyboard's own screen dark then too (gglinux takes it for that time). */
+  own_screen_too: boolean;
+}
+
+/** Which parts of gglinux run. One that's off isn't started, and its page is hidden. */
+export interface Parts {
+  keyboard: boolean;
+  headset: boolean;
+  mouse: boolean;
+  sonar: boolean;
+  gamesense: boolean;
+  profiles: boolean;
+  clips: boolean;
+}
+
+export type Part = keyof Parts;
+
+export const ALL_PARTS: Parts = {
+  keyboard: true,
+  headset: true,
+  mouse: true,
+  sonar: true,
+  gamesense: true,
+  profiles: true,
+  clips: true,
+};
+
 export interface KeyboardState {
   connected: boolean;
   layout: KeyInfo[];
   lighting: Lighting;
   /** Whether the daemon is reading key presses for reactive lighting. */
   reactive: "off" | "reading" | "no_access";
+  /** The keys with adjustable switches, by HID code. */
+  analog_keys: number[];
+  switches: Switches;
+  switches_error: string | null;
+  screen: KeyboardScreen;
+  screen_error: string | null;
+  /** Absent from a daemon older than screen care. */
+  screen_care?: ScreenCare;
+  /** Dark right now because nobody is at the computer. */
+  screen_resting?: boolean;
 }
 
 export interface GameInfo {
@@ -388,6 +471,11 @@ export type Request =
   | { method: "set_smart_volume"; params: { channel: Channel; settings: SmartVolume } }
   | { method: "get_keyboard_state" }
   | { method: "set_lighting"; params: { lighting: Lighting } }
+  | { method: "set_switches"; params: { switches: Switches } }
+  | { method: "set_screen"; params: { screen: KeyboardScreen } }
+  | { method: "set_screen_care"; params: { care: ScreenCare } }
+  | { method: "get_parts" }
+  | { method: "set_parts"; params: { parts: Parts } }
   | { method: "get_gamesense_state" }
   | { method: "set_gamesense_enabled"; params: { enabled: boolean } }
   | { method: "set_game_enabled"; params: { game: string; enabled: boolean } }
@@ -418,6 +506,7 @@ export type ResponseData =
   | { type: "gamesense"; state: GameSenseState }
   | { type: "profiles"; state: ProfilesState }
   | { type: "clips"; state: ClipsState }
+  | { type: "parts"; parts: Parts }
   | { type: "success" }
   | { type: "error"; message: string };
 

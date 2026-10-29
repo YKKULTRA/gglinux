@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-pub const BACKUP_FILES: [&str; 5] = [
+pub const BACKUP_FILES: [&str; 9] = [
     "lighting.json",
+    "switches.json",
+    "screen.json",
+    "screen-care.json",
     "gamesense.json",
     "profiles.json",
     "clips.json",
     "sonar.json",
+    "parts.json",
 ];
 const ENTRY: &str = "gglinux.desktop";
 const SERVICE: &str = "gglinuxd.service";
@@ -25,6 +29,26 @@ pub fn installed_exe(exe: &Path) -> PathBuf {
         .and_then(|s| s.strip_suffix(" (deleted)"))
         .map(PathBuf::from)
         .unwrap_or_else(|| exe.to_path_buf())
+}
+
+/// The command that starts the UI hidden in the tray, quoted for a shell: what a
+/// desktop that doesn't read autostart entries (Hyprland) runs at login instead.
+pub fn tray_command(exe: &Path) -> String {
+    let path = exe.to_string_lossy();
+    let plain = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c));
+    if plain {
+        format!("{path} --hidden")
+    } else {
+        format!("'{}' --hidden", path.replace('\'', r"'\''"))
+    }
+}
+
+/// Whether this desktop runs autostart entries itself. Hyprland doesn't, unless
+/// a session manager such as uwsm does it for it.
+pub fn reads_autostart(desktop: &str) -> bool {
+    !desktop.to_ascii_lowercase().contains("hyprland")
 }
 
 /// The autostart entry: the UI, hidden in the tray.
@@ -183,6 +207,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn the_tray_command_is_quoted_for_a_shell_only_when_it_must_be() {
+        assert_eq!(
+            tray_command(Path::new("/home/u/.local/bin/gglinux")),
+            "/home/u/.local/bin/gglinux --hidden"
+        );
+        assert_eq!(
+            tray_command(Path::new("/opt/my apps/it's/gglinux")),
+            r"'/opt/my apps/it'\''s/gglinux' --hidden"
+        );
+    }
+
+    #[test]
+    fn hyprland_is_the_desktop_that_skips_autostart_entries() {
+        assert!(!reads_autostart("Hyprland"));
+        assert!(reads_autostart("KDE"));
+        assert!(reads_autostart("GNOME"));
     }
 
     #[test]

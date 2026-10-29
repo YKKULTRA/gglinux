@@ -6,7 +6,7 @@ post_install() {
     Quit gglinux from its tray, then:
       systemctl --user disable --now gglinuxd
       rm -f ~/.local/bin/{gglinuxd,gglinux,ggctl} ~/.config/systemd/user/gglinuxd.service
-      rm -f ~/.local/share/applications/gglinux.desktop ~/.config/autostart/gglinux.desktop
+      rm -f ~/.local/share/applications/{gglinux,io.github.ykk.gglinux}.desktop ~/.config/autostart/gglinux.desktop
       systemctl --user daemon-reload
 ==> gglinux: start the daemon for your user with
       systemctl --user enable --now gglinuxd

@@ -105,6 +105,30 @@ fn run_quietly(argv: &[&str]) -> Result<(), String> {
     })
 }
 
+/// The desktop this window runs in, for the hints that differ by desktop.
+#[derive(serde::Serialize)]
+struct SessionInfo {
+    /// `XDG_CURRENT_DESKTOP`, or empty.
+    desktop: String,
+    /// Whether the desktop runs autostart entries (Hyprland doesn't).
+    reads_autostart: bool,
+    /// The command that starts this app hidden in the tray, for a desktop's own autostart.
+    tray_command: String,
+}
+
+#[tauri::command]
+fn session_info() -> SessionInfo {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let exe = std::env::current_exe()
+        .map(|e| system::installed_exe(&e))
+        .unwrap_or_else(|_| "gglinux".into());
+    SessionInfo {
+        reads_autostart: system::reads_autostart(&desktop),
+        tray_command: system::tray_command(&exe),
+        desktop,
+    }
+}
+
 #[tauri::command]
 fn get_autostart() -> bool {
     system::autostart_on(&autostart_dir())
@@ -295,6 +319,7 @@ fn main() {
             open_folder,
             get_autostart,
             set_autostart,
+            session_info,
             export_settings,
             import_settings
         ])

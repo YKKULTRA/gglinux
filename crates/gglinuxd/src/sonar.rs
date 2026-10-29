@@ -15,6 +15,25 @@ use tokio::sync::{broadcast, oneshot, watch};
 
 use crate::keyboard;
 
+/// With Sonar's part off: take Sonar's channels out of PipeWire, if they're in, so
+/// nothing is left routed through channels nobody runs. Blocking: that restarts
+/// PipeWire. Sonar's other settings are kept for when the part is back.
+pub fn turn_off() {
+    let mut sonar = Sonar::new(
+        SystemTools,
+        gg_audio::settings::path(),
+        gg_audio::config::dropin_path(),
+    );
+    if sonar.is_enabled() {
+        match sonar.disable() {
+            Ok(()) => tracing::info!("Sonar is turned off: its channels are out of PipeWire"),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "could not take Sonar's channels out of PipeWire")
+            }
+        }
+    }
+}
+
 /// How often to look for new app streams while Sonar is on.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -97,6 +116,12 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// A handle with no worker, for when this part is off: every send fails.
+    pub fn off() -> Handle {
+        let (tx, _) = mpsc::channel();
+        Handle { tx }
+    }
+
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx

@@ -585,6 +585,263 @@ impl Default for Lighting {
     }
 }
 
+/// What the keyboard's screen shows.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Screen {
+    /// The keyboard's own menus: gglinux leaves the screen alone.
+    #[default]
+    Keyboard,
+    /// One to five lines of text, drawn as big as they fit.
+    Text { text: String },
+    /// The time, with seconds, a 24-hour clock and the date under it as chosen.
+    Clock {
+        seconds: bool,
+        h24: bool,
+        date: bool,
+    },
+    /// A 128 × 40 picture: 640 bytes, 16 a row from the top, the leftmost pixel in each
+    /// byte's high bit.
+    Image { pixels: Vec<u8> },
+}
+
+impl Screen {
+    pub const MAX_LINES: usize = 5;
+    pub const MAX_COLUMNS: usize = 16;
+    pub const IMAGE_BYTES: usize = 640;
+
+    /// Check what the screen can show, with a message meant for the user.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Screen::Text { text } => {
+                let lines: Vec<&str> = text.lines().collect();
+                if lines.len() > Self::MAX_LINES {
+                    return Err(format!(
+                        "the screen holds {} lines of text, not {}",
+                        Self::MAX_LINES,
+                        lines.len()
+                    ));
+                }
+                if let Some(long) = lines.iter().find(|l| l.chars().count() > Self::MAX_COLUMNS) {
+                    return Err(format!(
+                        "\"{long}\" is longer than the {} characters a line holds",
+                        Self::MAX_COLUMNS
+                    ));
+                }
+                if let Some(c) = text
+                    .chars()
+                    .find(|c| !(c.is_ascii_graphic() || *c == ' ' || *c == '\n'))
+                {
+                    return Err(format!(
+                        "the screen's font has no '{c}': use plain ASCII letters, digits and punctuation"
+                    ));
+                }
+                Ok(())
+            }
+            Screen::Image { pixels } if pixels.len() != Self::IMAGE_BYTES => Err(format!(
+                "a screen picture is {} bytes, not {}",
+                Self::IMAGE_BYTES,
+                pixels.len()
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Burn-in care for the keyboard's screen. An OLED pixel wears while it's lit, so one
+/// picture held for hours leaves its ghost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScreenCare {
+    /// Move gglinux's picture a pixel at a time, within two pixels of where it's drawn,
+    /// every couple of minutes, so no pixel stays lit for hours.
+    pub shift: bool,
+    /// Turn gglinux's picture dark while nobody is at the computer: the session locked,
+    /// another one switched to, the computer going to sleep, or nobody logged in.
+    pub dark_when_away: bool,
+    /// Turn the keyboard's own screen dark then too. This draws on a screen gglinux
+    /// otherwise leaves alone, and hands it back when someone's there again.
+    pub own_screen_too: bool,
+}
+
+impl Default for ScreenCare {
+    fn default() -> Self {
+        ScreenCare {
+            shift: true,
+            dark_when_away: true,
+            own_screen_too: false,
+        }
+    }
+}
+
+/// How a Rapid Tap pair settles both keys held at once. What each does is as documented
+/// by others; it hasn't been checked on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TapMode {
+    /// The key pressed last counts.
+    LastWins,
+    /// Neither counts while both are held.
+    Neither,
+    /// The pair's first key always wins.
+    FirstWins,
+    /// The pair's second key always wins.
+    SecondWins,
+}
+
+/// Two opposing keys for Rapid Tap (SOCD), such as A and D, by HID code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TapPair {
+    pub a: u8,
+    pub b: u8,
+    pub mode: TapMode,
+    /// Send both keys rather than holding the losing one back.
+    #[serde(default)]
+    pub report_both: bool,
+}
+
+/// One key's own actuation point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyActuation {
+    pub code: u8,
+    /// Tenths of a millimetre (1..=40).
+    pub actuation: u8,
+}
+
+/// Rapid Trigger: a key resets as soon as it rises a little, instead of at its actuation
+/// point, and fires again as soon as it goes down that much.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RapidTrigger {
+    pub enabled: bool,
+    /// The keys it's on for, by HID code; empty means every adjustable key.
+    #[serde(default)]
+    pub keys: Vec<u8>,
+    /// How far a key moves to reset or fire again, in tenths of a millimetre (1..=20).
+    pub sensitivity: u8,
+}
+
+impl Default for RapidTrigger {
+    fn default() -> Self {
+        RapidTrigger {
+            enabled: false,
+            keys: Vec::new(),
+            sensitivity: 2,
+        }
+    }
+}
+
+/// Rapid Tap (SOCD): pairs of opposing keys the keyboard settles itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RapidTap {
+    pub enabled: bool,
+    #[serde(default)]
+    pub pairs: Vec<TapPair>,
+}
+
+/// The Apex Pro TKL Gen 3's adjustable switches as gglinux sets them. The keyboard keeps
+/// them in RAM only, so the daemon sends them again every time it connects. With `enabled`
+/// off it sends nothing, and the keyboard keeps what it has until it loses power, when its
+/// onboard profile comes back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Switches {
+    pub enabled: bool,
+    /// The actuation point of every key not in `keys`, in tenths of a millimetre (1..=40).
+    pub actuation: u8,
+    /// Keys with an actuation point of their own.
+    #[serde(default)]
+    pub keys: Vec<KeyActuation>,
+    #[serde(default)]
+    pub rapid_trigger: RapidTrigger,
+    #[serde(default)]
+    pub rapid_tap: RapidTap,
+}
+
+impl Switches {
+    pub const ACTUATION: std::ops::RangeInclusive<u8> = 1..=40;
+    pub const SENSITIVITY: std::ops::RangeInclusive<u8> = 1..=20;
+    pub const MAX_TAP_PAIRS: usize = 10;
+
+    /// Check ranges and pairs, with a message meant for the user. Whether each key has an
+    /// adjustable switch is the daemon's to check: it knows the keyboard.
+    pub fn validate(&self) -> Result<(), String> {
+        let mm = |tenths: u8| format!("{:.1} mm", f32::from(tenths) / 10.0);
+        if !Self::ACTUATION.contains(&self.actuation) {
+            return Err(format!(
+                "actuation point {} out of range (0.1 to 4.0 mm)",
+                mm(self.actuation)
+            ));
+        }
+        let mut seen = Vec::new();
+        for k in &self.keys {
+            if !Self::ACTUATION.contains(&k.actuation) {
+                return Err(format!(
+                    "actuation point {} of key {:#04x} out of range (0.1 to 4.0 mm)",
+                    mm(k.actuation),
+                    k.code
+                ));
+            }
+            if seen.contains(&k.code) {
+                return Err(format!("key {:#04x} has two actuation points", k.code));
+            }
+            seen.push(k.code);
+        }
+        let s = self.rapid_trigger.sensitivity;
+        if !Self::SENSITIVITY.contains(&s) {
+            return Err(format!(
+                "Rapid Trigger distance {} out of range (0.1 to 2.0 mm)",
+                mm(s)
+            ));
+        }
+        let pairs = &self.rapid_tap.pairs;
+        if pairs.len() > Self::MAX_TAP_PAIRS {
+            return Err(format!(
+                "at most {} Rapid Tap pairs, not {}",
+                Self::MAX_TAP_PAIRS,
+                pairs.len()
+            ));
+        }
+        let mut in_pairs = Vec::new();
+        for p in pairs {
+            if p.a == p.b {
+                return Err("a Rapid Tap pair needs two different keys".into());
+            }
+            for code in [p.a, p.b] {
+                if in_pairs.contains(&code) {
+                    return Err(format!("key {code:#04x} is in two Rapid Tap pairs"));
+                }
+                in_pairs.push(code);
+            }
+        }
+        Ok(())
+    }
+
+    /// The actuation point of `code`, in tenths of a millimetre.
+    pub fn actuation_of(&self, code: u8) -> u8 {
+        self.keys
+            .iter()
+            .find(|k| k.code == code)
+            .map_or(self.actuation, |k| k.actuation)
+    }
+
+    /// Whether `code` has Rapid Trigger.
+    pub fn rapid_trigger_on(&self, code: u8) -> bool {
+        let rt = &self.rapid_trigger;
+        rt.enabled && (rt.keys.is_empty() || rt.keys.contains(&code))
+    }
+}
+
+impl Default for Switches {
+    fn default() -> Self {
+        Switches {
+            enabled: false,
+            actuation: 15,
+            keys: Vec::new(),
+            rapid_trigger: RapidTrigger::default(),
+            rapid_tap: RapidTap::default(),
+        }
+    }
+}
+
 /// A key on the keyboard picture, in key units (a standard key is 1 × 1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeyInfo {
@@ -615,6 +872,24 @@ pub struct KeyboardState {
     pub layout: Vec<KeyInfo>,
     pub lighting: Lighting,
     pub reactive: ReactiveStatus,
+    /// The keys with adjustable switches, by HID code.
+    #[serde(default)]
+    pub analog_keys: Vec<u8>,
+    #[serde(default)]
+    pub switches: Switches,
+    /// Why the keyboard didn't take the switch settings, if it didn't.
+    #[serde(default)]
+    pub switches_error: Option<String>,
+    #[serde(default)]
+    pub screen: Screen,
+    /// Why the keyboard didn't take the screen, if it didn't.
+    #[serde(default)]
+    pub screen_error: Option<String>,
+    #[serde(default)]
+    pub screen_care: ScreenCare,
+    /// The screen is dark right now because nobody is at the computer.
+    #[serde(default)]
+    pub screen_resting: bool,
 }
 
 /// A game that has talked to the GameSense server.
@@ -882,6 +1157,18 @@ pub enum Request {
     SetLighting {
         lighting: Lighting,
     },
+    /// Replace the keyboard's switch settings (actuation, Rapid Trigger, Rapid Tap).
+    SetSwitches {
+        switches: Switches,
+    },
+    /// Replace what the keyboard's screen shows.
+    SetScreen {
+        screen: Screen,
+    },
+    /// Replace the keyboard screen's burn-in care.
+    SetScreenCare {
+        care: ScreenCare,
+    },
     GetGamesenseState,
     /// Start or stop the GameSense server (and its files in Proton prefixes).
     SetGamesenseEnabled {
@@ -920,6 +1207,177 @@ pub enum Request {
     DeleteClip {
         name: String,
     },
+    /// Which parts of gglinux run.
+    GetParts,
+    /// Save which parts run. A change restarts the daemon, which answers first.
+    SetParts {
+        parts: Parts,
+    },
+}
+
+impl Request {
+    /// The part of gglinux that answers this request; `None` for the daemon itself.
+    pub fn part(&self) -> Option<Part> {
+        use Request as R;
+        Some(match self {
+            R::ListDevices | R::Ping | R::GetParts | R::SetParts { .. } => return None,
+            R::GetMouseState
+            | R::SetMouseDpi { .. }
+            | R::SetMousePolling { .. }
+            | R::SetMouseButtons { .. }
+            | R::SaveMouse => Part::Mouse,
+            R::GetHeadsetState | R::SetHeadsetScreen { .. } | R::SetHeadset { .. } => Part::Headset,
+            R::GetSonarState
+            | R::SetSonarEnabled { .. }
+            | R::SetSonarOutput { .. }
+            | R::SetChannelVolume { .. }
+            | R::SetChatMix { .. }
+            | R::SetAppChannel { .. }
+            | R::SetChannelEq { .. }
+            | R::SetHeadphoneEq { .. }
+            | R::ImportAutoEq { .. }
+            | R::SetMicInput { .. }
+            | R::SetMicSettings { .. }
+            | R::SetMicVolume { .. }
+            | R::SetStreamer { .. }
+            | R::SetStreamVolume { .. }
+            | R::SetStreamMaster { .. }
+            | R::SetSmartVolume { .. } => Part::Sonar,
+            R::GetKeyboardState
+            | R::SetLighting { .. }
+            | R::SetSwitches { .. }
+            | R::SetScreen { .. }
+            | R::SetScreenCare { .. } => Part::Keyboard,
+            R::GetGamesenseState
+            | R::SetGamesenseEnabled { .. }
+            | R::SetGameEnabled { .. }
+            | R::RemoveGame { .. }
+            | R::GamesenseTest => Part::Gamesense,
+            R::GetProfiles
+            | R::SaveProfile { .. }
+            | R::ApplyProfile { .. }
+            | R::DeleteProfile { .. }
+            | R::SetGameRules { .. } => Part::Profiles,
+            R::GetClipsState | R::SetClipsSettings { .. } | R::SaveClip | R::DeleteClip { .. } => {
+                Part::Clips
+            }
+        })
+    }
+}
+
+/// One part of gglinux that can be turned off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Part {
+    Keyboard,
+    Headset,
+    Mouse,
+    Sonar,
+    Gamesense,
+    Profiles,
+    Clips,
+}
+
+impl Part {
+    pub const ALL: [Part; 7] = [
+        Part::Keyboard,
+        Part::Headset,
+        Part::Mouse,
+        Part::Sonar,
+        Part::Gamesense,
+        Part::Profiles,
+        Part::Clips,
+    ];
+
+    /// Its name, as Settings shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Part::Keyboard => "Keyboard",
+            Part::Headset => "Headset",
+            Part::Mouse => "Mouse",
+            Part::Sonar => "Sonar",
+            Part::Gamesense => "GameSense",
+            Part::Profiles => "Profiles",
+            Part::Clips => "Clips",
+        }
+    }
+}
+
+/// Which parts of gglinux run. A part that's off isn't started at all: its device is
+/// left alone, nothing of it runs in the background, and its page is hidden. Its settings
+/// are kept for when it's turned back on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Parts {
+    pub keyboard: bool,
+    pub headset: bool,
+    pub mouse: bool,
+    pub sonar: bool,
+    pub gamesense: bool,
+    pub profiles: bool,
+    pub clips: bool,
+}
+
+impl Default for Parts {
+    fn default() -> Self {
+        Parts {
+            keyboard: true,
+            headset: true,
+            mouse: true,
+            sonar: true,
+            gamesense: true,
+            profiles: true,
+            clips: true,
+        }
+    }
+}
+
+impl Parts {
+    pub fn on(&self, part: Part) -> bool {
+        match part {
+            Part::Keyboard => self.keyboard,
+            Part::Headset => self.headset,
+            Part::Mouse => self.mouse,
+            Part::Sonar => self.sonar,
+            Part::Gamesense => self.gamesense,
+            Part::Profiles => self.profiles,
+            Part::Clips => self.clips,
+        }
+    }
+
+    pub fn set(&mut self, part: Part, on: bool) {
+        match part {
+            Part::Keyboard => self.keyboard = on,
+            Part::Headset => self.headset = on,
+            Part::Mouse => self.mouse = on,
+            Part::Sonar => self.sonar = on,
+            Part::Gamesense => self.gamesense = on,
+            Part::Profiles => self.profiles = on,
+            Part::Clips => self.clips = on,
+        }
+    }
+
+    /// What actually runs: GameSense draws only on the keyboard, so it needs that too.
+    pub fn running(&self) -> Parts {
+        Parts {
+            gamesense: self.gamesense && self.keyboard,
+            ..*self
+        }
+    }
+
+    /// Why a request for `part` can't be answered, or `None` if it runs.
+    pub fn refusal(&self, part: Part) -> Option<String> {
+        if self.running().on(part) {
+            None
+        } else if part == Part::Gamesense && self.gamesense {
+            Some("GameSense draws on the keyboard, which is turned off in Settings → Parts".into())
+        } else {
+            Some(format!(
+                "{} is turned off in Settings → Parts",
+                part.label()
+            ))
+        }
+    }
 }
 
 /// A framed request: `{"id":1,"req":{"method":"list_devices"}}`.
@@ -957,6 +1415,9 @@ pub enum ResponseData {
     },
     Clips {
         state: ClipsState,
+    },
+    Parts {
+        parts: Parts,
     },
     /// A command was accepted and applied.
     Success,
@@ -1740,5 +2201,186 @@ mod tests {
         assert!(!path.exists());
         assert!(set_aside(&path).starts_with("nowhere"), "nothing to move");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn switches_check_their_ranges_and_pairs() {
+        assert!(Switches::default().validate().is_ok());
+        let bad = |f: &dyn Fn(&mut Switches)| {
+            let mut s = Switches::default();
+            f(&mut s);
+            s.validate().unwrap_err()
+        };
+        assert!(bad(&|s| s.actuation = 0).contains("0.0 mm"));
+        assert!(bad(&|s| s.actuation = 41).contains("4.1 mm"));
+        assert!(bad(&|s| s.rapid_trigger.sensitivity = 21).contains("2.1 mm"));
+        let key = |code, actuation| KeyActuation { code, actuation };
+        assert!(bad(&|s| s.keys = vec![key(0x04, 10), key(0x04, 12)]).contains("two actuation"));
+        let pair = |a, b| TapPair {
+            a,
+            b,
+            mode: TapMode::LastWins,
+            report_both: false,
+        };
+        assert!(bad(&|s| s.rapid_tap.pairs = vec![pair(0x04, 0x04)]).contains("two different"));
+        assert!(
+            bad(&|s| s.rapid_tap.pairs = vec![pair(0x04, 0x07), pair(0x07, 0x16)])
+                .contains("two Rapid Tap pairs")
+        );
+    }
+
+    #[test]
+    fn a_key_uses_its_own_actuation_point_or_the_default() {
+        let s = Switches {
+            keys: vec![KeyActuation {
+                code: 0x1A,
+                actuation: 4,
+            }],
+            ..Switches::default()
+        };
+        assert_eq!(s.actuation_of(0x1A), 4);
+        assert_eq!(s.actuation_of(0x04), 15);
+    }
+
+    #[test]
+    fn rapid_trigger_covers_every_key_when_none_are_listed() {
+        let mut s = Switches::default();
+        assert!(!s.rapid_trigger_on(0x04), "off");
+        s.rapid_trigger.enabled = true;
+        assert!(s.rapid_trigger_on(0x04) && s.rapid_trigger_on(0x1A));
+        s.rapid_trigger.keys = vec![0x1A];
+        assert!(s.rapid_trigger_on(0x1A) && !s.rapid_trigger_on(0x04));
+    }
+
+    #[test]
+    fn switches_saved_before_rapid_tap_existed_still_load() {
+        let s: Switches = serde_json::from_str(r#"{"enabled":true,"actuation":20}"#).unwrap();
+        assert_eq!(s.actuation, 20);
+        assert_eq!(s.rapid_trigger, RapidTrigger::default());
+        assert!(s.rapid_tap.pairs.is_empty());
+    }
+
+    #[test]
+    fn the_screen_takes_five_lines_of_sixteen_ascii_characters_or_a_640_byte_picture() {
+        let text = |t: &str| Screen::Text { text: t.into() };
+        assert!(text("Hello\nworld").validate().is_ok());
+        assert!(text("1\n2\n3\n4\n5\n6").validate().is_err());
+        assert!(text("seventeen chars!!").validate().is_err());
+        assert!(text("Yağız").validate().unwrap_err().contains("'ğ'"));
+        assert!(Screen::Image {
+            pixels: vec![0; 640]
+        }
+        .validate()
+        .is_ok());
+        assert!(Screen::Image {
+            pixels: vec![0; 639]
+        }
+        .validate()
+        .is_err());
+        let json = serde_json::to_string(&Screen::Clock {
+            seconds: true,
+            h24: true,
+            date: false,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"clock","seconds":true,"h24":true,"date":false}"#
+        );
+    }
+
+    #[test]
+    fn keyboard_state_from_an_older_daemon_still_parses() {
+        let json = r#"{"connected":true,"layout":[],"lighting":{"enabled":false,"effect":{"kind":"static"},"keys":[],"brightness":100},"reactive":"off"}"#;
+        let state: KeyboardState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.screen, Screen::Keyboard);
+        assert!(!state.switches.enabled);
+        assert_eq!(state.screen_care, ScreenCare::default());
+        assert!(!state.screen_resting);
+    }
+
+    #[test]
+    fn screen_care_moves_and_rests_gglinuxs_picture_but_leaves_the_keyboards_own_alone() {
+        let care = ScreenCare::default();
+        assert!(care.shift && care.dark_when_away && !care.own_screen_too);
+        let parsed: Request = serde_json::from_str(
+            r#"{"method":"set_screen_care","params":{"care":{"shift":false}}}"#,
+        )
+        .unwrap();
+        match parsed {
+            Request::SetScreenCare { care } => assert_eq!(
+                care,
+                ScreenCare {
+                    shift: false,
+                    ..ScreenCare::default()
+                },
+                "a missing field keeps its default"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_part_is_on_until_turned_off_and_old_files_still_load() {
+        let parts = Parts::default();
+        assert!(Part::ALL.iter().all(|&p| parts.on(p)));
+        let saved: Parts = serde_json::from_str(r#"{"sonar":false,"clips":false}"#).unwrap();
+        assert!(!saved.sonar && !saved.clips && saved.keyboard && saved.headset);
+        let mut toggled = Parts::default();
+        for part in Part::ALL {
+            toggled.set(part, false);
+            assert!(!toggled.on(part), "{part:?}");
+        }
+        assert_eq!(
+            serde_json::to_string(&Request::SetParts { parts: saved }).unwrap(),
+            r#"{"method":"set_parts","params":{"parts":{"keyboard":true,"headset":true,"mouse":true,"sonar":false,"gamesense":true,"profiles":true,"clips":false}}}"#
+        );
+        let r = serde_json::to_value(ResponseData::Parts { parts }).unwrap();
+        assert_eq!(r["type"], "parts");
+    }
+
+    #[test]
+    fn gamesense_needs_the_keyboard_and_a_refusal_says_where_to_turn_it_on() {
+        let parts = Parts {
+            keyboard: false,
+            ..Parts::default()
+        };
+        assert!(!parts.running().gamesense && parts.gamesense);
+        assert!(parts
+            .refusal(Part::Gamesense)
+            .unwrap()
+            .contains("draws on the keyboard"));
+        assert!(parts
+            .refusal(Part::Keyboard)
+            .unwrap()
+            .contains("Keyboard is turned off"));
+        assert_eq!(parts.refusal(Part::Mouse), None);
+    }
+
+    #[test]
+    fn requests_name_the_part_that_answers_them() {
+        assert_eq!(Request::GetSonarState.part(), Some(Part::Sonar));
+        assert_eq!(Request::SaveClip.part(), Some(Part::Clips));
+        assert_eq!(
+            Request::SetScreenCare {
+                care: ScreenCare::default()
+            }
+            .part(),
+            Some(Part::Keyboard)
+        );
+        assert_eq!(Request::GamesenseTest.part(), Some(Part::Gamesense));
+        assert_eq!(Request::GetHeadsetState.part(), Some(Part::Headset));
+        assert_eq!(Request::SaveMouse.part(), Some(Part::Mouse));
+        assert_eq!(Request::GetProfiles.part(), Some(Part::Profiles));
+        // The daemon's own requests work whatever is off, or a part could never come back.
+        assert_eq!(Request::GetParts.part(), None);
+        assert_eq!(
+            Request::SetParts {
+                parts: Parts::default()
+            }
+            .part(),
+            None
+        );
+        assert_eq!(Request::ListDevices.part(), None);
     }
 }

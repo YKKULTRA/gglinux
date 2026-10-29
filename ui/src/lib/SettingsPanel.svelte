@@ -3,9 +3,11 @@
   // Start at login, and backups of every setting. The UI process does these
   // itself, so they work while the daemon is down.
 
-  import { exportSettings, getAutostart, importSettings, openFolder, setAutostart } from "./app";
+  import { exportSettings, getAutostart, importSettings, openFolder, sessionInfo, setAutostart } from "./app";
+  import type { SessionInfo } from "./app";
 
   let autostart = $state<boolean | null>(null);
+  let session = $state<SessionInfo | null>(null);
   let busy = $state(false);
   let note = $state<string | null>(null);
   let error = $state<string | null>(null);
@@ -16,6 +18,12 @@
     void getAutostart()
       .then((on) => (autostart = on))
       .catch((e: unknown) => (error = e instanceof Error ? e.message : String(e)));
+  });
+
+  $effect(() => {
+    void sessionInfo()
+      .then((info) => (session = info))
+      .catch(() => (session = null)); // only a hint: without it, no Hyprland note
   });
 
   async function run(action: () => Promise<void>) {
@@ -68,6 +76,19 @@
       />
       Start gglinux when I log in (the daemon, and this window hidden in the tray)
     </label>
+    {#if session && !session.reads_autostart}
+      <div class="notice">
+        <p>
+          {session.desktop || "This desktop"} doesn't run autostart entries, so this starts only the
+          daemon. For the tray window too, start it from your compositor's config. In
+          <code>hyprland.lua</code>, inside <code>hl.on("hyprland.start", function() … end)</code>:
+        </p>
+        <pre><code>hl.exec_cmd("{session.tray_command.replaceAll('"', '\\"')}")</code></pre>
+        <p>or in <code>hyprland.conf</code>:</p>
+        <pre><code>exec-once = {session.tray_command}</code></pre>
+        <p>The tray icon needs a bar with a tray, such as Waybar's <code>tray</code> module.</p>
+      </div>
+    {/if}
   </section>
 
   <section>
@@ -103,4 +124,9 @@
   .ghost:disabled { opacity: 0.4; cursor: default; }
   .link { padding: 0; margin-left: 0.3rem; font-size: 0.8rem; color: var(--accent); background: none; border: none; cursor: pointer; }
   .error { margin: 0.8rem 0 0; padding: 0.5rem 0.7rem; font-size: 0.8rem; color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-radius: 8px; }
+  .notice { margin-top: 0.8rem; padding: 0.55rem 0.75rem; font-size: 0.8rem; color: var(--text-dim); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+  .notice p { margin: 0; }
+  .notice pre + p { margin-top: 0.45rem; }
+  .notice code { color: var(--text); }
+  .notice pre { margin: 0.45rem 0; padding: 0.45rem 0.6rem; overflow-x: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
 </style>

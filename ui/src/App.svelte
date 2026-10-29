@@ -11,8 +11,10 @@
   import MousePanel from "./lib/MousePanel.svelte";
   import SettingsPanel from "./lib/SettingsPanel.svelte";
   import SonarPanel from "./lib/SonarPanel.svelte";
+  import PartsPanel from "./lib/PartsPanel.svelte";
   import Icon from "./lib/Icon.svelte";
   import type { IconName } from "./lib/icons";
+  import { ALL_PARTS } from "./lib/types";
 
   type Page = "engine" | "sonar" | "games" | "moments" | "settings";
 
@@ -21,18 +23,32 @@
     { id: "sonar", icon: "sonar", label: "Sonar", blurb: "Per-app audio routing and EQ" },
     { id: "games", icon: "games", label: "Games", blurb: "GameSense: games drive your lighting" },
     { id: "moments", icon: "moments", label: "Moments", blurb: "Instant replay and clips" },
-    { id: "settings", icon: "settings", label: "Settings", blurb: "Profiles, start at login, backups" },
+    { id: "settings", icon: "settings", label: "Settings", blurb: "Parts, profiles, start at login, backups" },
   ];
 
   let page = $state<Page>("engine");
+
+  /** What runs; until the daemon says, everything (a page appears rather than vanishes). */
+  let parts = $derived(daemon.parts ?? ALL_PARTS);
+  /** A page whose part is off is hidden; GameSense needs the keyboard too. */
+  function shown(id: Page): boolean {
+    if (id === "sonar") return parts.sonar;
+    if (id === "games") return parts.gamesense && parts.keyboard;
+    if (id === "moments") return parts.clips;
+    return true;
+  }
+  let nav = $derived(NAV.filter((item) => shown(item.id)));
+  $effect(() => {
+    if (!shown(page)) page = "engine";
+  });
 
   /** Devices with a control panel so far. */
   const RIVAL3_PID = 0x1872;
   const NOVA_PRO_PID = 0x12e0;
   const APEX_PID = 0x1642;
-  let hasRival3 = $derived(daemon.devices.some((d) => d.product_id === RIVAL3_PID));
-  let hasNovaPro = $derived(daemon.devices.some((d) => d.product_id === NOVA_PRO_PID));
-  let hasApex = $derived(daemon.devices.some((d) => d.product_id === APEX_PID));
+  let hasRival3 = $derived(parts.mouse && daemon.devices.some((d) => d.product_id === RIVAL3_PID));
+  let hasNovaPro = $derived(parts.headset && daemon.devices.some((d) => d.product_id === NOVA_PRO_PID));
+  let hasApex = $derived(parts.keyboard && daemon.devices.some((d) => d.product_id === APEX_PID));
 
   onMount(() => {
     void daemon.start();
@@ -46,7 +62,7 @@
       <span class="wordmark">gglinux</span>
     </div>
 
-    {#each NAV as item (item.id)}
+    {#each nav as item (item.id)}
       <button class="nav-item" class:active={page === item.id} onclick={() => (page = item.id)}>
         <Icon name={item.icon} />
         <span>{item.label}</span>
@@ -147,7 +163,12 @@
         <p>{NAV[4].blurb}</p>
       </header>
       {#if daemon.connected}
-        <ProfilesPanel />
+        <PartsPanel />
+        {#if parts.profiles}
+          <ProfilesPanel />
+        {/if}
+      {:else if daemon.restarting}
+        <section class="notice"><h2>gglinuxd is starting again with the new parts…</h2></section>
       {:else}
         <section class="notice"><h2>gglinuxd isn&rsquo;t running</h2></section>
       {/if}

@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Keyboard worker: the Apex Pro TKL Gen 3's lighting.
+//! Keyboard worker: the Apex Pro TKL Gen 3's lighting, screen and switches.
 //!
 //! One OS thread owns the device, like the other workers. With gglinux lighting
 //! on it sends frames — 30 a second for animated effects, on change (and a slow
 //! refresh) for static ones; with it off, or when the daemon exits, it hands the
-//! lighting back to the keyboard's onboard profile. Off by default: a fresh
+//! lighting back to the keyboard's onboard profile. The screen works the same way:
+//! a picture on change (each second for a clock), handed back when it's set to the
+//! keyboard's own or the daemon exits. A picture of gglinux's moves a pixel every
+//! couple of minutes and goes dark while nobody is at the computer (screen care),
+//! so the OLED doesn't burn in. The switch settings live in the keyboard's
+//! RAM, so they're sent once each time it connects. All off by default: a fresh
 //! install never touches the keyboard.
 
 mod audio;
@@ -20,9 +25,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gg_device_keyboard::layout::ANSI_TKL;
-use gg_device_keyboard::{Keyboard, Rgb};
-use gg_ipc::{Effect, Event, KeyInfo, KeyboardState, Lighting, ReactiveStatus};
+use gg_device_keyboard::proto::ANALOG_KEYS;
+use gg_device_keyboard::{oled, Bitmap, Keyboard, Rgb};
+use gg_ipc::{
+    Effect, Event, KeyInfo, KeyboardState, Lighting, ReactiveStatus, Screen, ScreenCare, Switches,
+    TapMode,
+};
 use hidapi::HidApi;
+use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -38,6 +48,11 @@ const IDLE_WAIT: Duration = Duration::from_millis(500);
 /// The most key presses held for reactive lighting; older ones are dropped first.
 const MAX_HITS: usize = 32;
 const MIC_POLL: Duration = Duration::from_millis(500);
+/// How often an unchanged screen picture is sent again, in case the keyboard's own menus
+/// (the volume roller, the media button) drew over it.
+const SCREEN_REFRESH: Duration = Duration::from_secs(10);
+/// How long the picture stays put before it moves a pixel, with screen care's shift on.
+const SHIFT_EVERY: u64 = 120;
 
 /// Colours by HID code, drawn over the lighting.
 pub type Layer = HashMap<u8, Rgb>;
@@ -55,6 +70,24 @@ pub enum Command {
     GetState(Reply<KeyboardState>),
     SetLighting {
         lighting: Lighting,
+        reply: Reply<()>,
+    },
+    SetSwitches {
+        switches: Switches,
+        reply: Reply<()>,
+    },
+    SetScreen {
+        screen: Screen,
+        reply: Reply<()>,
+    },
+    SetScreenCare {
+        care: ScreenCare,
+        reply: Reply<()>,
+    },
+    /// Whether anybody is at the computer, from [`crate::presence`]. Replies once the
+    /// screen shows it, so the computer can be let go to sleep after.
+    SetAway {
+        away: bool,
         reply: Reply<()>,
     },
     /// A key went down on the Apex, as the reader saw it: the code of its LED.
@@ -84,6 +117,10 @@ impl std::fmt::Debug for Command {
         f.write_str(match self {
             Command::GetState(_) => "GetState",
             Command::SetLighting { .. } => "SetLighting",
+            Command::SetSwitches { .. } => "SetSwitches",
+            Command::SetScreen { .. } => "SetScreen",
+            Command::SetScreenCare { .. } => "SetScreenCare",
+            Command::SetAway { .. } => "SetAway",
             Command::Pressed { .. } => "Pressed",
             Command::ReaderStopped => "ReaderStopped",
             Command::Wake => "Wake",
@@ -101,6 +138,13 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// A handle with no worker, for when the keyboard part is off: every send fails, and
+    /// a wake or a `listen_to` from another part goes nowhere.
+    pub fn off() -> Handle {
+        let (tx, _) = mpsc::channel();
+        Handle { tx }
+    }
+
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -168,6 +212,24 @@ struct State {
     listen_to: Option<String>,
     mic_watch: Option<mic::Watch>,
     mic_muted: bool,
+    switches: Switches,
+    switches_path: PathBuf,
+    /// What sending the switches to the open keyboard gave; `None`: not sent to it yet.
+    switches_sent: Option<Result<(), String>>,
+    screen: Screen,
+    screen_path: PathBuf,
+    /// Whether gglinux has drawn on this keyboard's screen since it connected.
+    screen_taken: bool,
+    /// The picture last sent, and when, so an unchanged one isn't sent every loop.
+    screen_shown: Option<Bitmap>,
+    screen_last: Option<Instant>,
+    screen_error: Option<String>,
+    care: ScreenCare,
+    care_path: PathBuf,
+    /// Nobody is at the computer, as [`crate::presence`] last said.
+    away: bool,
+    /// The screen is dark for that right now.
+    resting: bool,
 }
 
 fn worker(
@@ -186,13 +248,16 @@ fn worker(
     };
     drop(hid);
     let settings_path = gg_ipc::config_dir().join("lighting.json");
+    let switches_path = gg_ipc::config_dir().join("switches.json");
+    let screen_path = gg_ipc::config_dir().join("screen.json");
+    let care_path = gg_ipc::config_dir().join("screen-care.json");
     let mut state = State {
         api,
         device: None,
         taken: false,
         last_open_attempt: None,
         last_frame: None,
-        lighting: load(&settings_path),
+        lighting: load(&settings_path, "lighting"),
         settings_path,
         positions: effects::positions(),
         started: Instant::now(),
@@ -211,6 +276,19 @@ fn worker(
         listen_to: None,
         mic_watch: None,
         mic_muted: false,
+        switches: load(&switches_path, "switch"),
+        switches_path,
+        switches_sent: None,
+        screen: load(&screen_path, "screen"),
+        screen_path,
+        screen_taken: false,
+        screen_shown: None,
+        screen_last: None,
+        screen_error: None,
+        care: load(&care_path, "screen care"),
+        care_path,
+        away: false,
+        resting: false,
     };
 
     loop {
@@ -225,6 +303,7 @@ fn worker(
             // which main sends on exit. Kept as a fallback.
             Err(RecvTimeoutError::Disconnected) => {
                 hand_back(&mut state);
+                release_screen(&mut state);
                 return;
             }
         }
@@ -255,6 +334,8 @@ fn worker(
             hand_back(&mut state);
         }
         render(&mut state);
+        sync_switches(&mut state);
+        render_screen(&mut state);
         publish(&mut state, &event_tx);
     }
 }
@@ -271,17 +352,35 @@ fn interval(lighting: &Lighting, live_hits: bool, overlay_active: bool) -> Durat
 
 /// How long to wait for a command before the next frame is due.
 fn next_wait(state: &State) -> Duration {
-    if state.device.is_none() || !drawing(state.lighting.enabled, !state.layers.is_empty()) {
-        return IDLE_WAIT;
+    let lighting =
+        if state.device.is_none() || !drawing(state.lighting.enabled, !state.layers.is_empty()) {
+            IDLE_WAIT
+        } else {
+            state.last_frame.map_or(Duration::ZERO, |t| {
+                interval(
+                    &state.lighting,
+                    !state.hits.is_empty(),
+                    !state.layers.is_empty(),
+                )
+                .saturating_sub(t.elapsed())
+            })
+        };
+    match screen_wait(&state.screen, state.device.is_some()) {
+        Some(screen) => lighting.min(screen),
+        None => lighting,
     }
-    state.last_frame.map_or(Duration::ZERO, |t| {
-        interval(
-            &state.lighting,
-            !state.hits.is_empty(),
-            !state.layers.is_empty(),
-        )
-        .saturating_sub(t.elapsed())
-    })
+}
+
+/// A clock on the screen wakes the loop just after each second turns.
+fn screen_wait(screen: &Screen, connected: bool) -> Option<Duration> {
+    if !connected || !matches!(screen, Screen::Clock { .. }) {
+        return None;
+    }
+    let into_second = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis())
+        .unwrap_or(0);
+    Some(Duration::from_millis(u64::from(1000 - into_second) + 5))
 }
 
 /// Whether key presses should be read right now.
@@ -436,13 +535,51 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
         Command::GetState(reply) => {
             let _ = reply.send(Ok(snapshot(state)));
         }
+        Command::SetSwitches { switches, reply } => {
+            if let Err(message) = switches.validate().and_then(|()| check_analog(&switches)) {
+                let _ = reply.send(Err(message));
+                return true;
+            }
+            state.switches = switches;
+            save(&state.switches_path, &state.switches, "switch");
+            state.switches_sent = None; // the loop sends them, if they're on
+            let _ = reply.send(Ok(()));
+            publish(state, event_tx);
+        }
+        Command::SetScreen { screen, reply } => {
+            if let Err(message) = screen.validate() {
+                let _ = reply.send(Err(message));
+                return true;
+            }
+            state.screen = screen;
+            save(&state.screen_path, &state.screen, "screen");
+            state.screen_shown = None; // draw the change now
+            state.screen_error = None;
+            let _ = reply.send(Ok(()));
+            publish(state, event_tx);
+        }
+        Command::SetScreenCare { care, reply } => {
+            state.care = care;
+            save(&state.care_path, &state.care, "screen care");
+            state.screen_shown = None; // draw the change now
+            let _ = reply.send(Ok(()));
+            publish(state, event_tx);
+        }
+        Command::SetAway { away, reply } => {
+            if away != state.away {
+                state.away = away;
+                render_screen(state); // now, not at the next loop: sleep may be next
+                publish(state, event_tx);
+            }
+            let _ = reply.send(Ok(()));
+        }
         Command::SetLighting { lighting, reply } => {
             if let Err(message) = lighting.validate().and_then(|()| check_keys(&lighting)) {
                 let _ = reply.send(Err(message));
                 return true;
             }
             state.lighting = lighting;
-            save(&state.settings_path, &state.lighting);
+            save(&state.settings_path, &state.lighting, "lighting");
             // Handing back, if nothing draws any more, is the loop's call
             // (`should_hand_back`), so a game that has taken over isn't interrupted.
             state.last_frame = None; // draw the change now
@@ -484,6 +621,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
         }
         Command::Shutdown(reply) => {
             hand_back(state);
+            release_screen(state);
             let _ = reply.send(Ok(()));
             return false;
         }
@@ -506,7 +644,7 @@ fn try_open(state: &mut State) {
         Ok(keyboard) => {
             info!("keyboard connected");
             state.device = Some(keyboard);
-            state.taken = false;
+            forget_device(state);
             state.last_frame = None;
         }
         Err(e) => debug!(error = %format!("{e:#}"), "keyboard not available"),
@@ -533,8 +671,17 @@ fn look_for(state: &mut State) {
     {
         info!("keyboard disconnected");
         state.device = None;
-        state.taken = false;
+        forget_device(state);
     }
+}
+
+/// Forget what was sent to the keyboard: after it (re)connects, it has its own settings.
+fn forget_device(state: &mut State) {
+    state.taken = false;
+    state.switches_sent = None;
+    state.screen_taken = false;
+    state.screen_shown = None;
+    state.screen_last = None;
 }
 
 /// Send a frame if one is due.
@@ -575,7 +722,7 @@ fn render(state: &mut State) {
         Err(e) => {
             info!(error = %format!("{e:#}"), "keyboard disconnected");
             state.device = None;
-            state.taken = false;
+            forget_device(state);
         }
     }
 }
@@ -594,6 +741,237 @@ fn hand_back(state: &mut State) {
     state.taken = false;
 }
 
+/// Every key a switch setting names must have an adjustable switch.
+fn check_analog(switches: &Switches) -> Result<(), String> {
+    let named = switches
+        .keys
+        .iter()
+        .map(|k| k.code)
+        .chain(switches.rapid_trigger.keys.iter().copied())
+        .chain(switches.rapid_tap.pairs.iter().flat_map(|p| [p.a, p.b]));
+    for code in named {
+        if !ANALOG_KEYS.contains(&code) {
+            let label = ANSI_TKL
+                .iter()
+                .find(|k| k.0 == code)
+                .map_or_else(|| format!("{code:#04x}"), |k| k.1.to_owned());
+            return Err(format!("{label} has a fixed switch: it can't be adjusted"));
+        }
+    }
+    Ok(())
+}
+
+fn device_tap_mode(mode: TapMode) -> gg_device_keyboard::TapMode {
+    use gg_device_keyboard::TapMode as D;
+    match mode {
+        TapMode::LastWins => D::LastWins,
+        TapMode::Neither => D::Neither,
+        TapMode::FirstWins => D::FirstWins,
+        TapMode::SecondWins => D::SecondWins,
+    }
+}
+
+/// Send the switch settings once to a keyboard that hasn't had them since it connected.
+fn sync_switches(state: &mut State) {
+    if !state.switches.enabled || state.switches_sent.is_some() {
+        return;
+    }
+    let Some(device) = state.device.as_ref() else {
+        return;
+    };
+    let s = &state.switches;
+    let pairs: Vec<gg_device_keyboard::TapPair> = s
+        .rapid_tap
+        .pairs
+        .iter()
+        .map(|p| gg_device_keyboard::TapPair {
+            a: p.a,
+            b: p.b,
+            mode: device_tap_mode(p.mode),
+            report_both: p.report_both,
+        })
+        .collect();
+    let sensitivity = s.rapid_trigger.sensitivity;
+    let result = device
+        .set_switches(&gg_device_keyboard::Switches {
+            actuation: &|code| s.actuation_of(code),
+            rapid_trigger: &|code| s.rapid_trigger_on(code),
+            sensitivity: &|_| sensitivity,
+            rapid_tap: s.rapid_tap.enabled,
+            tap_pairs: &pairs,
+        })
+        .map_err(|e| format!("{e:#}"));
+    match &result {
+        Ok(()) => info!("keyboard switch settings sent"),
+        Err(e) => warn!(error = %e, "the keyboard did not take the switch settings"),
+    }
+    state.switches_sent = Some(result);
+}
+
+/// The local time, for the clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalTime {
+    hour: u8,
+    minute: u8,
+    second: u8,
+    /// 0 is Sunday.
+    weekday: u8,
+    day: u8,
+    /// 0 is January.
+    month: u8,
+}
+
+fn local_now() -> LocalTime {
+    // SAFETY: `time` with a null pointer only returns the time; `localtime_r` writes
+    // only the `tm` it's given, which lives on this stack.
+    let tm = unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm
+    };
+    LocalTime {
+        hour: tm.tm_hour as u8,
+        minute: tm.tm_min as u8,
+        second: tm.tm_sec.min(59) as u8,
+        weekday: tm.tm_wday as u8,
+        day: tm.tm_mday as u8,
+        month: tm.tm_mon as u8,
+    }
+}
+
+/// The clock's big line, and the small one under it if any.
+fn clock_text(t: LocalTime, seconds: bool, h24: bool, date: bool) -> (String, Option<String>) {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut time = if h24 {
+        format!("{:02}:{:02}", t.hour, t.minute)
+    } else {
+        let h = match t.hour % 12 {
+            0 => 12,
+            h => h,
+        };
+        format!("{h}:{:02}", t.minute)
+    };
+    if seconds {
+        time.push_str(&format!(":{:02}", t.second));
+    }
+    let mut under = Vec::new();
+    if date {
+        under.push(format!(
+            "{} {} {}",
+            DAYS[usize::from(t.weekday % 7)],
+            t.day,
+            MONTHS[usize::from(t.month % 12)]
+        ));
+    }
+    if !h24 {
+        under.push(if t.hour < 12 { "AM" } else { "PM" }.to_owned());
+    }
+    (time, (!under.is_empty()).then(|| under.join(" ")))
+}
+
+/// What a screen setting draws at `now`; `None` for the keyboard's own.
+fn picture(screen: &Screen, now: LocalTime) -> Option<Bitmap> {
+    Some(match screen {
+        Screen::Keyboard => return None,
+        Screen::Text { text } => oled::text(text),
+        Screen::Clock { seconds, h24, date } => {
+            let (time, under) = clock_text(now, *seconds, *h24, *date);
+            oled::clock(&time, under.as_deref())
+        }
+        Screen::Image { pixels } => Bitmap::from_rows(pixels).unwrap_or_default(),
+    })
+}
+
+/// Whether the screen rests dark now: nobody is there, and it's a picture of gglinux's,
+/// or the keyboard's own and care covers that too.
+fn resting(screen: &Screen, care: &ScreenCare, away: bool) -> bool {
+    away && care.dark_when_away && (care.own_screen_too || !matches!(screen, Screen::Keyboard))
+}
+
+/// Where the picture sits at `unix_secs`, as an offset from where it's drawn: a 5 × 5
+/// square walked row by row, back and forth, a pixel every [`SHIFT_EVERY`] seconds. Each
+/// lit pixel's wear is spread over up to 25 neighbours.
+fn shift_at(unix_secs: u64) -> (i32, i32) {
+    let step = (unix_secs / SHIFT_EVERY % 25) as i32;
+    let (row, col) = (step / 5, step % 5);
+    let x = if row % 2 == 0 { col } else { 4 - col };
+    (x - 2, row - 2)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// What the screen should show now, `None` for the keyboard's own: dark while resting,
+/// otherwise the picture, moved as screen care says.
+fn frame(state: &State) -> Option<Bitmap> {
+    if resting(&state.screen, &state.care, state.away) {
+        return Some(Bitmap::default());
+    }
+    let picture = picture(&state.screen, local_now())?;
+    Some(if state.care.shift {
+        let (dx, dy) = shift_at(unix_now());
+        picture.shifted(dx, dy)
+    } else {
+        picture
+    })
+}
+
+/// Draw the screen if its picture changed (or is due a refresh), or hand it back.
+fn render_screen(state: &mut State) {
+    state.resting = state.device.is_some() && resting(&state.screen, &state.care, state.away);
+    let Some(device) = state.device.as_ref() else {
+        return;
+    };
+    let Some(picture) = frame(state) else {
+        state.screen_error = None;
+        release_screen(state);
+        return;
+    };
+    if state.screen_shown.as_ref() == Some(&picture)
+        && !is_older_than(state.screen_last, SCREEN_REFRESH)
+    {
+        return;
+    }
+    match device.show_screen(&picture) {
+        Ok(()) => {
+            state.screen_taken = true;
+            state.screen_error = None;
+        }
+        Err(e) => {
+            let message = format!("{e:#}");
+            if state.screen_error.as_ref() != Some(&message) {
+                warn!(error = %message, "the keyboard did not take the screen picture");
+            }
+            state.screen_error = Some(message);
+        }
+    }
+    // Kept even after a failure, so it's tried again at the refresh, not every loop.
+    state.screen_shown = Some(picture);
+    state.screen_last = Some(Instant::now());
+}
+
+/// Give the screen back to the keyboard's own menus, if gglinux drew on it.
+fn release_screen(state: &mut State) {
+    if !state.screen_taken {
+        return;
+    }
+    if let Some(device) = state.device.as_ref() {
+        match device.release_screen() {
+            Ok(()) => debug!("keyboard screen handed back"),
+            Err(e) => warn!(error = %format!("{e:#}"), "could not hand the keyboard screen back"),
+        }
+    }
+    state.screen_taken = false;
+    state.screen_shown = None;
+}
+
 fn snapshot(state: &State) -> KeyboardState {
     KeyboardState {
         connected: state.device.is_some(),
@@ -609,6 +987,16 @@ fn snapshot(state: &State) -> KeyboardState {
             .collect(),
         lighting: state.lighting.clone(),
         reactive: state.reactive,
+        analog_keys: ANALOG_KEYS.to_vec(),
+        switches: state.switches.clone(),
+        switches_error: match &state.switches_sent {
+            Some(Err(e)) => Some(e.clone()),
+            _ => None,
+        },
+        screen: state.screen.clone(),
+        screen_error: state.screen_error.clone(),
+        screen_care: state.care,
+        screen_resting: state.resting,
     }
 }
 
@@ -620,32 +1008,32 @@ fn publish(state: &mut State, event_tx: &broadcast::Sender<Event>) {
     }
 }
 
-/// Saved lighting; a missing or unreadable file means the defaults (lighting off).
-/// An unreadable one is moved aside first.
-fn load(path: &Path) -> Lighting {
+/// Saved settings; a missing or unreadable file means the defaults (all off). An
+/// unreadable one is moved aside first. `what` names them in the log.
+fn load<T: DeserializeOwned + Default>(path: &Path, what: &str) -> T {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
             let moved_to = gg_ipc::set_aside(path);
-            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable lighting settings");
-            Lighting::default()
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable {what} settings");
+            T::default()
         }),
-        Err(_) => Lighting::default(),
+        Err(_) => T::default(),
     }
 }
 
 /// Save atomically; a failure is logged, never fatal.
-fn save(path: &Path, lighting: &Lighting) {
+fn save<T: Serialize>(path: &Path, settings: &T, what: &str) {
     let write = || -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(lighting)?)?;
+        std::fs::write(&tmp, serde_json::to_string_pretty(settings)?)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     };
     if let Err(e) = write() {
-        warn!(path = %path.display(), error = %format!("{e:#}"), "could not save lighting settings");
+        warn!(path = %path.display(), error = %format!("{e:#}"), "could not save {what} settings");
     }
 }
 
@@ -832,5 +1220,147 @@ mod tests {
         assert!(check_keys(&l).is_ok());
         l.mic_mute.key = 0x59; // keypad 1: not on a TKL
         assert!(check_keys(&l).is_err());
+    }
+
+    fn at(hour: u8, minute: u8, second: u8) -> LocalTime {
+        LocalTime {
+            hour,
+            minute,
+            second,
+            weekday: 4,
+            day: 29,
+            month: 9,
+        }
+    }
+
+    #[test]
+    fn the_clock_reads_as_chosen() {
+        let t = at(13, 5, 9);
+        assert_eq!(clock_text(t, false, true, false), ("13:05".into(), None));
+        assert_eq!(
+            clock_text(t, true, true, true),
+            ("13:05:09".into(), Some("Thu 29 Oct".into()))
+        );
+        assert_eq!(
+            clock_text(t, false, false, false),
+            ("1:05".into(), Some("PM".into()))
+        );
+        assert_eq!(
+            clock_text(at(0, 30, 0), false, false, true),
+            ("12:30".into(), Some("Thu 29 Oct AM".into())),
+            "midnight is 12 AM"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_s_own_screen_draws_nothing_and_a_clock_changes_each_second() {
+        assert!(picture(&Screen::Keyboard, at(1, 2, 3)).is_none());
+        let clock = Screen::Clock {
+            seconds: true,
+            h24: true,
+            date: false,
+        };
+        assert_ne!(picture(&clock, at(1, 2, 3)), picture(&clock, at(1, 2, 4)));
+        let minutes = Screen::Clock {
+            seconds: false,
+            h24: true,
+            date: false,
+        };
+        assert_eq!(
+            picture(&minutes, at(1, 2, 3)),
+            picture(&minutes, at(1, 2, 4)),
+            "without seconds, the same picture: nothing is sent"
+        );
+    }
+
+    #[test]
+    fn a_picture_is_drawn_from_its_rows() {
+        let mut pixels = vec![0u8; 640];
+        pixels[0] = 0x80;
+        let b = picture(&Screen::Image { pixels }, at(0, 0, 0)).unwrap();
+        assert!(b.get(0, 0) && !b.get(1, 0));
+    }
+
+    #[test]
+    fn a_clock_wakes_the_loop_within_a_second_and_only_while_the_keyboard_is_here() {
+        let clock = Screen::Clock {
+            seconds: false,
+            h24: true,
+            date: false,
+        };
+        let wait = screen_wait(&clock, true).unwrap();
+        assert!(wait > Duration::ZERO && wait <= Duration::from_millis(1005));
+        assert!(screen_wait(&clock, false).is_none());
+        assert!(screen_wait(&Screen::Keyboard, true).is_none());
+    }
+
+    #[test]
+    fn switch_settings_may_only_name_keys_with_adjustable_switches() {
+        let mut s = Switches::default();
+        s.keys.push(gg_ipc::KeyActuation {
+            code: 0x1A,
+            actuation: 4,
+        });
+        assert!(check_analog(&s).is_ok());
+        s.rapid_trigger.keys.push(0x29); // Escape
+        assert_eq!(
+            check_analog(&s).unwrap_err(),
+            "Esc has a fixed switch: it can't be adjusted"
+        );
+        s.rapid_trigger.keys.clear();
+        s.rapid_tap.pairs.push(gg_ipc::TapPair {
+            a: 0x50,
+            b: 0x4F,
+            mode: TapMode::LastWins,
+            report_both: false,
+        });
+        assert!(check_analog(&s).is_err(), "the arrows are fixed too");
+    }
+
+    #[test]
+    fn the_screen_rests_only_while_away_and_the_keyboards_own_only_when_asked() {
+        let clock = Screen::Clock {
+            seconds: false,
+            h24: true,
+            date: false,
+        };
+        let care = ScreenCare::default();
+        assert!(resting(&clock, &care, true));
+        assert!(!resting(&clock, &care, false), "somebody's there");
+        assert!(
+            !resting(&Screen::Keyboard, &care, true),
+            "the keyboard's own screen is left alone by default"
+        );
+        let own = ScreenCare {
+            own_screen_too: true,
+            ..care
+        };
+        assert!(resting(&Screen::Keyboard, &own, true));
+        let never = ScreenCare {
+            dark_when_away: false,
+            own_screen_too: true,
+            ..care
+        };
+        assert!(!resting(&clock, &never, true) && !resting(&Screen::Keyboard, &never, true));
+    }
+
+    #[test]
+    fn the_shift_walks_a_five_by_five_square_a_pixel_at_a_time() {
+        let steps: Vec<(i32, i32)> = (0..25).map(|i| shift_at(i * SHIFT_EVERY)).collect();
+        let mut seen = steps.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 25, "every offset once a round: {steps:?}");
+        assert!(steps.iter().all(|&(x, y)| x.abs() <= 2 && y.abs() <= 2));
+        for pair in steps.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert_eq!((a.0 - b.0).abs() + (a.1 - b.1).abs(), 1, "{a:?} to {b:?}");
+        }
+        assert_eq!(
+            shift_at(SHIFT_EVERY - 1),
+            shift_at(0),
+            "it holds for a whole step"
+        );
+        assert_eq!(shift_at(25 * SHIFT_EVERY), shift_at(0), "and starts over");
     }
 }

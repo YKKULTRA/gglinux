@@ -4,20 +4,23 @@
 //! Current scope: enumerate SteelSeries devices, monitor hotplug, control the
 //! Rival 3 Wireless Gen 2, drive the Arctis Nova Pro Wireless headset (settings,
 //! and keeping its base-station screen from burning in), run the Apex Pro TKL
-//! Gen 3's lighting, run Sonar-style audio channels on PipeWire, and serve all
-//! of it over a newline-delimited JSON unix socket. PipeWire audio and the GameSense server land in later milestones.
+//! Gen 3's lighting, screen and switches, run Sonar-style audio channels on
+//! PipeWire, the GameSense server, profiles and clips, and serve all of it over a
+//! newline-delimited JSON unix socket. Each of those parts can be turned off
+//! (`parts.json`); a part that's off isn't started.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use gg_ipc::{DeviceInfo, Event, Request, RequestFrame, ResponseData, ServerMessage};
+use gg_ipc::{DeviceInfo, Event, Part, Parts, Request, RequestFrame, ResponseData, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Notify};
 use tracing::{debug, error, info, warn};
 
 mod clips;
@@ -26,6 +29,8 @@ mod gamesense;
 mod headset;
 mod keyboard;
 mod mouse;
+mod parts;
+mod presence;
 mod profiles;
 mod sonar;
 
@@ -54,6 +59,20 @@ struct Workers {
     gamesense: GamesenseHandle,
     profiles: ProfilesHandle,
     clips: ClipsHandle,
+    /// The parts as saved when this daemon started; the handles of those not running
+    /// lead nowhere.
+    parts: Parts,
+    /// Told when a change of parts wants the daemon started again.
+    restart: Arc<Notify>,
+}
+
+/// Why the daemon stops.
+#[derive(Debug, PartialEq, Eq)]
+enum Stop {
+    /// SIGINT or SIGTERM.
+    Signal,
+    /// The parts changed: start again in place.
+    Restart,
 }
 
 #[tokio::main]
@@ -78,22 +97,69 @@ async fn main() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<Event>(EVENT_CHANNEL_CAP);
 
     spawn_hid_monitor(snapshot_tx, event_tx.clone());
+    let parts = parts::load(&parts::path());
+    let run = parts.running();
+    for part in Part::ALL.into_iter().filter(|&p| !run.on(p)) {
+        info!(part = part.label(), "turned off; not started");
+    }
     // GameSense's registry exists before the keyboard worker, which draws it.
-    let engine = gamesense::Engine::load();
-    let keyboard = keyboard::spawn(event_tx.clone(), vec![engine.overlay()]);
+    let engine = run.gamesense.then(gamesense::Engine::load);
+    let keyboard = if run.keyboard {
+        let overlays = engine.iter().map(|e| e.overlay()).collect();
+        let keyboard = keyboard::spawn(event_tx.clone(), overlays);
+        presence::spawn(keyboard.clone());
+        keyboard
+    } else {
+        KeyboardHandle::off()
+    };
     // The game from the profiles' rules that's running now; games-only clips follow it.
     let (game_tx, game_rx) = watch::channel::<Option<String>>(None);
     // Where everything playing mixes, from Sonar; clips' desktop audio follows it.
     let (mixed_tx, mixed_rx) = watch::channel::<Option<String>>(None);
+    // Kept here while the part that sends on them is off, so clips just hear nothing.
+    let (mut game_tx, mut mixed_tx) = (Some(game_tx), Some(mixed_tx));
     let workers = Workers {
-        mouse: mouse::spawn(event_tx.clone()),
-        headset: headset::spawn(event_tx.clone()),
-        gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
-        profiles: profiles::spawn(event_tx.clone(), keyboard.clone(), game_tx),
-        clips: clips::spawn(event_tx.clone(), game_rx, mixed_rx),
+        mouse: if run.mouse {
+            mouse::spawn(event_tx.clone())
+        } else {
+            MouseHandle::off()
+        },
+        headset: if run.headset {
+            headset::spawn(event_tx.clone())
+        } else {
+            HeadsetHandle::off()
+        },
+        gamesense: match engine {
+            Some(engine) => gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
+            None => {
+                tokio::task::spawn_blocking(gamesense::clear_files);
+                GamesenseHandle::off()
+            }
+        },
+        profiles: match (run.profiles, game_tx.take()) {
+            (true, Some(tx)) => profiles::spawn(event_tx.clone(), keyboard.clone(), tx),
+            (_, tx) => {
+                game_tx = tx;
+                ProfilesHandle::off()
+            }
+        },
+        clips: if run.clips {
+            clips::spawn(event_tx.clone(), game_rx, mixed_rx)
+        } else {
+            ClipsHandle::off()
+        },
         // Sonar tells the keyboard's visualizer and clips where everything playing mixes.
-        sonar: sonar::spawn(event_tx.clone(), keyboard.clone(), mixed_tx),
+        sonar: match (run.sonar, mixed_tx.take()) {
+            (true, Some(tx)) => sonar::spawn(event_tx.clone(), keyboard.clone(), tx),
+            (_, tx) => {
+                mixed_tx = tx;
+                std::thread::spawn(sonar::turn_off);
+                SonarHandle::off()
+            }
+        },
         keyboard,
+        parts,
+        restart: Arc::new(Notify::new()),
     };
 
     let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
@@ -105,7 +171,31 @@ async fn main() -> Result<()> {
 
     // Best-effort cleanup so the next start binds cleanly.
     let _ = std::fs::remove_file(&path);
-    result
+    drop((game_tx, mixed_tx));
+    match result? {
+        Stop::Signal => Ok(()),
+        Stop::Restart => Err(exec_self()),
+    }
+}
+
+/// Start this program again in place, with the same arguments: the same process, so
+/// systemd keeps tracking it. Returns only if that failed.
+fn exec_self() -> anyhow::Error {
+    use std::os::unix::process::CommandExt;
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return anyhow::Error::new(e).context("finding gglinuxd to restart it"),
+    };
+    // Reinstalled while running, the old file is gone: start the new one.
+    let exe = exe
+        .to_str()
+        .and_then(|s| s.strip_suffix(" (deleted)"))
+        .map_or(exe.clone(), PathBuf::from);
+    info!(exe = %exe.display(), "starting again with the new parts");
+    let error = std::process::Command::new(&exe)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    anyhow::Error::new(error).context(format!("restarting {}", exe.display()))
 }
 
 /// Bind the daemon's socket at `path`, unless another gglinuxd answers there:
@@ -168,14 +258,15 @@ fn publish(
     }
 }
 
-/// Accept connections until SIGINT/SIGTERM.
+/// Accept connections until SIGINT/SIGTERM, or a change of parts.
 async fn accept_loop(
     listener: &UnixListener,
     snapshot_rx: watch::Receiver<Vec<DeviceInfo>>,
     event_tx: broadcast::Sender<Event>,
     workers: Workers,
-) -> Result<()> {
+) -> Result<Stop> {
     let mut sigterm = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+    let restart = Arc::clone(&workers.restart);
 
     loop {
         tokio::select! {
@@ -190,11 +281,11 @@ async fn accept_loop(
                     }
                 });
             }
-            _ = tokio::signal::ctrl_c() => { info!("received SIGINT; shutting down"); break; }
-            _ = sigterm.recv() => { info!("received SIGTERM; shutting down"); break; }
+            _ = tokio::signal::ctrl_c() => { info!("received SIGINT; shutting down"); return Ok(Stop::Signal); }
+            _ = sigterm.recv() => { info!("received SIGTERM; shutting down"); return Ok(Stop::Signal); }
+            _ = restart.notified() => { info!("the parts changed; restarting"); return Ok(Stop::Restart); }
         }
     }
-    Ok(())
 }
 
 /// Serve one client: push the current snapshot, then stream events and answer requests.
@@ -293,7 +384,15 @@ async fn dispatch(
         }
     };
 
+    if let Some(message) = frame.req.part().and_then(|p| workers.parts.refusal(p)) {
+        return ServerMessage::response(frame.id, ResponseData::Error { message });
+    }
+
     let result = match frame.req {
+        Request::GetParts => ResponseData::Parts {
+            parts: workers.parts,
+        },
+        Request::SetParts { parts } => set_parts(&parts::path(), parts, workers),
         Request::ListDevices => {
             // Bound the borrow to this block: the watch guard is not Send and this
             // future gets spawned.
@@ -478,6 +577,24 @@ async fn dispatch(
                 .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
                 .await,
         ),
+        Request::SetSwitches { switches } => outcome(
+            workers
+                .keyboard
+                .send::<()>(|reply| KeyboardCommand::SetSwitches { switches, reply })
+                .await,
+        ),
+        Request::SetScreen { screen } => outcome(
+            workers
+                .keyboard
+                .send::<()>(|reply| KeyboardCommand::SetScreen { screen, reply })
+                .await,
+        ),
+        Request::SetScreenCare { care } => outcome(
+            workers
+                .keyboard
+                .send::<()>(|reply| KeyboardCommand::SetScreenCare { care, reply })
+                .await,
+        ),
         Request::GetGamesenseState => {
             match workers.gamesense.send(GamesenseCommand::GetState).await {
                 Ok(state) => ResponseData::Gamesense { state },
@@ -556,6 +673,23 @@ async fn dispatch(
     ServerMessage::response(frame.id, result)
 }
 
+/// Save which parts run; if that changes anything, the daemon starts again a moment
+/// after answering, with the new set.
+fn set_parts(path: &Path, parts: Parts, workers: &Workers) -> ResponseData {
+    if let Err(message) = parts::save(path, &parts) {
+        return ResponseData::Error { message };
+    }
+    if parts != workers.parts {
+        let restart = Arc::clone(&workers.restart);
+        tokio::spawn(async move {
+            // Time for the answer to go out first.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            restart.notify_one();
+        });
+    }
+    ResponseData::Success
+}
+
 /// A request line as a frame, or why not and the id to answer that on.
 fn parse_request(line: &str) -> Result<RequestFrame, (u64, serde_json::Error)> {
     serde_json::from_str::<RequestFrame>(line).map_err(|e| {
@@ -581,11 +715,27 @@ fn outcome(result: Result<(), String>) -> ResponseData {
 /// Leave the devices as their owner expects them — base-station screen dark,
 /// keyboard lighting back on its own profile — waiting at most [`SHUTDOWN_GRACE`].
 async fn shutdown_devices(workers: &Workers) {
+    let run = workers.parts.running();
     let all = async {
         tokio::join!(
-            workers.headset.send::<()>(HeadsetCommand::Shutdown),
-            workers.keyboard.send::<()>(KeyboardCommand::Shutdown),
-            workers.clips.send::<()>(ClipsCommand::Shutdown),
+            async {
+                match run.headset {
+                    true => workers.headset.send::<()>(HeadsetCommand::Shutdown).await,
+                    false => Ok(()),
+                }
+            },
+            async {
+                match run.keyboard {
+                    true => workers.keyboard.send::<()>(KeyboardCommand::Shutdown).await,
+                    false => Ok(()),
+                }
+            },
+            async {
+                match run.clips {
+                    true => workers.clips.send::<()>(ClipsCommand::Shutdown).await,
+                    false => Ok(()),
+                }
+            },
         )
     };
     match tokio::time::timeout(SHUTDOWN_GRACE, all).await {
@@ -844,6 +994,82 @@ mod tests {
                 other => panic!("{line} answered as {other:?}"),
             }
         }
+    }
+
+    fn workers_with(parts: Parts) -> Workers {
+        Workers {
+            mouse: MouseHandle::off(),
+            headset: HeadsetHandle::off(),
+            keyboard: KeyboardHandle::off(),
+            sonar: SonarHandle::off(),
+            gamesense: GamesenseHandle::off(),
+            profiles: ProfilesHandle::off(),
+            clips: ClipsHandle::off(),
+            parts,
+            restart: Arc::new(Notify::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_for_a_part_thats_off_is_refused_with_where_to_turn_it_on() {
+        let workers = workers_with(Parts {
+            sonar: false,
+            keyboard: false,
+            ..Parts::default()
+        });
+        let (_tx, snapshot) = watch::channel(Vec::new());
+        let ask = |line: &'static str| dispatch(line, &snapshot, &workers);
+        match ask(r#"{"id":3,"req":{"method":"get_sonar_state"}}"#).await {
+            ServerMessage::Response {
+                id: 3,
+                result: ResponseData::Error { message },
+            } => assert!(message.contains("Sonar is turned off"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        match ask(r#"{"id":4,"req":{"method":"get_gamesense_state"}}"#).await {
+            ServerMessage::Response {
+                result: ResponseData::Error { message },
+                ..
+            } => assert!(message.contains("draws on the keyboard"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        // The daemon's own requests still work, or a part could never come back.
+        match ask(r#"{"id":5,"req":{"method":"get_parts"}}"#).await {
+            ServerMessage::Response {
+                id: 5,
+                result: ResponseData::Parts { parts },
+            } => assert!(!parts.sonar && parts.clips),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn changing_the_parts_saves_them_and_restarts_only_if_something_changed() {
+        let d = Scratch::new("parts");
+        let path = d.0.join("parts.json");
+        let workers = workers_with(Parts::default());
+        assert!(matches!(
+            set_parts(&path, Parts::default(), &workers),
+            ResponseData::Success
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), workers.restart.notified())
+                .await
+                .is_err(),
+            "nothing changed, so no restart"
+        );
+        let off = Parts {
+            clips: false,
+            ..Parts::default()
+        };
+        assert!(matches!(
+            set_parts(&path, off, &workers),
+            ResponseData::Success
+        ));
+        assert_eq!(parts::load(&path), off);
+        tokio::time::timeout(Duration::from_secs(2), workers.restart.notified())
+            .await
+            .expect("a restart is asked for once the answer is out");
     }
 
     #[tokio::test]
