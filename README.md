@@ -68,12 +68,13 @@ sudo udevadm control --reload
 
 **Sonar** (the audio channels, EQ and virtual mic) needs PipeWire ≥ 1.0 with WirePlumber 0.5; it
 drives them with PipeWire's own `pw-dump`, `pw-metadata`, `pw-cli` and `wpctl`, so there is nothing
-extra to build. Two packages are **optional**, for the mic chain only:
+extra to build. Three packages are **optional**: two for the mic chain, and one for clips:
 
 | Package | Provides | Without it |
 |---|---|---|
 | `noise-suppression-for-voice` | RNNoise noise suppression (`librnnoise_ladspa.so`) | no virtual mic |
 | `swh-plugins` | the `sc4m` compressor | no virtual mic |
+| `gpu-screen-recorder` | instant-replay clips | the Moments page asks you to install it |
 
 **GameSense** (games and apps driving the keyboard lighting) is off until you turn it on in the
 Games page. Turning it on starts a server on `127.0.0.1` and writes a small `coreProps.json`
@@ -100,6 +101,7 @@ cargo run -p gglinuxd --example ggctl -- mouse           # battery + applied set
 cargo run -p gglinuxd --example ggctl -- mouse dpi 800,1600 --select 0 --save
 cargo run -p gglinuxd --example ggctl -- mouse polling 1000 --save
 cargo run -p gglinuxd --example ggctl -- mouse buttons button1,button2,button3,button4,button5,dpi
+cargo run -p gglinuxd --example ggctl -- clip save       # save the instant replay
 ```
 
 Settings apply immediately but are lost when the mouse sleeps unless you pass `--save`, which commits

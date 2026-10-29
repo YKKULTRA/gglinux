@@ -55,6 +55,23 @@ async fn daemon_send(
     writer.write_all(&line).await.map_err(|e| e.to_string())
 }
 
+/// Open a folder in the file manager; only existing directories, given as
+/// absolute paths so `xdg-open` can't mistake one for an option.
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.is_absolute() || !p.is_dir() {
+        return Err(format!("{path} is not a folder"));
+    }
+    let mut child = std::process::Command::new("xdg-open")
+        .arg(p)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // Reap it when it exits, so each click doesn't leave a zombie behind.
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 /// Connect, pump lines to the frontend, and retry forever.
 async fn bridge_loop(app: AppHandle, bridge: Arc<Bridge>) {
     let path = gg_ipc::socket_path();
@@ -156,7 +173,11 @@ fn main() {
 
     tauri::Builder::default()
         .manage(Arc::clone(&bridge))
-        .invoke_handler(tauri::generate_handler![daemon_status, daemon_send])
+        .invoke_handler(tauri::generate_handler![
+            daemon_status,
+            daemon_send,
+            open_folder
+        ])
         .setup(move |app| {
             build_tray(app.handle())?;
             tauri::async_runtime::spawn(bridge_loop(app.handle().clone(), bridge));
@@ -172,4 +193,18 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("failed to start the gglinux UI");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::open_folder;
+
+    #[test]
+    fn open_folder_refuses_anything_but_a_folder() {
+        // Refusals only: a folder that passed would open the file manager.
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        for path in ["", "/no/such/folder", file] {
+            assert!(open_folder(path.into()).is_err(), "{path:?} was accepted");
+        }
+    }
 }

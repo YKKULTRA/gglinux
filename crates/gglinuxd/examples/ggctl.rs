@@ -8,6 +8,7 @@
 //! ggctl mouse polling 1000 [--save]
 //! ggctl mouse buttons button1,button2,button3,button4,button5,dpi [--save]
 //! ggctl mouse save                        # commit whatever is applied to onboard memory
+//! ggctl clip save                         # save the instant replay
 //! ```
 //!
 //! Prefer this over `gg-device-mouse`'s `mousectl` whenever the daemon is running:
@@ -37,7 +38,9 @@ fn main() -> Result<()> {
         // No arguments: stream everything the daemon sends until it goes quiet.
         None => return watch(stream),
         Some((&"mouse", rest)) => mouse_request(rest, &args, save)?,
-        Some((other, _)) => bail!("unknown command '{other}' (try: mouse, or no argument to watch)"),
+        Some((&"clip", ["save"])) => Request::SaveClip,
+        Some((&"clip", _)) => bail!("usage: ggctl clip save"),
+        Some((other, _)) => bail!("unknown command '{other}' (try: mouse, clip, or no argument to watch)"),
     };
 
     match send(stream, request)? {

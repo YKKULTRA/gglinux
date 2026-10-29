@@ -17,6 +17,8 @@ gg-device-keyboard = { path = "../gg-device-keyboard" }
 gg-gamesense = { path = "../gg-gamesense" }
 axum.workspace = true
 rustfft.workspace = true
+ashpd.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 hidapi.workspace = true
 tokio.workspace = true

@@ -291,6 +291,11 @@ Progress 2026-09-29 — **M7a profiles done in software** (spec
 `docs/superpowers/specs/2026-09-29-profiles-design.md`): named lighting profiles and game rules
 (process name → profile) applied while the program runs, from a 2 s `/proc` scan that also
 recognises Proton games' `.exe` names. Not yet verified on hardware.
+
+**M7b clips done in software** (spec `docs/superpowers/specs/2026-09-29-clips-design.md`): a
+supervised `gpu-screen-recorder` replay buffer (off by default), saved by the GlobalShortcuts
+portal hotkey (Alt+S), the UI or `ggctl`, and a clip library on the Moments page. Needs
+`sudo pacman -S gpu-screen-recorder` (not installed yet). Not yet verified.
 across all three devices; `makepkg -si` installs a working daemon+UI from clean.
 
 ---
