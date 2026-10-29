@@ -286,6 +286,7 @@ Profiles + per-game auto-switch (QuickSet-style `/proc` exec watcher swaps profi
 Personal/Stream sink graph); virtual surround (spatializer + SOFA, optional); tray/autostart; settings
 backup (local export/import — no cloud); AUR PKGBUILD + install docs.
 **Accept:** launching a game swaps profiles and restores on exit; Alt+S saves a replay clip; RGB syncs
+across all three devices; `makepkg -si` installs a working daemon+UI from clean.
 
 Progress 2026-09-29 — **M7a profiles done in software** (spec
 `docs/superpowers/specs/2026-09-29-profiles-design.md`): named lighting profiles and game rules
@@ -300,7 +301,12 @@ portal hotkey (Alt+S), the UI or `ggctl`, and a clip library on the Moments page
 **M7c streamer mode done in software** (spec `docs/superpowers/specs/2026-09-29-streamer-mode-design.md`):
 a second, independent Stream mix of Sonar's channels on a "gglinux Stream" device (per-channel and
 master levels) for OBS to record. Builds on Sonar, which is still unverified live.
-across all three devices; `makepkg -si` installs a working daemon+UI from clean.
+
+**M7d done in software** (spec `docs/superpowers/specs/2026-09-29-desktop-integration-design.md`):
+`ggctl` installed as a command (clip/profile/GameSense), start at login (user service + tray
+autostart), settings backup/restore, `install-local.sh` installs the UI, and an Arch `PKGBUILD`
+(`gglinux-git`, for when the repo is published — publishing is the owner's call). Skipped:
+PrismSync (one RGB device) and virtual surround (optional).
 
 ---
 

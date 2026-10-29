@@ -8,6 +8,7 @@
   import HeadsetPanel from "./lib/HeadsetPanel.svelte";
   import KeyboardPanel from "./lib/KeyboardPanel.svelte";
   import MousePanel from "./lib/MousePanel.svelte";
+  import SettingsPanel from "./lib/SettingsPanel.svelte";
   import SonarPanel from "./lib/SonarPanel.svelte";
   import Icon from "./lib/Icon.svelte";
   import type { IconName } from "./lib/icons";
@@ -19,7 +20,7 @@
     { id: "sonar", icon: "sonar", label: "Sonar", blurb: "Per-app audio routing and EQ" },
     { id: "games", icon: "games", label: "Games", blurb: "GameSense: games drive your lighting" },
     { id: "moments", icon: "moments", label: "Moments", blurb: "Instant replay and clips" },
-    { id: "settings", icon: "settings", label: "Settings", blurb: "Profiles and per-game switching" },
+    { id: "settings", icon: "settings", label: "Settings", blurb: "Profiles, start at login, backups" },
   ];
 
   let page = $state<Page>("engine");
@@ -154,6 +155,8 @@ sudo udevadm trigger --subsystem-match=hidraw --action=add</code></pre>
       {:else}
         <section class="notice"><h2>gglinuxd isn&rsquo;t running</h2></section>
       {/if}
+      <!-- Outside the guard: starting at login and backups work without the daemon. -->
+      <SettingsPanel />
     {/if}
   </main>
 </div>

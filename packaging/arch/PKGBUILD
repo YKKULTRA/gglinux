@@ -1,0 +1,54 @@
+# Maintainer: ykk
+pkgname=gglinux-git
+pkgver=r0.0000000
+pkgrel=1
+pkgdesc="Open-source SteelSeries GG for Linux: lighting, headset, Sonar-style audio, GameSense, clips"
+arch=('x86_64')
+url="https://github.com/ykk/gglinux"
+license=('GPL-3.0-or-later')
+depends=('systemd-libs' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'pipewire' 'wireplumber')
+makedepends=('git' 'cargo' 'nodejs' 'npm')
+optdepends=('noise-suppression-for-voice: noise suppression for the Sonar microphone'
+            'swh-plugins: compressor for the Sonar microphone'
+            'gpu-screen-recorder: instant-replay clips')
+provides=('gglinux')
+conflicts=('gglinux')
+install=gglinux.install
+source=("gglinux::git+https://github.com/ykk/gglinux.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd gglinux
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd gglinux
+  # The daemon and ggctl; the UI is its own cargo project, built by the Tauri CLI.
+  cargo build --release --locked -p gglinuxd --bins
+  cd ui
+  npm ci
+  npm run tauri build -- --no-bundle
+}
+
+check() {
+  cd gglinux
+  cargo test --release --locked --workspace
+}
+
+package() {
+  cd gglinux
+  install -Dm755 target/release/gglinuxd "$pkgdir/usr/bin/gglinuxd"
+  install -Dm755 target/release/ggctl "$pkgdir/usr/bin/ggctl"
+  install -Dm755 ui/src-tauri/target/release/gglinux "$pkgdir/usr/bin/gglinux"
+  # The unit in the repo runs ~/.local/bin/gglinuxd, where install-local.sh puts it.
+  sed 's|^ExecStart=.*|ExecStart=/usr/bin/gglinuxd|' data/systemd/gglinuxd.service \
+    | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/gglinuxd.service"
+  install -Dm644 data/udev/60-gglinux.rules "$pkgdir/usr/lib/udev/rules.d/60-gglinux.rules"
+  # Shipped but not active: reactive lighting is an opt-in, as gglinux.install explains.
+  install -Dm644 data/udev/61-gglinux-reactive.rules "$pkgdir/usr/share/gglinux/61-gglinux-reactive.rules"
+  sed 's|^Exec=.*|Exec=/usr/bin/gglinux|' data/gglinux.desktop \
+    | install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/gglinux.desktop"
+  install -Dm644 ui/src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/gglinux.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

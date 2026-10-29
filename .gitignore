@@ -9,6 +9,12 @@ ui/dist/
 ui/src-tauri/target/
 ui/src-tauri/gen/
 
+# makepkg's build dirs and packages (packaging/arch)
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/gglinux/
+packaging/arch/*.pkg.tar.zst
+
 # Editors / OS / tooling
 *.swp
 *.log

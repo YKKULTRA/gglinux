@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=gglinux
+GenericName=SteelSeries Control
+Comment=Open-source SteelSeries GG for Linux
+Exec=gglinux
+Icon=gglinux
+Terminal=false
+Categories=Settings;HardwareSettings;
+StartupWMClass=gglinux
