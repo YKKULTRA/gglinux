@@ -24,18 +24,10 @@ someone who owns it to test it. Please open an issue to discuss it before writin
 Install the build dependencies listed in the [README](README.md#requirements), then:
 
 ```sh
-# Daemon and ggctl (the cargo workspace)
+# The daemon, ggctl and the desktop app: one cargo workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-
-# Desktop app (ui/ and its separate cargo project ui/src-tauri)
-cd ui
-npm ci
-npm run check            # svelte-check
-npx vite build           # frontend
-(cd src-tauri && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked)
-npx tauri build --debug --no-bundle
 ```
 
 These are the same checks CI runs ([.github/workflows/ci.yml](.github/workflows/ci.yml)). Please run
@@ -51,16 +43,49 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 ## Running the app while developing
 
 ```sh
-cd ui
-npm run tauri dev
+cargo run -p gglinux
 ```
 
-Use that or `npm run tauri build`. **Don't** run `cargo build && ./target/debug/gglinux`: a debug
-binary loads the frontend from the Vite dev server (`http://localhost:1420`), not from the embedded
-files, so without Vite running you get a blank window and no error.
+The app is `crates/gglinux-ui`: the window is Slint markup in `ui/*.slint` (one file per page,
+`widgets.slint` for the shared pieces), and the Rust in `src/` fills each page's Slint global from
+the daemon's state and answers its callbacks with requests. Where a panel keeps a working copy (a
+form you edit before applying), the copy is Rust, so it's tested as Rust.
 
-A dev build runs beside an installed gglinux instead of handing over to it, so you may see two tray
-icons.
+A debug build answers to its own D-Bus name, so it runs beside an installed gglinux instead of
+handing over to it, and you may see two tray icons.
+
+One Slint behaviour to know about: inside the scrolling page, a `Text` with `wrap: word-wrap` in an
+`if` or `for` is measured at the wrong width, and the card around it comes out shorter than its
+content. Put wrapped text in a `Shown { }` (in `widgets.slint`) instead of an `if`.
+
+### Pictures of the app without a screen
+
+`shot` draws the window to a PNG with Slint's software renderer. Pointed at the fake daemon below,
+it shows every page with made-up devices, from a machine with no display:
+
+```sh
+mkdir -p -m 700 /tmp/gg-fake
+XDG_RUNTIME_DIR=/tmp/gg-fake cargo run -p gglinuxd --example fakemouse &
+XDG_RUNTIME_DIR=/tmp/gg-fake cargo run -p gglinux --example shot -- sonar sonar.png 1180 1400
+```
+
+The page is `engine`, `sonar`, `games`, `moments` or `settings`. Some variables change the
+picture:
+
+- `SHOT_DO` clicks first, for example
+  `SHOT_DO=keyboard.set-enabled:1,keyboard.set-effect:0,keyboard.key:35,keyboard.paint-selected`.
+  Each page module names its steps in its `poke` function (`src/keyboard.rs`, `src/sonar.rs`, ...).
+- `SHOT_SCROLL` scrolls the page as its scroll bar would: by pixels, to `card:N` (the page's Nth
+  card at the top), `end:N` (its bottom at the bottom) or `line:N` (the Nth divider inside the
+  cards), each with an optional `+px` or `-px`. It prints the cards and lines it found.
+- `SHOT_FIT=1` makes the picture no taller than the page.
+- `SHOT_WAIT_MS` is how long to wait for the daemon's answers first (1500 by default).
+
+`./scripts/screenshots.sh` redraws the README's pictures in `docs/screenshots/` this way, each
+against a fresh fake daemon in a temporary folder, without touching a running gglinux. Run it
+after changing how a page looks (`./scripts/screenshots.sh keyboard eq` redraws just those two),
+and look at the pictures before committing them: when a page gains or loses a card, a picture's
+`SHOT_SCROLL` in the script may need the new number.
 
 ## Working without hardware
 
@@ -76,7 +101,7 @@ cargo run -p gglinuxd --example fakemouse -- --fail set_mouse_dpi
 cargo run -p gglinuxd --example fakemouse -- --no-mouse
 ```
 
-It logs every request it receives, decoded, so you can see exactly what the UI sent. It uses the
+It logs every request it receives, decoded, so you can see exactly what the app sent. It uses the
 same `gg-ipc` types as the daemon, so a request it accepts is one the daemon accepts.
 
 The Sonar code reaches PipeWire only through the `PwTools` trait in `gg-audio`, and its tests run

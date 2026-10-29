@@ -9,7 +9,7 @@
 # --no-build installs what an earlier build left, and skips ggctl or the UI when that build
 # didn't make them — so a udev-only re-run on an older checkout still reaches the udev step.
 #
-# --no-ui skips building and installing the UI (it needs npm and webkit2gtk-4.1).
+# --no-ui skips building and installing the desktop app.
 #
 # --reactive also installs the optional rule that lets reactive lighting see key presses on
 # the Apex Pro TKL Gen 3 — which lets any program you run read what you type on it.
@@ -41,8 +41,11 @@ built() {
 if [[ $do_build -eq 1 ]]; then
   echo "==> building (release)"
   # Into the repo's own target/, where the steps below look, even if CARGO_TARGET_DIR or a
-  # cargo config names another target dir; the UI's build does the same.
-  CARGO_TARGET_DIR="$repo/target" cargo build --release --manifest-path "$repo/Cargo.toml" --bins
+  # cargo config names another target dir.
+  packages=(-p gglinuxd)
+  [[ $do_ui -eq 1 ]] && packages+=(-p gglinux)
+  CARGO_TARGET_DIR="$repo/target" cargo build --release --manifest-path "$repo/Cargo.toml" \
+    "${packages[@]}" --bins
 fi
 
 echo "==> installing gglinuxd -> ~/.local/bin"
@@ -61,20 +64,17 @@ systemctl --user daemon-reload
 systemctl --user try-restart gglinuxd
 
 if [[ $do_ui -eq 1 ]]; then
-  if [[ $do_build -eq 1 ]]; then
-    echo "==> building the UI (release)"
-    (cd "$repo/ui" && npm ci \
-      && CARGO_TARGET_DIR="$repo/ui/src-tauri/target" npm run tauri build -- --no-bundle)
-  fi
-  if built "$repo/ui/src-tauri/target/release/gglinux" "the UI"; then
-    echo "==> installing the UI -> ~/.local/bin/gglinux"
-    install -Dm755 "$repo/ui/src-tauri/target/release/gglinux" "$HOME/.local/bin/gglinux"
+  if built "$repo/target/release/gglinux" "the app"; then
+    echo "==> installing the app -> ~/.local/bin/gglinux"
+    # A running copy keeps the program it started from; `install` replaces the file, so the
+    # next launch (or the next login) runs the new one.
+    install -Dm755 "$repo/target/release/gglinux" "$HOME/.local/bin/gglinux"
     # ~/.local/bin may not be on the desktop session's PATH, so the entry names the full path.
     # Named after the app id: the desktop portal finds gglinux by it (the clip hotkey).
     sed "s|^Exec=.*|Exec=\"$HOME/.local/bin/gglinux\"|" "$repo/data/io.github.ykk.gglinux.desktop" \
       | install -Dm644 /dev/stdin "$HOME/.local/share/applications/io.github.ykk.gglinux.desktop"
     rm -f "$HOME/.local/share/applications/gglinux.desktop"  # its name before 2026-10-29
-    install -Dm644 "$repo/ui/src-tauri/icons/128x128.png" \
+    install -Dm644 "$repo/data/icons/128x128.png" \
       "$HOME/.local/share/icons/hicolor/128x128/apps/gglinux.png"
   else
     do_ui=0  # nothing new in the app menu, so no closing note about it

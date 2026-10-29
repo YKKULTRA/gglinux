@@ -1,0 +1,636 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Small widgets in the app's own look. Text entry, lists and scrolling come from
+// Slint's std widgets (fluent-dark), which fit beside these.
+
+import { Theme } from "theme.slint";
+
+/// A panel: the rounded box every page is made of.
+export component Card inherits Rectangle {
+    in property <length> pad: 16px;
+    background: Theme.surface;
+    border-color: Theme.line;
+    border-width: 1px;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: root.pad;
+        spacing: 10px;
+        @children
+    }
+}
+
+/// A section heading inside a card: small, upper case, dim.
+export component SectionTitle inherits Text {
+    color: Theme.text-dim;
+    font-size: Theme.tiny;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+}
+
+export component Title inherits Text {
+    color: Theme.text;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+/// Dim helper text that wraps.
+export component Hint inherits Text {
+    color: Theme.text-dim;
+    font-size: Theme.small;
+    wrap: word-wrap;
+}
+
+component ErrorBox inherits Rectangle {
+    in property <string> text;
+    background: Theme.danger.with-alpha(0.12);
+    border-radius: 8px;
+    HorizontalLayout {
+        padding: 8px;
+        Text {
+            text: root.text;
+            color: Theme.danger;
+            font-size: Theme.small;
+            wrap: word-wrap;
+        }
+    }
+}
+
+/// An error line on a red tint. While `text` is empty it's not there at all,
+/// spacing included: put it last, and the layout's spacing goes with it.
+export component ErrorLine {
+    in property <string> text;
+    VerticalLayout {
+        if root.text != "" : ErrorBox { text: root.text; }
+    }
+}
+
+/// A checkbox with its label; `toggled` fires on a click with the new value.
+export component Toggle {
+    in property <string> text;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    in property <color> label-color: Theme.text;
+    callback toggled(bool);
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-label: root.text;
+    accessible-action-default => { touch.clicked(); }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            box := Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: root.checked ? Theme.accent : (touch.has-hover && root.enabled ? Theme.text-dim : Theme.line);
+                background: root.checked ? Theme.accent : Theme.surface-2;
+                opacity: root.enabled ? 1 : 0.45;
+                Text {
+                    visible: root.checked;
+                    text: "✓";
+                    color: Theme.bg;
+                    font-size: 12px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.enabled ? root.label-color : Theme.text-dim;
+            font-size: Theme.font;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.checked); }
+    }
+}
+
+/// A plain button: outlined, the accent on hover. `primary` fills it.
+export component Button {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    in property <bool> small: false;
+    callback clicked();
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    min-width: label.preferred-width + (root.small ? 18px : 28px);
+    // A button is as wide as its label: stretched across a row it reads as a bar.
+    max-width: self.min-width;
+    height: root.small ? 26px : 32px;
+    Rectangle {
+        border-radius: root.small ? 7px : 8px;
+        border-width: 1px;
+        border-color: touch.has-hover && root.enabled ? Theme.accent : Theme.line;
+        // A disabled one is dimmed by the opacity below, once: dimming the fill
+        // as well left its dark label unreadable.
+        background: root.primary ? Theme.accent : (root.small ? transparent : Theme.surface-2);
+        opacity: root.enabled ? 1 : 0.5;
+        label := Text {
+            text: root.text;
+            color: root.primary ? Theme.bg : (touch.has-hover && root.enabled ? Theme.accent : (root.small ? Theme.text-dim : Theme.text));
+            font-size: root.small ? Theme.small : Theme.font;
+            font-weight: root.primary ? 600 : 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// A row of choices, one picked: the web UI's "segmented" control.
+export component Segmented {
+    in property <[string]> options;
+    in property <int> current: -1;
+    in property <bool> enabled: true;
+    callback picked(int);
+    height: 30px;
+    Rectangle {
+        background: Theme.surface-2;
+        border-color: Theme.line;
+        border-width: 1px;
+        border-radius: 8px;
+        clip: true;
+        HorizontalLayout {
+            for option[i] in root.options: Rectangle {
+                background: i == root.current ? Theme.accent : (t.has-hover && root.enabled ? Theme.line : transparent);
+                min-width: label.preferred-width + 24px;
+                label := Text {
+                    text: option;
+                    color: i == root.current ? Theme.bg : Theme.text-dim;
+                    font-size: Theme.small;
+                    font-weight: i == root.current ? 600 : 400;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                t := TouchArea {
+                    enabled: root.enabled;
+                    mouse-cursor: pointer;
+                    clicked => { root.picked(i); }
+                }
+            }
+        }
+    }
+}
+
+/// A horizontal slider in the accent colour; `changed` fires while dragging and
+/// `released` once at the end, with the value snapped to `step`.
+export component AccentSlider {
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in property <float> step: 1;
+    in property <float> value;
+    in property <bool> enabled: true;
+    callback changed(float);
+    callback released(float);
+    out property <float> shown: dragging ? drag-value : value;
+    property <bool> dragging: false;
+    property <float> drag-value;
+    accessible-role: slider;
+    accessible-value: root.shown;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: root.step;
+    min-width: 120px;
+    height: 22px;
+    function at(x: length) -> float {
+        let raw = root.minimum + max(0, min(1, x / root.width)) * (root.maximum - root.minimum);
+        return max(root.minimum, min(root.maximum, round(raw / root.step) * root.step));
+    }
+    track := Rectangle {
+        y: (parent.height - 4px) / 2;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.line;
+    }
+    Rectangle {
+        x: 0;
+        y: track.y;
+        height: 4px;
+        width: root.maximum > root.minimum ? (root.shown - root.minimum) / (root.maximum - root.minimum) * root.width : 0;
+        border-radius: 2px;
+        background: root.enabled ? Theme.accent : Theme.text-dim;
+    }
+    Rectangle {
+        width: 14px;
+        height: 14px;
+        y: (parent.height - 14px) / 2;
+        x: (root.maximum > root.minimum ? (root.shown - root.minimum) / (root.maximum - root.minimum) * root.width : 0) - 7px;
+        border-radius: 7px;
+        background: root.enabled ? Theme.text : Theme.text-dim;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.dragging = true;
+                root.drag-value = root.at(self.mouse-x);
+                root.changed(root.drag-value);
+            } else if e.kind == PointerEventKind.up && root.dragging {
+                root.dragging = false;
+                root.released(root.drag-value);
+            }
+        }
+        moved => {
+            if root.dragging {
+                root.drag-value = root.at(self.mouse-x);
+                root.changed(root.drag-value);
+            }
+        }
+    }
+}
+
+/// A sidebar entry.
+export component NavItem {
+    in property <string> label;
+    in property <image> icon;
+    in property <bool> active;
+    callback clicked();
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+    height: 36px;
+    Rectangle {
+        border-radius: 8px;
+        background: root.active || touch.has-hover ? Theme.surface-2 : transparent;
+        Rectangle {
+            x: 0;
+            width: 2px;
+            height: 60%;
+            background: Theme.accent;
+            visible: root.active;
+        }
+        HorizontalLayout {
+            padding-left: 10px;
+            spacing: 10px;
+            Image {
+                source: root.icon;
+                width: 19px;
+                colorize: root.active || touch.has-hover ? Theme.text : Theme.text-dim;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.label;
+                color: root.active || touch.has-hover ? Theme.text : Theme.text-dim;
+                font-size: 13.5px;
+                vertical-alignment: center;
+            }
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+/// A card's top: the device glyph, its name, and a line under it.
+export component PanelHead {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> meta;
+    HorizontalLayout {
+        spacing: 14px;
+        Rectangle {
+            width: 46px;
+            height: 46px;
+            border-radius: 10px;
+            background: Theme.surface-2;
+            Image { source: root.icon; width: 26px; colorize: Theme.accent; }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            Text { text: root.title; color: Theme.text; font-size: 15px; font-weight: 600; }
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+                @children
+                Text { text: root.meta; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; wrap: word-wrap; }
+            }
+        }
+    }
+}
+
+/// A battery bar and its percentage.
+export component Battery {
+    in property <int> level;
+    in property <int> low: 20;
+    HorizontalLayout {
+        spacing: 6px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 30px;
+                height: 8px;
+                border-radius: 3px;
+                background: Theme.surface-2;
+                border-color: Theme.line;
+                border-width: 1px;
+                Rectangle {
+                    x: 0;
+                    width: parent.width * max(0, min(100, root.level)) / 100;
+                    border-radius: 3px;
+                    background: root.level <= root.low ? Theme.danger : Theme.ok;
+                }
+            }
+        }
+        Text { text: "\{root.level}%"; color: root.level <= root.low ? Theme.danger : Theme.text; font-size: Theme.small; vertical-alignment: center; }
+    }
+}
+
+/// A labelled row of controls.
+export component Row {
+    in property <string> label;
+    in property <length> label-width: 110px;
+    HorizontalLayout {
+        spacing: 12px;
+        Text {
+            text: root.label;
+            width: root.label-width;
+            color: Theme.text-dim;
+            font-size: Theme.font;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        @children
+    }
+}
+
+/// A value shown after a control, in a fixed width so rows line up.
+export component Unit inherits Text {
+    color: Theme.text-dim;
+    font-size: Theme.small;
+    min-width: 64px;
+    vertical-alignment: center;
+}
+
+/// A heading line inside a card, with an optional state on the right.
+export component Head {
+    in property <string> text;
+    in property <string> state;
+    HorizontalLayout {
+        SectionTitle { text: root.text; vertical-alignment: center; }
+        Rectangle { horizontal-stretch: 1; }
+        @children
+        if root.state != "" : Text { text: root.state; color: Theme.text-dim; font-size: Theme.tiny; vertical-alignment: center; }
+    }
+}
+
+/// A command line or file path, in mono on the page colour.
+export component Code inherits Rectangle {
+    in property <string> text;
+    background: Theme.bg;
+    border-color: Theme.line;
+    border-width: 1px;
+    border-radius: 8px;
+    HorizontalLayout {
+        padding: 10px;
+        Text { text: root.text; font-family: Theme.mono; font-size: Theme.small; color: Theme.accent; wrap: word-wrap; }
+    }
+}
+
+/// A thin line between sections of a card.
+export component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.line;
+}
+
+/// A small pill: "connected", "running".
+export component Badge inherits Rectangle {
+    in property <string> text;
+    in property <bool> good;
+    border-radius: 9px;
+    height: 18px;
+    width: label.preferred-width + 14px;
+    background: root.good ? Theme.ok.with-alpha(0.18) : Theme.surface-2;
+    label := Text {
+        text: root.text;
+        color: root.good ? Theme.ok : Theme.text-dim;
+        font-size: 10.5px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+/// Shows its content only while `shown`, and takes no room otherwise, spacing
+/// included (it brings its own gap below). Used instead of `if` for whole panels
+/// in the scrolled page: Slint measures wrapped text in a conditional there at
+/// the wrong width, and the card comes out shorter than its content.
+export component Shown {
+    in property <bool> shown: true;
+    in property <length> gap: 18px;
+    visible: root.shown;
+    height: root.shown ? inner.preferred-height : 0px;
+    inner := VerticalLayout {
+        padding-bottom: root.gap;
+        @children
+    }
+}
+
+/// A slider over a gradient track, for the colour picker.
+component GradientSlider {
+    in property <brush> track;
+    in property <float> value;
+    callback changed(float);
+    height: 16px;
+    Rectangle { border-radius: 8px; background: root.track; border-width: 1px; border-color: Theme.line; }
+    Rectangle {
+        x: root.value * (root.width - 16px);
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        border-width: 2px;
+        border-color: #ffffff;
+        background: transparent;
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.changed(max(0, min(1, (self.mouse-x - 8px) / (root.width - 16px))));
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.changed(max(0, min(1, (self.mouse-x - 8px) / (root.width - 16px))));
+            }
+        }
+    }
+}
+
+/// A colour swatch; clicking it opens a picker (hue, saturation, brightness and
+/// a row of presets). `picked` fires with the colour chosen.
+export component ColorPick {
+    in property <color> value;
+    in property <bool> enabled: true;
+    callback picked(color);
+    property <float> hue;
+    property <float> sat;
+    property <float> val;
+    property <color> now: hsv(root.hue * 360, root.sat, root.val);
+    width: 46px;
+    height: 28px;
+    accessible-role: button;
+    accessible-label: "Colour";
+    accessible-action-default => { root.open(); }
+    /// Open the picker on the colour shown.
+    public function open() {
+        if !root.enabled {
+            return;
+        }
+        root.hue = root.value.to-hsv().hue / 360;
+        root.sat = root.value.to-hsv().saturation;
+        root.val = root.value.to-hsv().value;
+        popup.show();
+    }
+    Rectangle {
+        border-radius: 7px;
+        background: root.value;
+        border-width: 1px;
+        border-color: t.has-hover && root.enabled ? Theme.accent : Theme.line;
+        opacity: root.enabled ? 1 : 0.45;
+    }
+    t := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.open(); }
+    }
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        // Room for the nine presets and the padding around them.
+        width: 264px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Theme.surface-2;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.line;
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000080;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 10px;
+                GradientSlider {
+                    value: root.hue;
+                    track: @linear-gradient(90deg, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%);
+                    changed(v) => { root.hue = v; }
+                }
+                GradientSlider {
+                    value: root.sat;
+                    track: @linear-gradient(90deg, hsv(root.hue * 360, 0, root.val) 0%, hsv(root.hue * 360, 1, root.val) 100%);
+                    changed(v) => { root.sat = v; }
+                }
+                GradientSlider {
+                    value: root.val;
+                    track: @linear-gradient(90deg, #000000 0%, hsv(root.hue * 360, root.sat, 1) 100%);
+                    changed(v) => { root.val = v; }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    for c in [#ffffff, #ff0000, #ff7a29, #ffd000, #00ff40, #00c8ff, #3050ff, #b040ff, #ff40a0] : Rectangle {
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 5px;
+                        background: c;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.hue = c.to-hsv().hue / 360;
+                                root.sat = c.to-hsv().saturation;
+                                root.val = c.to-hsv().value;
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { width: 46px; height: 28px; border-radius: 7px; background: root.now; border-width: 1px; border-color: Theme.line; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "Use"; primary: true; clicked => { root.picked(root.now); popup.close(); } }
+                }
+            }
+        }
+    }
+}
+
+/// One key on a keyboard picture.
+export struct Key {
+    x: float,
+    y: float,
+    w: float,
+    label: string,
+    /// A second line: the switch's actuation point.
+    sub: string,
+    fill: color,
+    ink: color,
+    selected: bool,
+    /// A key whose switch can't be changed: greyed out.
+    fixed: bool,
+    /// A key with its own setting: outlined.
+    own: bool,
+}
+
+/// A keyboard picture: keys placed by their layout units, scaled to the width.
+export component Board {
+    in property <[Key]> keys;
+    in property <float> cols: 17.5;
+    in property <float> rows: 6.5;
+    callback clicked(int);
+    property <length> u: root.width / root.cols;
+    min-width: 400px;
+    height: root.u * root.rows;
+    for k[i] in root.keys : Rectangle {
+        x: k.x * root.u + 2px;
+        y: k.y * root.u + 2px;
+        width: k.w * root.u - 4px;
+        height: root.u - 4px;
+        border-radius: 5px;
+        background: k.fill;
+        border-width: k.selected ? 2px : (k.own ? 1.5px : 1px);
+        border-color: k.selected ? Theme.text : (k.own ? Theme.accent : Theme.line);
+        opacity: k.fixed ? 0.4 : 1;
+        // A click selects a key or lets it go.
+        accessible-role: checkbox;
+        accessible-label: k.label == "" ? "Space" : k.label;
+        accessible-description: k.sub == "" ? "" : k.sub + " mm";
+        accessible-checkable: !k.fixed;
+        accessible-checked: k.selected;
+        accessible-enabled: !k.fixed;
+        accessible-action-default => { root.clicked(i); }
+        Text {
+            y: k.sub == "" ? (parent.height - self.height) / 2 : parent.height * 0.12;
+            text: k.label;
+            color: k.ink;
+            font-size: max(8px, root.u * 0.24);
+        }
+        if k.sub != "" : Text {
+            y: parent.height * 0.52;
+            text: k.sub;
+            color: k.own ? Theme.accent : k.ink;
+            font-size: max(7px, root.u * 0.2);
+        }
+        TouchArea {
+            mouse-cursor: k.fixed ? default : pointer;
+            clicked => { root.clicked(i); }
+        }
+    }
+}

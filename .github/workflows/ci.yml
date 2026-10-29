@@ -20,8 +20,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  daemon:
-    name: Daemon (fmt, clippy, tests)
+  rust:
+    name: Rust (fmt, clippy, tests)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -29,7 +29,9 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
+          # libudev for the daemon; fontconfig for the app's fonts.
+          # Wayland, EGL and xkbcommon are loaded at run time, so the build doesn't need them.
+          sudo apt-get install -y --no-install-recommends pkg-config libudev-dev libfontconfig-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -45,60 +47,3 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --locked
-
-  ui:
-    name: UI (svelte-check, frontend, Tauri)
-    runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: ui
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install system packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config build-essential file \
-            libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev \
-            libxdo-dev libssl-dev libudev-dev
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ui/src-tauri -> target
-
-      - name: npm ci
-        run: npm ci
-
-      - name: svelte-check
-        run: npm run check
-
-      - name: Frontend build
-        run: npx vite build
-
-      - name: cargo fmt (Tauri backend)
-        working-directory: ui/src-tauri
-        run: cargo fmt --check
-
-      - name: cargo clippy (Tauri backend)
-        working-directory: ui/src-tauri
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: cargo test (Tauri backend)
-        working-directory: ui/src-tauri
-        run: cargo test --locked
-
-      # A debug build runs the whole Tauri pipeline (beforeBuildCommand, the embedded
-      # frontend, the binary) at a fraction of the release profile's LTO cost. The release
-      # build is what packaging/arch/PKGBUILD exercises.
-      - name: Tauri build (debug, no bundle)
-        run: npx tauri build --debug --no-bundle -- --locked

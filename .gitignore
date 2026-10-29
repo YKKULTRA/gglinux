@@ -3,12 +3,6 @@
 **/target
 Cargo.lock.orig
 
-# Tauri / node frontend
-ui/node_modules/
-ui/dist/
-ui/src-tauri/target/
-ui/src-tauri/gen/
-
 # makepkg's build dirs and packages (packaging/arch)
 packaging/arch/src/
 packaging/arch/pkg/

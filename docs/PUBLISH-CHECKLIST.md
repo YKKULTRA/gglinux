@@ -6,7 +6,9 @@ only you can take. Nothing has been tagged, published or made public yet.
 What is ready on `cloud/release-prep`: fmt/clippy/tests clean, the UI checks and a Tauri release
 build pass, CI workflow, README/CONTRIBUTING/SECURITY/CHANGELOG/ARCHITECTURE, SPDX headers, the
 PKGBUILD (built with makepkg in an Arch container) and its AUR steps. Details in
-`docs/cloud/REPORT-gglinux.md`.
+`docs/cloud/REPORT-gglinux.md`. Since then (M10, 2026-10-29) the Tauri UI was replaced by the
+native Slint app: there are no UI checks or Tauri build any more, CI is one Rust job, and the
+PKGBUILD has new dependencies and hasn't been built with makepkg since.
 
 ## 1. Done
 
@@ -59,26 +61,30 @@ published. It contains nothing private; it is session bookkeeping. To leave it o
   hardware. You may want one test session first (Sonar on, the headset controls from the UI,
   GameSense **Run test**, a clip with `gpu-screen-recorder` installed). The README is honest either
   way.
-- **Tauri identifier** `io.github.ykk.gglinux` (in `ui/src-tauri/tauri.conf.json`). It refers to a
-  `ykk` GitHub account, which isn't yours. Changing it (for example to `io.github.ykkultra.gglinux`)
-  moves the app's web storage directory (`~/.local/share/<identifier>`), so existing installs lose
-  the UI's stored state, and the README's uninstall line must change with it. Left as is.
+- **App id** `io.github.ykk.gglinux`. It refers to a `ykk` GitHub account, which isn't yours.
+  Since M9 and M10 it is the desktop entry's name (`data/io.github.ykk.gglinux.desktop`), the app
+  id the desktop and its portals know gglinux by, and the app's D-Bus name (`APP_ID` in
+  `crates/gglinux-ui/src/shell.rs`). Changing it (for example to `io.github.ykkultra.gglinux`)
+  means renaming all of them together, with the install scripts, the PKGBUILD and the uninstall
+  steps. Left as is.
 - **AUR maintainer line.** `packaging/arch/PKGBUILD` says `# Maintainer: YKKULTRA` with no email.
   Add one if you want (`Name <user at example dot com>`).
-- **Version and tags.** Everything is `0.0.1` (Cargo, `package.json`, `tauri.conf.json`). No tag
-  exists. Tag something like `v0.1.0` only if you want a release; the CHANGELOG would then move its
-  `[Unreleased]` content under that version.
-- **Screenshots.** The README lists the seven it should have; take them on your desktop and add
-  them under `docs/screenshots/`.
+- **Version and tags.** Everything is `0.0.1` (the Cargo workspace). No tag exists. Tag something
+  like `v0.1.0` only if you want a release; the CHANGELOG would then move its `[Unreleased]`
+  content under that version.
+- **Screenshots.** `docs/screenshots/` has the six the README shows, drawn headless against the
+  fake daemon by `./scripts/screenshots.sh`. Rerun it after UI changes; pictures taken on your
+  desktop could replace them if you'd rather show the real thing.
 
 ## 3. Going public
 
 1. **Settings > Code security**: enable **Private vulnerability reporting** (SECURITY.md tells people
    to use it).
 2. **Settings > General**: add a description ("Open-source SteelSeries GG replacement for Linux")
-   and topics (`steelseries`, `linux`, `pipewire`, `tauri`, `rust`, `arch-linux`).
-3. **Settings > Branches**: protect `master` and require the two CI checks, "Daemon (fmt, clippy,
-   tests)" and "UI (svelte-check, frontend, Tauri)".
+   and topics (`steelseries`, `linux`, `pipewire`, `slint`, `rust`, `arch-linux`).
+3. **Settings > Branches**: protect `master` and require the CI check, "Rust (fmt, clippy,
+   tests)". (Before M10 there were two: "Daemon (fmt, clippy, tests)" and "UI (svelte-check,
+   frontend, Tauri)".)
 4. **Settings > General > Danger Zone > Change repository visibility > Public.**
 5. Optional: once public, Actions minutes on standard runners are free, so CI could also run on
    pushes to other branches. The workflow is limited to master/main, pull requests and manual runs

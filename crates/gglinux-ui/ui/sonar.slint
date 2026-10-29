@@ -1,0 +1,502 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Sonar: Game / Chat / Media / Aux channels in PipeWire, apps routed into them,
+// ChatMix, Smart Volume, the stream mix, the mic chain and the EQ.
+
+import { ComboBox, LineEdit, TextEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Card, Hint, ErrorLine, Toggle, Button, Segmented, AccentSlider, Row, Unit, Head, Divider, Title } from "widgets.slint";
+
+export struct SonarChannel {
+    name: string,
+    present: bool,
+    /// 0..1; -1 not known.
+    volume: float,
+    smart: bool,
+    /// 0 quiet, 1 balanced, 2 loud.
+    level: int,
+    stream: float,
+}
+
+export struct SonarApp {
+    name: string,
+    channel: int,
+    /// Apps without a known program can't be given a rule.
+    routable: bool,
+}
+
+export struct EqHandle {
+    x: float,
+    y: float,
+    shelf: bool,
+    tip: string,
+}
+
+export global SonarUi {
+    in property <bool> known;
+    in property <bool> available;
+    in property <bool> enabled;
+    /// The outputs to pick from; the first is a stand-in when the one chosen
+    /// isn't among them.
+    in property <[string]> outputs;
+    in-out property <int> output;
+    in property <[SonarChannel]> channels;
+    in property <bool> smart-available;
+    in property <string> smart-reason;
+    in property <bool> stream;
+    in property <bool> stream-present;
+    in property <float> stream-master: 1;
+    in property <float> chatmix;
+    in property <[SonarApp]> apps;
+    in property <bool> mic-available;
+    in property <bool> mic-present;
+    in property <[string]> mic-inputs;
+    in-out property <int> mic-input;
+    in property <float> mic-volume: -1;
+    in property <bool> denoise;
+    in property <float> strength: 50;
+    in property <bool> gate;
+    in property <float> gate-db: -45;
+    in property <bool> compressor;
+    in property <float> makeup: 6;
+    in property <int> eq-tab;
+    in property <string> eq-path;
+    in property <[EqHandle]> eq-handles;
+    in property <float> eq-limit: 12;
+    /// The band whose numbers are shown for typing; -1 none.
+    in property <int> eq-band: -1;
+    in property <string> eq-band-name;
+    in-out property <string> eq-freq;
+    in-out property <string> eq-gain;
+    in-out property <string> eq-q;
+    in property <float> preamp;
+    in property <string> preamp-text;
+    in property <string> headphone;
+    in-out property <string> import-text;
+    in-out property <string> import-name;
+    in property <bool> import-ready;
+    in property <string> busy;
+    in property <string> error;
+    out property <[string]> channel-names: ["Game", "Chat", "Media", "Aux"];
+    callback load();
+    callback toggle();
+    callback pick-output(int);
+    callback set-volume(int, float);
+    callback set-smart-on(int, bool);
+    callback set-smart-level(int, int);
+    callback set-streamer(bool);
+    callback set-stream-volume(int, float);
+    callback set-stream-master(float);
+    callback set-chatmix(float);
+    callback set-app(int, int);
+    callback pick-mic-input(int);
+    callback set-mic-volume(float);
+    /// One mic setting by name ("denoise", "strength", "gate", "gate-db",
+    /// "compressor", "makeup"); switches as 0 or 1.
+    callback set-mic(string, float);
+    callback pick-eq-tab(int);
+    callback eq-select(int);
+    callback eq-drag(int, float, float);
+    callback eq-release();
+    callback eq-wheel(int, bool);
+    /// A typed value for the selected band: 0 frequency, 1 gain, 2 Q.
+    callback eq-enter(int, string);
+    callback eq-reset();
+    callback set-preamp(float);
+    callback import-edited();
+    callback import-autoeq();
+    callback load-autoeq();
+}
+
+/// Content that follows the piece above it by the usual gap while `shown`, and
+/// takes no room at all, gap included, while not. Like `Shown`, it measures
+/// wrapped text right where an `if` doesn't.
+component Then {
+    in property <bool> shown: true;
+    in property <length> top: 10px;
+    visible: root.shown;
+    height: root.shown ? inner.preferred-height : 0px;
+    inner := VerticalLayout {
+        padding-top: root.top;
+        spacing: 10px;
+        @children
+    }
+}
+
+/// A slider that, once let go, stays where it was left until the daemon's value
+/// follows (or a second has passed, if it never does): the value it shows is
+/// the daemon's, which is a round trip behind the release.
+component Fader {
+    in property <float> minimum: 0;
+    in property <float> maximum: 100;
+    in property <float> step: 1;
+    in property <float> value;
+    in property <bool> enabled: true;
+    callback released(float);
+    out property <float> shown: s.shown;
+    property <bool> holding;
+    property <float> held;
+    horizontal-stretch: 1;
+    changed value => { root.holding = false; }
+    HorizontalLayout {
+        s := AccentSlider {
+            minimum: root.minimum;
+            maximum: root.maximum;
+            step: root.step;
+            enabled: root.enabled;
+            value: root.holding ? root.held : root.value;
+            released(v) => {
+                root.held = v;
+                root.holding = true;
+                root.released(v);
+            }
+        }
+    }
+    Timer {
+        interval: 1s;
+        running: root.holding;
+        triggered => { root.holding = false; }
+    }
+}
+
+/// The curve, its grid, and a handle per band. Coordinates are in a 640 × 220
+/// picture, scaled to the width.
+component EqView {
+    in property <string> commands;
+    in property <[EqHandle]> handles;
+    in property <float> limit: 12;
+    in property <int> selected: -1;
+    callback pressed(int);
+    callback drag(int, float, float);
+    callback release();
+    callback wheel(int, bool);
+    property <float> scale: root.width / 640px;
+    property <int> held: -1;
+    property <int> hovered: -1;
+    property <int> tipped: root.held >= 0 ? root.held : root.hovered;
+    min-width: 400px;
+    height: root.width * 220 / 640;
+    Rectangle { background: Theme.bg; border-radius: 8px; border-width: 1px; border-color: Theme.line; }
+    // 100 Hz, 1 kHz and 10 kHz; +½, 0 and −½ of the range.
+    for g in [{ x: 164.07, label: "100" }, { x: 358.73, label: "1k" }, { x: 553.4, label: "10k" }] : Rectangle {
+        x: g.x * root.scale * 1px;
+        y: 14 * root.scale * 1px;
+        width: 1px;
+        height: 192 * root.scale * 1px;
+        background: Theme.line;
+        Text { x: 3px; y: parent.height - 2px; text: g.label; color: Theme.text-dim; font-size: 10px; }
+    }
+    for g in [{ y: 62, v: 0.5 }, { y: 110, v: 0 }, { y: 158, v: -0.5 }] : Rectangle {
+        x: 28 * root.scale * 1px;
+        y: g.y * root.scale * 1px;
+        width: 584 * root.scale * 1px;
+        height: 1px;
+        background: g.v == 0 ? Theme.text-dim.with-alpha(0.5) : Theme.line;
+        Text {
+            x: -26 * root.scale * 1px;
+            y: -6px;
+            text: (g.v > 0 ? "+" : "") + round(g.v * root.limit * 10) / 10;
+            color: Theme.text-dim;
+            font-size: 10px;
+        }
+    }
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 640;
+        viewbox-height: 220;
+        commands: root.commands;
+        stroke: Theme.accent;
+        stroke-width: 2px;
+        fill: transparent;
+    }
+    // The model is updated in place, so a handle being dragged stays the same
+    // element (and keeps the pointer) while the curve follows it.
+    for h[i] in root.handles : Rectangle {
+        x: h.x * root.scale * 1px - 8px;
+        y: h.y * root.scale * 1px - 8px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: h.shelf ? Theme.surface-2 : Theme.accent;
+        border-width: 2px;
+        border-color: i == root.held || i == root.selected || t.has-hover ? Theme.text : (h.shelf ? Theme.accent : Theme.surface);
+        t := TouchArea {
+            mouse-cursor: root.held == i ? MouseCursor.grabbing : MouseCursor.grab;
+            changed has-hover => {
+                if self.has-hover {
+                    root.hovered = i;
+                } else if root.hovered == i {
+                    root.hovered = -1;
+                }
+            }
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    root.held = i;
+                    root.pressed(i);
+                } else if e.kind == PointerEventKind.up && root.held == i {
+                    root.held = -1;
+                    root.release();
+                }
+            }
+            moved => {
+                if root.held == i {
+                    root.drag(i, (parent.x + self.mouse-x) / root.scale / 1px, (parent.y + self.mouse-y) / root.scale / 1px);
+                }
+            }
+            scroll-event(e) => {
+                // A sideways scroll isn't a wider or narrower band.
+                if e.delta-y == 0 {
+                    return reject;
+                }
+                root.wheel(i, e.delta-y > 0);
+                accept
+            }
+        }
+    }
+    if root.tipped >= 0 && root.tipped < root.handles.length : Text {
+        x: 34px;
+        y: 6px;
+        text: root.handles[root.tipped].tip;
+        color: Theme.text;
+        font-size: Theme.small;
+    }
+}
+
+/// A number box for the selected band, with its name before and unit after.
+component BandField {
+    in property <string> label;
+    in property <string> unit;
+    in-out property <string> text;
+    in property <length> box: 76px;
+    callback entered(string);
+    HorizontalLayout {
+        spacing: 6px;
+        Text { text: root.label; color: Theme.text-dim; font-size: Theme.font; vertical-alignment: center; }
+        e := LineEdit {
+            width: root.box;
+            text <=> root.text;
+            accepted(t) => { root.entered(t); }
+            changed has-focus => {
+                if !self.has-focus { root.entered(self.text); }
+            }
+        }
+        if root.unit != "" : Text { text: root.unit; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; }
+    }
+}
+
+export component SonarPanel inherits Card {
+    // Normally the state comes with the connection; if that read failed, keep
+    // asking while this waits for it.
+    Timer {
+        interval: 4s;
+        running: !SonarUi.known;
+        triggered => { SonarUi.load(); }
+    }
+    VerticalLayout {
+        Then { shown: !SonarUi.known; top: 0; Hint { text: "Loading…"; } }
+        Then { shown: SonarUi.known && !SonarUi.available; top: 0; Hint { text: "PipeWire isn't reachable, so Sonar can't run."; } }
+        Then { shown: SonarUi.known && SonarUi.available; top: 0;
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    spacing: 3px;
+                    Title { text: "Sonar"; }
+                    Hint { text: SonarUi.enabled ? "Channels are live. Apps are routed by the rules below." : "Off. Your apps play straight to your default output."; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    Button {
+                        primary: true;
+                        text: SonarUi.busy == "enable" ? "Restarting PipeWire…" : SonarUi.enabled ? "Turn off" : "Turn on";
+                        enabled: SonarUi.busy == "";
+                        clicked => { SonarUi.toggle(); }
+                    }
+                }
+            }
+            Hint { text: "Turning Sonar on or off restarts PipeWire: a second or two of silence."; }
+            Row {
+                label: "Output";
+                ComboBox {
+                    model: SonarUi.outputs;
+                    current-index <=> SonarUi.output;
+                    enabled: SonarUi.busy == "" && SonarUi.outputs.length > 0;
+                    selected => { SonarUi.pick-output(self.current-index); }
+                }
+            }
+            Then { shown: SonarUi.enabled;
+                Divider { }
+                Head { text: "CHANNELS"; }
+                for c[i] in SonarUi.channels : Row {
+                    label: c.name;
+                    level := Fader {
+                        value: c.volume < 0 ? 100 : round(c.volume * 100);
+                        enabled: c.present && SonarUi.busy == "";
+                        released(v) => { SonarUi.set-volume(i, v / 100); }
+                    }
+                    Unit { text: !c.present ? "missing" : c.volume < 0 ? "–" : round(level.shown) + "%"; }
+                }
+
+                Divider { }
+                VerticalLayout {
+                    Head { text: "SMART VOLUME"; }
+                    Then { shown: !SonarUi.smart-available; Hint { text: SonarUi.smart-reason == "" ? "Smart Volume isn't available." : SonarUi.smart-reason; } }
+                    Then { shown: SonarUi.smart-available;
+                        for c[i] in SonarUi.channels : Row {
+                            label: c.name;
+                            Toggle { text: "On"; checked: c.smart; toggled(v) => { SonarUi.set-smart-on(i, v); } }
+                            Segmented { options: ["Quiet", "Balanced", "Loud"]; current: c.level; enabled: c.smart; picked(l) => { SonarUi.set-smart-level(i, l); } }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        Hint { text: "Evens out a channel's loudness: quiet sounds come up, loud ones are held down. Switching is instant."; }
+                    }
+                }
+
+                Divider { }
+                Head { text: "STREAMER MODE"; state: SonarUi.busy == "streamer" ? "Restarting PipeWire…" : ""; }
+                Toggle { text: "A separate mix for your stream"; checked: SonarUi.stream; enabled: SonarUi.busy == ""; toggled(v) => { SonarUi.set-streamer(v); } }
+                VerticalLayout {
+                    Hint { text: "Turning this on or off restarts PipeWire: a second or two of silence."; }
+                    Then { shown: SonarUi.stream;
+                        if !SonarUi.stream-present : Text { text: "PipeWire hasn't created the stream device yet."; color: Theme.danger; font-size: Theme.small; }
+                        for c[i] in SonarUi.channels : Row {
+                            label: c.name;
+                            mix := Fader { value: round(c.stream * 100); released(v) => { SonarUi.set-stream-volume(i, v / 100); } }
+                            Unit { text: round(mix.shown) + "%"; }
+                        }
+                        Row {
+                            label: "Master";
+                            master := Fader { value: round(SonarUi.stream-master * 100); released(v) => { SonarUi.set-stream-master(v / 100); } }
+                            Unit { text: round(master.shown) + "%"; }
+                        }
+                        Hint { text: "In OBS, add an Audio Output Capture of \"Monitor of gglinux Stream\"."; }
+                    }
+                }
+
+                Divider { }
+                Head {
+                    text: "CHATMIX";
+                    Button { text: "Centre"; small: true; enabled: SonarUi.busy == ""; clicked => { SonarUi.set-chatmix(0); } }
+                }
+                Row {
+                    label: "Game";
+                    Fader { minimum: -100; maximum: 100; step: 5; value: round(SonarUi.chatmix * 100); enabled: SonarUi.busy == ""; released(v) => { SonarUi.set-chatmix(v / 100); } }
+                    Unit { text: "Chat"; }
+                }
+
+                Divider { }
+                VerticalLayout {
+                    Head { text: "APPS"; }
+                    Then { shown: SonarUi.apps.length == 0; Hint { text: "No app is playing audio right now."; } }
+                    Then { shown: SonarUi.apps.length > 0;
+                        for a[i] in SonarUi.apps : Row {
+                            label: a.name;
+                            label-width: 200px;
+                            Segmented { options: SonarUi.channel-names; current: a.channel; enabled: a.routable && SonarUi.busy == ""; picked(c) => { SonarUi.set-app(i, c); } }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        Hint { text: "A change applies now and is remembered for that app."; }
+                    }
+                }
+
+                Divider { }
+                VerticalLayout {
+                    Head { text: "MICROPHONE"; state: SonarUi.mic-present ? "gglinux Mic is your default input" : ""; }
+                    Then { shown: !SonarUi.mic-available; Hint { text: "Install noise-suppression-for-voice and swh-plugins for noise suppression, a gate and a compressor on your mic, then turn Sonar off and on."; } }
+                    Then { shown: SonarUi.mic-available;
+                        Row {
+                            label: "Input";
+                            ComboBox {
+                                model: SonarUi.mic-inputs;
+                                current-index <=> SonarUi.mic-input;
+                                enabled: SonarUi.mic-inputs.length > 0;
+                                selected => { SonarUi.pick-mic-input(self.current-index); }
+                            }
+                        }
+                        Row {
+                            label: "Volume";
+                            mic-level := Fader { value: SonarUi.mic-volume < 0 ? 100 : round(SonarUi.mic-volume * 100); enabled: SonarUi.mic-present; released(x) => { SonarUi.set-mic-volume(x / 100); } }
+                            Unit { text: SonarUi.mic-volume < 0 ? "–" : round(mic-level.shown) + "%"; }
+                        }
+                        Toggle { text: "Noise suppression"; checked: SonarUi.denoise; toggled(on) => { SonarUi.set-mic("denoise", on ? 1 : 0); } }
+                        Row {
+                            label: "Strength";
+                            strength := Fader { maximum: 95; step: 5; value: SonarUi.strength; enabled: SonarUi.denoise; released(x) => { SonarUi.set-mic("strength", x); } }
+                            Unit { text: round(strength.shown) + "%"; }
+                        }
+                        Toggle { text: "Noise gate"; checked: SonarUi.gate; toggled(on) => { SonarUi.set-mic("gate", on ? 1 : 0); } }
+                        Row {
+                            label: "Opens at";
+                            opens := Fader { minimum: -80; maximum: -10; value: SonarUi.gate-db; enabled: SonarUi.gate; released(x) => { SonarUi.set-mic("gate-db", x); } }
+                            Unit { text: round(opens.shown) + " dB"; }
+                        }
+                        Toggle { text: "Compressor"; checked: SonarUi.compressor; toggled(on) => { SonarUi.set-mic("compressor", on ? 1 : 0); } }
+                        Row {
+                            label: "Makeup";
+                            makeup := Fader { maximum: 18; value: SonarUi.makeup; enabled: SonarUi.compressor; released(x) => { SonarUi.set-mic("makeup", x); } }
+                            Unit { text: "+" + round(makeup.shown) + " dB"; }
+                        }
+                    }
+                }
+
+                Divider { }
+                Head {
+                    text: "EQUALIZER";
+                    Button { text: "Reset gains"; small: true; clicked => { SonarUi.eq-reset(); } }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Segmented { options: ["Game", "Chat", "Media", "Aux", "Headphone"]; current: SonarUi.eq-tab; picked(i) => { SonarUi.pick-eq-tab(i); } }
+                }
+                EqView {
+                    commands: SonarUi.eq-path;
+                    handles: SonarUi.eq-handles;
+                    limit: SonarUi.eq-limit;
+                    selected: SonarUi.eq-band;
+                    pressed(i) => { SonarUi.eq-select(i); }
+                    drag(i, x, y) => { SonarUi.eq-drag(i, x, y); }
+                    release => { SonarUi.eq-release(); }
+                    wheel(i, up) => { SonarUi.eq-wheel(i, up); }
+                }
+                if SonarUi.eq-band >= 0 : HorizontalLayout {
+                    spacing: 18px;
+                    alignment: start;
+                    Text { text: SonarUi.eq-band-name; color: Theme.text; font-size: Theme.font; vertical-alignment: center; }
+                    BandField { label: "Frequency"; unit: "Hz"; text <=> SonarUi.eq-freq; entered(t) => { SonarUi.eq-enter(0, t); } }
+                    BandField { label: "Gain"; unit: "dB"; box: 64px; text <=> SonarUi.eq-gain; entered(t) => { SonarUi.eq-enter(1, t); } }
+                    BandField { label: "Q"; box: 64px; text <=> SonarUi.eq-q; entered(t) => { SonarUi.eq-enter(2, t); } }
+                }
+                VerticalLayout {
+                    Hint { text: "Drag a point to move it; scroll over it to change its width (Q). Click one to type its values."; }
+                    Then { shown: SonarUi.eq-tab == 4;
+                        Row {
+                            label: "Preamp";
+                            Fader { minimum: -20; maximum: 20; step: 0.5; value: SonarUi.preamp; released(v) => { SonarUi.set-preamp(v); } }
+                            Unit { text: SonarUi.preamp-text; }
+                        }
+                        Hint { text: "Correction for " + (SonarUi.headphone == "" ? "your headphones" : SonarUi.headphone) + ", applied to every channel."; }
+                        TextEdit {
+                            height: 110px;
+                            font-size: 12px;
+                            placeholder-text: "Paste an AutoEQ ParametricEQ.txt (Preamp: … / Filter 1: ON PK Fc … )";
+                            text <=> SonarUi.import-text;
+                            edited => { SonarUi.import-edited(); }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            LineEdit { placeholder-text: "Headphone name (optional)"; text <=> SonarUi.import-name; }
+                            Button { text: "Open a file…"; horizontal-stretch: 0; enabled: SonarUi.busy == ""; clicked => { SonarUi.load-autoeq(); } }
+                            Button {
+                                text: SonarUi.busy == "import" ? "Importing…" : "Import AutoEQ";
+                                horizontal-stretch: 0;
+                                enabled: SonarUi.busy == "" && SonarUi.import-ready;
+                                clicked => { SonarUi.import-autoeq(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Then { shown: SonarUi.error != ""; ErrorLine { text: SonarUi.error; } }
+    }
+}

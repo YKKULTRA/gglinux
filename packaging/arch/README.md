@@ -23,16 +23,16 @@ The user still runs `systemctl --user enable --now gglinuxd` (the install messag
 
 ## Notes on the PKGBUILD
 
-- **Network only in `prepare()`.** `cargo fetch` (for both cargo projects) and `npm ci` run there;
-  `build()` and `check()` use `--frozen`, following the Arch
-  [Rust](https://wiki.archlinux.org/title/Rust_package_guidelines) and
-  [Node.js](https://wiki.archlinux.org/title/Node.js_package_guidelines) package guidelines.
+- **Network only in `prepare()`.** `cargo fetch` runs there; `build()` and `check()` use
+  `--frozen`, following the Arch [Rust](https://wiki.archlinux.org/title/Rust_package_guidelines)
+  package guidelines. The app is part of the same cargo workspace, so there's one fetch and one
+  build.
 - **`options=('!lto')` is required.** The `hidapi` crate compiles its bundled C library with the
   `CFLAGS` makepkg exports. With makepkg's default `lto` option those objects become GCC LTO
   bitcode, which the Rust linker can't use, and `gglinuxd` fails to link with undefined `hid_read`,
   `hid_write`, and so on. This was reproduced with a stock `makepkg.conf` in an `archlinux`
   container.
-- `check()` runs the daemon workspace's tests in release mode.
+- `check()` runs the workspace's tests (the daemon's and the app's) in release mode.
 - `arch=('x86_64')` only: no other architecture has been built.
 
 ## Testing a change to the PKGBUILD

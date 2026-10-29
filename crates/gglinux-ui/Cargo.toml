@@ -1,0 +1,42 @@
+[package]
+name = "gglinux"
+description = "gglinux desktop app: a native client of gglinuxd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# Slint 1.18 needs a newer compiler than the daemon does.
+rust-version = "1.92"
+
+[[bin]]
+name = "gglinux"
+path = "src/main.rs"
+
+[dependencies]
+gg-ipc = { path = "../gg-ipc" }
+slint = { version = "1.18", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+    "software-renderer-systemfonts",
+    "accessibility",
+] }
+serde_json.workspace = true
+libc.workspace = true
+tokio = { workspace = true }
+# The desktop's file chooser, through its portal.
+ashpd = { workspace = true, features = ["file_chooser"] }
+# One copy at a time, over the session bus.
+zbus = { workspace = true, features = ["tokio"] }
+# The tray icon (StatusNotifierItem: Plasma, Waybar, ...).
+ksni = "0.3"
+# Pictures for the keyboard's screen.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+
+[dev-dependencies]
+
+[build-dependencies]
+slint-build = "1.18"

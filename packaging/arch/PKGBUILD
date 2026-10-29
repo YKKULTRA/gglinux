@@ -6,17 +6,21 @@ pkgdesc="Open-source SteelSeries GG for Linux: lighting, headset, Sonar-style au
 arch=('x86_64')
 url="https://github.com/YKKULTRA/gglinux"
 license=('GPL-3.0-or-later')
-# Linked: glibc and libgcc (all binaries), systemd-libs (libudev, for the daemon), the rest (the app).
-# Run, not linked: libayatana-appindicator (loaded for the tray), pipewire and wireplumber (the
-# pw-* tools and wpctl), xdg-utils (xdg-open).
-depends=('glibc' 'libgcc' 'systemd-libs'
-         'webkit2gtk-4.1' 'gtk3' 'glib2' 'gdk-pixbuf2' 'cairo' 'libsoup3' 'dbus' 'hicolor-icon-theme'
-         'libayatana-appindicator' 'pipewire' 'wireplumber' 'xdg-utils')
-makedepends=('git' 'cargo' 'nodejs' 'npm')
+# Linked: glibc and libgcc (all binaries), systemd-libs (libudev, for the daemon), fontconfig (the
+# app's fonts). Loaded by the app at run time, not linked: wayland and libxkbcommon (or libx11 on
+# X11), libglvnd (EGL/OpenGL for drawing). Run, not linked: pipewire and wireplumber (the pw-*
+# tools and wpctl), xdg-utils (xdg-open). The tray and the one-copy guard talk to the session bus
+# themselves.
+depends=('glibc' 'libgcc' 'systemd-libs' 'fontconfig'
+         'wayland' 'libxkbcommon' 'libglvnd' 'hicolor-icon-theme'
+         'pipewire' 'wireplumber' 'xdg-utils')
+makedepends=('git' 'cargo')
 optdepends=('noise-suppression-for-voice: noise suppression for the Sonar microphone'
             'swh-plugins: compressor for the Sonar microphone and Smart Volume'
             'gpu-screen-recorder: instant-replay clips'
-            'xdg-desktop-portal: clip hotkey and screen capture, with a backend like xdg-desktop-portal-kde')
+            'xdg-desktop-portal: the clip hotkey, screen capture and file dialogs, with a backend like xdg-desktop-portal-kde'
+            'libx11: the app on an X11 session'
+            'libxcursor: cursors on an X11 session')
 provides=('gglinux')
 conflicts=('gglinux')
 # makepkg's LTO flags make hidapi's bundled C code GCC LTO bitcode, which the Rust linker
@@ -38,20 +42,14 @@ prepare() {
   local host
   host="$(rustc -vV | sed -n 's/^host: //p')"
   cargo fetch --locked --target "$host"
-  cargo fetch --locked --target "$host" --manifest-path ui/src-tauri/Cargo.toml
-  cd ui
-  npm ci
 }
 
 build() {
   cd gglinux
   export RUSTUP_TOOLCHAIN=stable
-  # The daemon and ggctl; the UI is its own cargo project, built by the Tauri CLI. Each builds
-  # into its own target/, where package() looks, even if CARGO_TARGET_DIR or a cargo config
-  # names another target dir.
-  CARGO_TARGET_DIR="$PWD/target" cargo build --release --frozen -p gglinuxd --bins
-  cd ui
-  CARGO_TARGET_DIR="$PWD/src-tauri/target" npm run tauri build -- --no-bundle -- --frozen
+  # The daemon, ggctl and the app, into the checkout's target/, where package() looks, even if
+  # CARGO_TARGET_DIR or a cargo config names another target dir.
+  CARGO_TARGET_DIR="$PWD/target" cargo build --release --frozen -p gglinuxd -p gglinux --bins
 }
 
 check() {
@@ -64,7 +62,7 @@ package() {
   cd gglinux
   install -Dm755 target/release/gglinuxd "$pkgdir/usr/bin/gglinuxd"
   install -Dm755 target/release/ggctl "$pkgdir/usr/bin/ggctl"
-  install -Dm755 ui/src-tauri/target/release/gglinux "$pkgdir/usr/bin/gglinux"
+  install -Dm755 target/release/gglinux "$pkgdir/usr/bin/gglinux"
   # The unit in the repo runs ~/.local/bin/gglinuxd, where install-local.sh puts it.
   sed 's|^ExecStart=.*|ExecStart=/usr/bin/gglinuxd|' data/systemd/gglinuxd.service \
     | install -Dm644 /dev/stdin "$pkgdir/usr/lib/systemd/user/gglinuxd.service"
@@ -74,6 +72,6 @@ package() {
   # Named after the app id: the desktop portal finds gglinux by it (the clip hotkey).
   sed 's|^Exec=.*|Exec=/usr/bin/gglinux|' data/io.github.ykk.gglinux.desktop \
     | install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/io.github.ykk.gglinux.desktop"
-  install -Dm644 ui/src-tauri/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/gglinux.png"
+  install -Dm644 data/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/gglinux.png"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

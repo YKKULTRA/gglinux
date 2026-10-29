@@ -7,6 +7,19 @@
 //! fakemouse --charging
 //! fakemouse --fail set_mouse_dpi  # make one method return an error
 //! fakemouse --no-mouse            # keyboard + headset only
+//! fakemouse --sonar off           # Sonar off; also `unavailable` (no PipeWire) and
+//!                                 # `bare` (no plugins, no apps, a missing channel)
+//! ```
+//!
+//! States for the Engine page (any mix; see `Looks`):
+//!
+//! ```text
+//! fakemouse --no-mouse --no-headset --no-keyboard  # no devices at all
+//! fakemouse --asleep              # the mouse reports no battery
+//! fakemouse --headset off         # or charging / unknown: where the headset is
+//! fakemouse --no-spare            # no spare battery in the base station
+//! fakemouse --base-closed         # base station listed but not open
+//! fakemouse --reported            # base-station readings filled in, screen dark
 //! ```
 //!
 //! Two things this buys that the real daemon cannot:
@@ -30,12 +43,12 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_device_keyboard::layout::ANSI_TKL;
 use gg_ipc::{
-    AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, ClipInfo,
-    ClipsState, DeviceInfo, DeviceKind, EqBand, Event, GameInfo, GameSenseState, HeadphoneEq,
-    HeadsetChange, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyInfo,
-    KeyboardState, Lighting, MicSettings, MicState, MouseDpi, MouseSettings, MouseState, Parts,
-    ProfilesState, ReactiveStatus, Request, RequestFrame, ResponseData, ScreenSettings,
-    ServerMessage, SmartVolume, SmartVolumeState, SonarState, StreamMix,
+    AppStream, AudioDevice, BatteryState, Channel, ChannelEq, ChannelState, ClipInfo, ClipsState,
+    DeviceInfo, DeviceKind, Event, GameInfo, GameSenseState, HeadsetChange, HeadsetControls,
+    HeadsetPower, HeadsetState, InterfaceInfo, KeyInfo, KeyboardState, Lighting, MicSettings,
+    MicState, MouseDpi, MouseSettings, MouseState, Parts, ProfilesState, ReactiveStatus, Request,
+    RequestFrame, ResponseData, ScreenSettings, ServerMessage, SmartVolume, SmartVolumeState,
+    SonarState, StreamMix,
 };
 
 /// How often to push a `mouse_battery` notification.
@@ -64,6 +77,7 @@ struct Fake {
     /// Which parts run; set from the client, refused as the daemon refuses, but no
     /// restart: a change applies at once.
     parts: Parts,
+    looks: Looks,
 }
 
 fn main() -> Result<()> {
@@ -81,6 +95,7 @@ fn main() -> Result<()> {
         .context("--battery")?;
     let charging = flag("--charging");
     let with_mouse = !flag("--no-mouse");
+    let looks = Looks::from_args(&args)?;
 
     let path = gg_ipc::socket_path();
     // Never shadow a real daemon: if anything answers on this path, a client that
@@ -99,10 +114,10 @@ fn main() -> Result<()> {
         UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
 
     let state = Arc::new(Mutex::new(Fake {
-        battery: Some(BatteryState { level, charging }),
+        battery: (!flag("--asleep")).then_some(BatteryState { level, charging }),
         applied: None,
         screen: ScreenSettings::default(),
-        controls: HeadsetControls::default(),
+        controls: looks.controls(),
         sonar: fake_sonar(),
         keyboard: fake_keyboard(),
         gamesense: GameSenseState::default(),
@@ -117,10 +132,14 @@ fn main() -> Result<()> {
             }],
             ..ClipsState::default()
         },
-        devices: devices(with_mouse),
+        devices: looks.listed(devices(with_mouse)),
         fail: value("--fail"),
         parts: Parts::default(),
+        looks,
     }));
+    if let Some(variant) = value("--sonar") {
+        sonar_variant(&mut state.lock().unwrap().sonar, &variant)?;
+    }
 
     eprintln!("fakemouse listening on {}", path.display());
     eprintln!(
@@ -200,11 +219,22 @@ fn serve(stream: UnixStream, state: Arc<Mutex<Fake>>) -> Result<()> {
             }
         };
         eprintln!("<< {}", describe(&frame.req));
+        // The daemon publishes Sonar's state whenever it changes.
+        let sonar_change = frame.req.part() == Some(gg_ipc::Part::Sonar)
+            && !matches!(frame.req, Request::GetSonarState);
         let result = handle(frame.req, &state);
         if let ResponseData::Error { message } = &result {
             eprintln!(">>   error: {message}");
         }
+        let changed = sonar_change && matches!(result, ResponseData::Success);
         send(&writer, ServerMessage::response(frame.id, result))?;
+        if changed {
+            let state = state.lock().unwrap().sonar.clone();
+            send(
+                &writer,
+                ServerMessage::notify(Event::SonarChanged { state }),
+            )?;
+        }
     }
     eprintln!("-- client disconnected");
     Ok(())
@@ -272,6 +302,10 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
         },
         Request::SetSonarEnabled { enabled } => {
             s.sonar.enabled = enabled;
+            // The daemon picks the default output when it has none yet.
+            if enabled && s.sonar.output.is_none() {
+                s.sonar.output = s.sonar.outputs.first().map(|o| o.name.clone());
+            }
             ResponseData::Success
         }
         Request::SetSonarOutput { name } => {
@@ -309,10 +343,15 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.sonar.headphone = eq;
             ResponseData::Success
         }
-        Request::ImportAutoEq { name, .. } => {
-            s.sonar.headphone.name = name;
-            ResponseData::Success
-        }
+        // Parsed as the daemon parses it, so a bad paste fails the same way.
+        Request::ImportAutoEq { text, name } => match gg_audio::eq::parse_autoeq(&text) {
+            Ok(mut eq) => {
+                eq.name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+                s.sonar.headphone = eq;
+                ResponseData::Success
+            }
+            Err(e) => error(format!("{e:#}")),
+        },
         Request::SetMicInput { name } => {
             s.sonar.mic.input = Some(name);
             ResponseData::Success
@@ -498,15 +537,8 @@ fn mouse_state(s: &Fake) -> MouseState {
 }
 
 fn headset_state(s: &Fake) -> HeadsetState {
-    HeadsetState {
-        connected: s.devices.iter().any(|d| d.kind == DeviceKind::Headset),
-        power: HeadsetPower::Online,
-        headset_battery: Some(75),
-        spare_battery: Some(100),
-        screen: s.screen,
-        screen_dark: false,
-        controls: s.controls.clone(),
-    }
+    let listed = s.devices.iter().any(|d| d.kind == DeviceKind::Headset);
+    s.looks.headset_state(listed, s.screen, &s.controls)
 }
 
 /// A plausible Sonar: on, two outputs, two apps.
@@ -552,14 +584,10 @@ fn fake_sonar() -> SonarState {
             .iter()
             .map(|&channel| ChannelEq {
                 channel,
-                bands: fake_bands(10),
+                bands: gg_audio::eq::flat_channel(),
             })
             .collect(),
-        headphone: HeadphoneEq {
-            preamp: 0.0,
-            bands: fake_bands(12),
-            name: None,
-        },
+        headphone: gg_audio::eq::flat_headphone(),
         mic: MicState {
             available: true,
             present: true,
@@ -611,22 +639,33 @@ fn fake_keyboard() -> KeyboardState {
     }
 }
 
-/// Flat bands shaped like the daemon's: a low shelf, peaks, a high shelf.
-fn fake_bands(n: usize) -> Vec<EqBand> {
-    (0..n)
-        .map(|i| EqBand {
-            kind: if i == 0 {
-                BandKind::LowShelf
-            } else if i == n - 1 {
-                BandKind::HighShelf
-            } else {
-                BandKind::Peaking
-            },
-            freq: 31.25 * 2f32.powi(i as i32),
-            q: 1.0,
-            gain: 0.0,
-        })
-        .collect()
+/// Sonar in one of the states the Sonar page has to show (`--sonar`).
+fn sonar_variant(s: &mut SonarState, variant: &str) -> Result<()> {
+    match variant {
+        "off" => {
+            s.enabled = false;
+            s.output = None;
+        }
+        "unavailable" => s.available = false,
+        // Sonar on, but without the optional plugins, any app playing, or the Aux sink.
+        "bare" => {
+            s.apps.clear();
+            s.channels[3].present = false;
+            s.channels[3].volume = None;
+            s.mic.available = false;
+            s.mic.present = false;
+            s.smart_volume.available = false;
+            s.smart_volume.reason = Some(
+                "Smart Volume needs the SC4 compressor from swh-plugins (sc4m_1916.so), \
+                 which isn't installed. Install swh-plugins, then turn Sonar off and on."
+                    .into(),
+            );
+            s.stream.enabled = true;
+            s.stream.present = false;
+        }
+        other => bail!("--sonar {other}: expected off, unavailable or bare"),
+    }
+    Ok(())
 }
 
 /// Echo a change into the fake's controls, as the real device would report it.
@@ -810,6 +849,112 @@ fn devices(with_mouse: bool) -> Vec<DeviceInfo> {
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+// --- states for the Engine page --------------------------------------------------
+
+/// How the fake's devices look, beyond the defaults, so the Engine page's states
+/// can be drawn: devices missing, a sleeping mouse, a headset off or a base
+/// station not open. Flags in the module docs; none of them changes a default.
+#[derive(Debug, Clone, Copy)]
+struct Looks {
+    headset: bool,
+    keyboard: bool,
+    power: HeadsetPower,
+    spare: bool,
+    base_closed: bool,
+    /// The readings a real base station sends every second, not left unknown.
+    reported: bool,
+}
+
+impl Looks {
+    fn from_args(args: &[String]) -> Result<Looks> {
+        let flag = |name: &str| args.iter().any(|a| a == name);
+        let power = match args
+            .iter()
+            .position(|a| a == "--headset")
+            .map(|i| args.get(i + 1).map(String::as_str))
+        {
+            None => HeadsetPower::Online,
+            Some(Some("online" | "on")) => HeadsetPower::Online,
+            Some(Some("charging")) => HeadsetPower::Charging,
+            Some(Some("offline" | "off")) => HeadsetPower::Offline,
+            Some(Some("unknown")) => HeadsetPower::Unknown,
+            Some(other) => bail!("--headset {other:?}: online, charging, off or unknown"),
+        };
+        Ok(Looks {
+            headset: !flag("--no-headset"),
+            keyboard: !flag("--no-keyboard"),
+            power,
+            spare: !flag("--no-spare"),
+            base_closed: flag("--base-closed"),
+            reported: flag("--reported"),
+        })
+    }
+
+    fn listed(&self, devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+        devices
+            .into_iter()
+            .filter(|d| match d.kind {
+                DeviceKind::Headset => self.headset,
+                DeviceKind::Keyboard => self.keyboard,
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// The headset's settings at start.
+    fn controls(&self) -> HeadsetControls {
+        if !self.reported {
+            return HeadsetControls::default();
+        }
+        HeadsetControls {
+            noise_mode: Some(gg_ipc::NoiseMode::Anc),
+            transparency: Some(5),
+            mic_led: Some(7),
+            mic_muted: Some(false),
+            auto_off_minutes: Some(30),
+            radio_mode: Some(gg_ipc::RadioMode::Speed),
+            ..HeadsetControls::default()
+        }
+    }
+
+    /// As the daemon builds it: no readings at all from a base station that
+    /// isn't open, and no headset battery while it's off.
+    fn headset_state(
+        &self,
+        listed: bool,
+        screen: ScreenSettings,
+        controls: &HeadsetControls,
+    ) -> HeadsetState {
+        let connected = listed && !self.base_closed;
+        let power = if connected {
+            self.power
+        } else {
+            HeadsetPower::Unknown
+        };
+        let controls = if connected {
+            controls.clone()
+        } else {
+            HeadsetControls {
+                sidetone: controls.sidetone,
+                mic_volume: controls.mic_volume,
+                eq_preset: controls.eq_preset,
+                eq_bands: controls.eq_bands.clone(),
+                ..HeadsetControls::default()
+            }
+        };
+        HeadsetState {
+            connected,
+            power,
+            headset_battery: matches!(power, HeadsetPower::Online | HeadsetPower::Charging)
+                .then_some(75),
+            spare_battery: (connected && self.spare).then_some(100),
+            screen,
+            screen_dark: connected && self.reported && screen.protect,
+            controls,
+        }
+    }
 }
 
 #[cfg(test)]

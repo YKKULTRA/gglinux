@@ -7,4 +7,4 @@ Exec=gglinux
 Icon=gglinux
 Terminal=false
 Categories=Settings;HardwareSettings;
-StartupWMClass=gglinux
+StartupWMClass=io.github.ykk.gglinux
