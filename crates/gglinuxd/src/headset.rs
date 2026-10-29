@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Headset worker: the Arctis Nova Pro Wireless base station.
 //!
 //! Like the mouse, all device I/O happens on one dedicated OS thread, because
@@ -39,9 +40,15 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 pub enum Command {
     GetState(Reply<HeadsetState>),
-    SetScreen { settings: ScreenSettings, reply: Reply<()> },
+    SetScreen {
+        settings: ScreenSettings,
+        reply: Reply<()>,
+    },
     /// Apply one setting and save it on the base station.
-    SetControl { change: HeadsetChange, reply: Reply<()> },
+    SetControl {
+        change: HeadsetChange,
+        reply: Reply<()>,
+    },
     /// Leave the screen dark and stop. Replies once the device has been told.
     Shutdown(Reply<()>),
 }
@@ -254,7 +261,9 @@ fn read_event(state: &mut State) -> Option<Vec<u8>> {
 /// Status, volume, and any events that arrived around them.
 fn poll(state: &mut State) {
     state.last_poll = Some(Instant::now());
-    let Some(device) = state.device.as_ref() else { return };
+    let Some(device) = state.device.as_ref() else {
+        return;
+    };
     let polled = match device.poll() {
         Ok(p) => p,
         Err(e) => {
@@ -269,7 +278,10 @@ fn poll(state: &mut State) {
 
     let now = Instant::now();
     if let Some(next) = polled.status {
-        if let Some(reason) = state.status.and_then(|prev| wake::wake_reason(&prev, &next)) {
+        if let Some(reason) = state
+            .status
+            .and_then(|prev| wake::wake_reason(&prev, &next))
+        {
             debug!(?reason, "status change lights the screen");
             let action = state.screen.on(Input::OurEvent, now);
             perform(state, action);
@@ -307,7 +319,9 @@ fn on_report(state: &mut State, report: &[u8]) {
 /// Carry out a policy action. A failed write drops the device; the policy
 /// re-syncs the screen through `DeviceOpened` when it comes back.
 fn perform(state: &mut State, action: Option<Action>) {
-    let (Some(action), Some(device)) = (action, state.device.as_ref()) else { return };
+    let (Some(action), Some(device)) = (action, state.device.as_ref()) else {
+        return;
+    };
     let result = match action {
         Action::Blank => device.oled_blank(),
         Action::ShowStock => device.oled_show_stock(),
@@ -354,12 +368,18 @@ fn snapshot(state: &State) -> HeadsetState {
         screen: state.settings,
         screen_dark: connected && state.screen.is_dark(),
         controls: HeadsetControls {
-            noise_mode: status.and_then(|s| s.noise_mode()).map(controls::noise_mode),
-            transparency: status.map(|s| s.transparency_raw).filter(|v| (1..=10).contains(v)),
+            noise_mode: status
+                .and_then(|s| s.noise_mode())
+                .map(controls::noise_mode),
+            transparency: status
+                .map(|s| s.transparency_raw)
+                .filter(|v| (1..=10).contains(v)),
             mic_led: status.map(|s| s.mic_led_brightness),
             mic_muted: status.and_then(|s| s.mic_muted()),
             auto_off_minutes: status.and_then(|s| s.auto_off).map(|a| a.minutes()),
-            radio_mode: status.and_then(|s| s.wireless_mode).map(controls::radio_mode),
+            radio_mode: status
+                .and_then(|s| s.wireless_mode)
+                .map(controls::radio_mode),
             sidetone: state.written.sidetone,
             mic_volume: state.written.mic_volume,
             eq_preset: state.written.eq_preset,

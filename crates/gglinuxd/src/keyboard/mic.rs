@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Watches whether the default microphone is muted, for the mute light.
 
 use std::process::Command as Process;
@@ -57,7 +58,10 @@ impl Watch {
                 }
             })
             .expect("spawn gg-mic thread");
-        Watch { stop, thread: Some(thread) }
+        Watch {
+            stop,
+            thread: Some(thread),
+        }
     }
 }
 
@@ -97,7 +101,11 @@ mod tests {
     #[test]
     fn the_state_is_sent_once_then_only_on_change() {
         let (tx, rx) = mpsc::channel();
-        let _w = Watch::start(argv(&["echo", "Volume: 0.40 [MUTED]"]), Duration::from_millis(50), tx);
+        let _w = Watch::start(
+            argv(&["echo", "Volume: 0.40 [MUTED]"]),
+            Duration::from_millis(50),
+            tx,
+        );
         assert_eq!(next(&rx), Some(true));
         assert_eq!(next(&rx), None, "polled again, unchanged: nothing sent");
     }

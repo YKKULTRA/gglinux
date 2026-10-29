@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Packet construction for the Rival 3 Wireless Gen 2.
 //!
 //! Pure functions over bytes — no I/O — so the wire format is unit-testable without
@@ -403,12 +404,30 @@ mod tests {
 
     #[test]
     fn button_actions_parse_by_name() {
-        assert_eq!(ButtonAction::parse("Button3").unwrap(), ButtonAction::Button(3));
-        assert_eq!(ButtonAction::parse("  DPI ").unwrap(), ButtonAction::DpiCycle);
-        assert_eq!(ButtonAction::parse("disabled").unwrap(), ButtonAction::Disable);
-        assert_eq!(ButtonAction::parse("scrolldn").unwrap(), ButtonAction::ScrollDown);
-        assert!(matches!(ButtonAction::parse("vol+"), Ok(ButtonAction::Multimedia(_))));
-        assert!(matches!(ButtonAction::parse("esc"), Ok(ButtonAction::Key(_))));
+        assert_eq!(
+            ButtonAction::parse("Button3").unwrap(),
+            ButtonAction::Button(3)
+        );
+        assert_eq!(
+            ButtonAction::parse("  DPI ").unwrap(),
+            ButtonAction::DpiCycle
+        );
+        assert_eq!(
+            ButtonAction::parse("disabled").unwrap(),
+            ButtonAction::Disable
+        );
+        assert_eq!(
+            ButtonAction::parse("scrolldn").unwrap(),
+            ButtonAction::ScrollDown
+        );
+        assert!(matches!(
+            ButtonAction::parse("vol+"),
+            Ok(ButtonAction::Multimedia(_))
+        ));
+        assert!(matches!(
+            ButtonAction::parse("esc"),
+            Ok(ButtonAction::Key(_))
+        ));
         assert!(ButtonAction::parse("button9").is_err());
         assert!(ButtonAction::parse("nonsense").is_err());
     }
@@ -418,11 +437,17 @@ mod tests {
         // The reply actually observed from the hardware.
         assert_eq!(
             decode_battery(&[0x10, 0x00, 0x00]),
-            Some(Battery { level: 16, charging: false })
+            Some(Battery {
+                level: 16,
+                charging: false
+            })
         );
         assert_eq!(
             decode_battery(&[0x64, 0x00, 0x01]),
-            Some(Battery { level: 100, charging: true })
+            Some(Battery {
+                level: 100,
+                charging: true
+            })
         );
         assert_eq!(decode_battery(&[0x00, 0, 0]), None, "0 means asleep");
         assert_eq!(decode_battery(&[0xFF, 0, 0]), None, "out of range");

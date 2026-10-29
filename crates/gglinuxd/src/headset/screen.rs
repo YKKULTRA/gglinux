@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! When the base-station screen should be lit.
 //!
 //! Pure: no device access, and the clock is passed in, so every rule here is
@@ -62,7 +63,9 @@ impl Screen {
     pub fn new(settings: &ScreenSettings, now: Instant) -> Self {
         let lit_for = lit_duration(settings);
         let mode = if settings.protect {
-            Mode::Lit { until: now + lit_for }
+            Mode::Lit {
+                until: now + lit_for,
+            }
         } else {
             Mode::Disabled
         };
@@ -117,7 +120,9 @@ impl Screen {
     }
 
     fn light(&mut self, now: Instant) {
-        self.mode = Mode::Lit { until: now + self.lit_for };
+        self.mode = Mode::Lit {
+            until: now + self.lit_for,
+        };
     }
 
     fn blank(&mut self, now: Instant) -> Option<Action> {
@@ -145,7 +150,10 @@ mod tests {
     }
 
     fn off() -> ScreenSettings {
-        ScreenSettings { protect: false, ..ScreenSettings::default() }
+        ScreenSettings {
+            protect: false,
+            ..ScreenSettings::default()
+        }
     }
 
     /// A screen that has just gone dark at `t0 + T`.
@@ -163,7 +171,11 @@ mod tests {
         assert_eq!(s.on(Input::Tick, t0 + secs(9)), None);
         assert_eq!(s.on(Input::Tick, t0 + T), Some(Action::Blank));
         assert!(s.is_dark());
-        assert_eq!(s.on(Input::Tick, t0 + T + secs(1)), None, "blank once, not every tick");
+        assert_eq!(
+            s.on(Input::Tick, t0 + T + secs(1)),
+            None,
+            "blank once, not every tick"
+        );
     }
 
     #[test]
@@ -191,7 +203,11 @@ mod tests {
         let t0 = Instant::now();
         let mut s = dark(t0);
         let t = t0 + secs(60);
-        assert_eq!(s.on(Input::FirmwareEvent, t), None, "the firmware already drew its popup");
+        assert_eq!(
+            s.on(Input::FirmwareEvent, t),
+            None,
+            "the firmware already drew its popup"
+        );
         assert!(!s.is_dark());
         assert_eq!(s.on(Input::Tick, t + T), Some(Action::Blank));
     }
@@ -212,19 +228,37 @@ mod tests {
         let t0 = Instant::now();
         let mut s = dark(t0);
         let went_dark = t0 + T;
-        assert_eq!(s.on(Input::Tick, went_dark + SAFETY_REBLANK - secs(1)), None);
-        assert_eq!(s.on(Input::Tick, went_dark + SAFETY_REBLANK), Some(Action::Blank));
-        assert_eq!(s.on(Input::Tick, went_dark + SAFETY_REBLANK * 2 - secs(1)), None);
-        assert_eq!(s.on(Input::Tick, went_dark + SAFETY_REBLANK * 2), Some(Action::Blank));
+        assert_eq!(
+            s.on(Input::Tick, went_dark + SAFETY_REBLANK - secs(1)),
+            None
+        );
+        assert_eq!(
+            s.on(Input::Tick, went_dark + SAFETY_REBLANK),
+            Some(Action::Blank)
+        );
+        assert_eq!(
+            s.on(Input::Tick, went_dark + SAFETY_REBLANK * 2 - secs(1)),
+            None
+        );
+        assert_eq!(
+            s.on(Input::Tick, went_dark + SAFETY_REBLANK * 2),
+            Some(Action::Blank)
+        );
     }
 
     #[test]
     fn device_opened_always_shows_stock() {
         let t0 = Instant::now();
         let mut s = dark(t0);
-        assert_eq!(s.on(Input::DeviceOpened, t0 + secs(60)), Some(Action::ShowStock));
+        assert_eq!(
+            s.on(Input::DeviceOpened, t0 + secs(60)),
+            Some(Action::ShowStock)
+        );
         let mut lit = Screen::new(&on(), t0);
-        assert_eq!(lit.on(Input::DeviceOpened, t0 + secs(1)), Some(Action::ShowStock));
+        assert_eq!(
+            lit.on(Input::DeviceOpened, t0 + secs(1)),
+            Some(Action::ShowStock)
+        );
         assert_eq!(lit.on(Input::Tick, t0 + secs(1) + T), Some(Action::Blank));
     }
 
@@ -241,7 +275,12 @@ mod tests {
     fn disabled_never_touches_the_screen() {
         let t0 = Instant::now();
         let mut s = Screen::new(&off(), t0);
-        for input in [Input::Tick, Input::OurEvent, Input::FirmwareEvent, Input::DeviceOpened] {
+        for input in [
+            Input::Tick,
+            Input::OurEvent,
+            Input::FirmwareEvent,
+            Input::DeviceOpened,
+        ] {
             assert_eq!(s.on(input, t0 + secs(3600)), None, "{input:?}");
         }
         assert!(!s.is_dark());
@@ -259,7 +298,11 @@ mod tests {
     fn disabling_while_lit_sends_nothing_and_never_blanks() {
         let t0 = Instant::now();
         let mut s = Screen::new(&on(), t0);
-        assert_eq!(s.apply(&off(), t0 + secs(1)), None, "the stock screen is already up");
+        assert_eq!(
+            s.apply(&off(), t0 + secs(1)),
+            None,
+            "the stock screen is already up"
+        );
         assert_eq!(s.on(Input::Tick, t0 + secs(3600)), None);
     }
 
@@ -277,7 +320,10 @@ mod tests {
         let t0 = Instant::now();
         let mut s = dark(t0);
         let t = t0 + secs(60);
-        let longer = ScreenSettings { lit_seconds: 30, ..on() };
+        let longer = ScreenSettings {
+            lit_seconds: 30,
+            ..on()
+        };
         assert_eq!(s.apply(&longer, t), Some(Action::ShowStock));
         assert_eq!(s.on(Input::Tick, t + secs(29)), None);
         assert_eq!(s.on(Input::Tick, t + secs(30)), Some(Action::Blank));

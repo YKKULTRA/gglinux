@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: CI
+
+# Only master/main, pull requests and manual runs: Actions minutes on a private repo are
+# limited, so pushes to work branches do not run CI.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  daemon:
+    name: Daemon (fmt, clippy, tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  ui:
+    name: UI (svelte-check, frontend, Tauri)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config build-essential file \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev libudev-dev
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui/src-tauri -> target
+
+      - name: npm ci
+        run: npm ci
+
+      - name: svelte-check
+        run: npm run check
+
+      - name: Frontend build
+        run: npx vite build
+
+      - name: cargo fmt (Tauri backend)
+        working-directory: ui/src-tauri
+        run: cargo fmt --check
+
+      - name: cargo clippy (Tauri backend)
+        working-directory: ui/src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test (Tauri backend)
+        working-directory: ui/src-tauri
+        run: cargo test --locked
+
+      # A debug build runs the whole Tauri pipeline (beforeBuildCommand, the embedded
+      # frontend, the binary) at a fraction of the release profile's LTO cost. The release
+      # build is what packaging/arch/PKGBUILD exercises.
+      - name: Tauri build (debug, no bundle)
+        run: npx tauri build --debug --no-bundle -- --locked

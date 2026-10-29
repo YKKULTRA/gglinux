@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Sonar-style audio for gglinux, on PipeWire.
 //!
 //! PipeWire hosts the graph — four virtual output channels declared in a
@@ -8,14 +9,14 @@
 
 pub mod config;
 pub mod eq;
-pub mod mix;
-pub mod rules;
-pub mod tools;
 pub mod graph;
 pub mod mic;
+pub mod mix;
+pub mod rules;
 pub mod settings;
 pub mod smart;
 pub mod sonar;
+pub mod tools;
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -90,11 +91,17 @@ pub(crate) mod testing {
     }
 
     pub fn scratch(name: &str) -> Scratch {
-        let dir = std::env::temp_dir()
-            .join("gg-audio-tests")
-            .join(format!("{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gg-audio-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Scratch(dir)
+    }
+
+    #[test]
+    fn a_scratch_directory_has_no_parent_another_user_could_own() {
+        // A shared parent that one account created first refuses every other
+        // account's tests on the same machine (permission denied).
+        let dir = scratch("parent");
+        assert_eq!(dir.parent(), Some(std::env::temp_dir().as_path()));
     }
 }

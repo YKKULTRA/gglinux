@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! A stand-in for `gglinuxd` that speaks the real protocol against no hardware.
 //!
 //! ```text
@@ -29,10 +30,12 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_device_keyboard::layout::ANSI_TKL;
 use gg_ipc::{
-    AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyInfo, KeyboardState, Lighting, MouseDpi, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
-    MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SmartVolume, SmartVolumeState,
-    SonarState, StreamMix,
+    AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, ClipInfo,
+    ClipsState, DeviceInfo, DeviceKind, EqBand, Event, GameInfo, GameSenseState, HeadphoneEq,
+    HeadsetChange, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyInfo,
+    KeyboardState, Lighting, MicSettings, MicState, MouseDpi, MouseSettings, MouseState,
+    ProfilesState, ReactiveStatus, Request, RequestFrame, ResponseData, ScreenSettings,
+    ServerMessage, SmartVolume, SmartVolumeState, SonarState, StreamMix,
 };
 
 /// How often to push a `mouse_battery` notification.
@@ -70,7 +73,9 @@ fn main() -> Result<()> {
             .cloned()
     };
 
-    let level: u8 = value("--battery").map_or(Ok(87), |v| v.parse()).context("--battery")?;
+    let level: u8 = value("--battery")
+        .map_or(Ok(87), |v| v.parse())
+        .context("--battery")?;
     let charging = flag("--charging");
     let with_mouse = !flag("--no-mouse");
 
@@ -87,8 +92,8 @@ fn main() -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("binding {}", path.display()))?;
+    let listener =
+        UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
 
     let state = Arc::new(Mutex::new(Fake {
         battery: Some(BatteryState { level, charging }),
@@ -102,7 +107,11 @@ fn main() -> Result<()> {
         clips: ClipsState {
             available: true,
             dir: "/home/you/Videos/gglinux".into(),
-            clips: vec![ClipInfo { name: "Replay_2026-09-29_20-00-00.mp4".into(), bytes: 48_000_000, modified: 1_790_700_000 }],
+            clips: vec![ClipInfo {
+                name: "Replay_2026-09-29_20-00-00.mp4".into(),
+                bytes: 48_000_000,
+                modified: 1_790_700_000,
+            }],
             ..ClipsState::default()
         },
         devices: devices(with_mouse),
@@ -110,7 +119,10 @@ fn main() -> Result<()> {
     }));
 
     eprintln!("fakemouse listening on {}", path.display());
-    eprintln!("  battery {level}%{}", if charging { ", charging" } else { "" });
+    eprintln!(
+        "  battery {level}%{}",
+        if charging { ", charging" } else { "" }
+    );
     if let Some(f) = &state.lock().unwrap().fail {
         eprintln!("  {f} will return an error");
     }
@@ -136,7 +148,10 @@ fn serve(stream: UnixStream, state: Arc<Mutex<Fake>>) -> Result<()> {
 
     {
         let devices = state.lock().unwrap().devices.clone();
-        send(&writer, ServerMessage::notify(Event::DevicesChanged { devices }))?;
+        send(
+            &writer,
+            ServerMessage::notify(Event::DevicesChanged { devices }),
+        )?;
     }
 
     // Drift the battery so the push path is visible without touching anything.
@@ -173,7 +188,10 @@ fn serve(stream: UnixStream, state: Arc<Mutex<Fake>>) -> Result<()> {
                     .ok()
                     .and_then(|v| v.get("id")?.as_u64())
                     .unwrap_or(0);
-                send(&writer, ServerMessage::response(id, error(format!("invalid request: {e}"))))?;
+                send(
+                    &writer,
+                    ServerMessage::response(id, error(format!("invalid request: {e}"))),
+                )?;
                 continue;
             }
         };
@@ -198,16 +216,27 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
     }
 
     match req {
-        Request::ListDevices => ResponseData::Devices { devices: s.devices.clone() },
+        Request::ListDevices => ResponseData::Devices {
+            devices: s.devices.clone(),
+        },
         Request::Ping => ResponseData::Pong,
-        Request::GetMouseState => ResponseData::Mouse { state: mouse_state(&s) },
-        Request::SetMouseDpi { stages, active, save } => {
-            s.applied.get_or_insert_with(MouseSettings::default).dpi = Some(MouseDpi { stages, active });
+        Request::GetMouseState => ResponseData::Mouse {
+            state: mouse_state(&s),
+        },
+        Request::SetMouseDpi {
+            stages,
+            active,
+            save,
+        } => {
+            s.applied.get_or_insert_with(MouseSettings::default).dpi =
+                Some(MouseDpi { stages, active });
             note_save(save);
             ResponseData::Success
         }
         Request::SetMousePolling { hz, save } => {
-            s.applied.get_or_insert_with(MouseSettings::default).polling_hz = Some(hz);
+            s.applied
+                .get_or_insert_with(MouseSettings::default)
+                .polling_hz = Some(hz);
             note_save(save);
             ResponseData::Success
         }
@@ -220,7 +249,9 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             eprintln!(">>   (would commit to onboard memory)");
             ResponseData::Success
         }
-        Request::GetHeadsetState => ResponseData::Headset { state: headset_state(&s) },
+        Request::GetHeadsetState => ResponseData::Headset {
+            state: headset_state(&s),
+        },
         Request::SetHeadsetScreen { settings } => {
             s.screen = settings;
             ResponseData::Success
@@ -229,7 +260,9 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             fake_apply(&mut s.controls, change);
             ResponseData::Success
         }
-        Request::GetSonarState => ResponseData::Sonar { state: s.sonar.clone() },
+        Request::GetSonarState => ResponseData::Sonar {
+            state: s.sonar.clone(),
+        },
         Request::SetSonarEnabled { enabled } => {
             s.sonar.enabled = enabled;
             ResponseData::Success
@@ -249,7 +282,12 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             ResponseData::Success
         }
         Request::SetAppChannel { binary, channel } => {
-            for app in s.sonar.apps.iter_mut().filter(|a| a.binary.as_deref() == Some(binary.as_str())) {
+            for app in s
+                .sonar
+                .apps
+                .iter_mut()
+                .filter(|a| a.binary.as_deref() == Some(binary.as_str()))
+            {
                 app.channel = channel;
             }
             ResponseData::Success
@@ -301,7 +339,9 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             }
             ResponseData::Success
         }
-        Request::GetKeyboardState => ResponseData::Keyboard { state: s.keyboard.clone() },
+        Request::GetKeyboardState => ResponseData::Keyboard {
+            state: s.keyboard.clone(),
+        },
         Request::SetLighting { lighting } => {
             // Like a machine without the optional udev rule, so the UI's hint shows.
             s.keyboard.reactive = if lighting.enabled && lighting.reactive.enabled {
@@ -312,25 +352,33 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.keyboard.lighting = lighting;
             ResponseData::Success
         }
-        Request::GetGamesenseState => ResponseData::Gamesense { state: s.gamesense.clone() },
+        Request::GetGamesenseState => ResponseData::Gamesense {
+            state: s.gamesense.clone(),
+        },
         Request::SetGamesenseEnabled { enabled } => {
             s.gamesense.enabled = enabled;
             s.gamesense.address = enabled.then(|| "127.0.0.1:51234".to_string());
             s.gamesense.prefixes = if enabled { 17 } else { 0 };
             ResponseData::Success
         }
-        Request::SetGameEnabled { game, enabled } => match s.gamesense.games.iter_mut().find(|g| g.name == game) {
-            Some(g) => {
-                g.enabled = enabled;
-                ResponseData::Success
+        Request::SetGameEnabled { game, enabled } => {
+            match s.gamesense.games.iter_mut().find(|g| g.name == game) {
+                Some(g) => {
+                    g.enabled = enabled;
+                    ResponseData::Success
+                }
+                None => ResponseData::Error {
+                    message: format!("unknown game {game}"),
+                },
             }
-            None => ResponseData::Error { message: format!("unknown game {game}") },
-        },
+        }
         Request::RemoveGame { game } => {
             s.gamesense.games.retain(|g| g.name != game);
             ResponseData::Success
         }
-        Request::GetProfiles => ResponseData::Profiles { state: s.profiles.clone() },
+        Request::GetProfiles => ResponseData::Profiles {
+            state: s.profiles.clone(),
+        },
         Request::SaveProfile { name } => {
             if !s.profiles.profiles.contains(&name) {
                 s.profiles.profiles.push(name);
@@ -341,7 +389,9 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             if s.profiles.profiles.contains(&name) {
                 ResponseData::Success
             } else {
-                ResponseData::Error { message: format!("no profile named \"{name}\"") }
+                ResponseData::Error {
+                    message: format!("no profile named \"{name}\""),
+                }
             }
         }
         Request::DeleteProfile { name } => {
@@ -352,7 +402,9 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             s.profiles.rules = rules;
             ResponseData::Success
         }
-        Request::GetClipsState => ResponseData::Clips { state: s.clips.clone() },
+        Request::GetClipsState => ResponseData::Clips {
+            state: s.clips.clone(),
+        },
         Request::SetClipsSettings { settings } => {
             s.clips.enabled = settings.enabled;
             s.clips.recording = settings.enabled && !settings.games_only;
@@ -363,11 +415,22 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
         Request::SaveClip => {
             if s.clips.enabled {
                 let n = s.clips.clips.len() + 1;
-                let modified = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-                s.clips.clips.insert(0, ClipInfo { name: format!("Replay_{n}.mp4"), bytes: 1_000_000, modified });
+                let modified = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                s.clips.clips.insert(
+                    0,
+                    ClipInfo {
+                        name: format!("Replay_{n}.mp4"),
+                        bytes: 1_000_000,
+                        modified,
+                    },
+                );
                 ResponseData::Success
             } else {
-                ResponseData::Error { message: "clips are off".into() }
+                ResponseData::Error {
+                    message: "clips are off".into(),
+                }
             }
         }
         Request::DeleteClip { name } => {
@@ -423,30 +486,72 @@ fn fake_sonar() -> SonarState {
         enabled: true,
         output: Some("alsa_output.fake-headset".into()),
         outputs: vec![
-            AudioDevice { name: "alsa_output.fake-headset".into(), description: "Fake Headset".into() },
-            AudioDevice { name: "alsa_output.fake-speakers".into(), description: "Fake Speakers".into() },
+            AudioDevice {
+                name: "alsa_output.fake-headset".into(),
+                description: "Fake Headset".into(),
+            },
+            AudioDevice {
+                name: "alsa_output.fake-speakers".into(),
+                description: "Fake Speakers".into(),
+            },
         ],
         channels: Channel::ALL
             .iter()
-            .map(|&channel| ChannelState { channel, present: true, volume: Some(1.0) })
+            .map(|&channel| ChannelState {
+                channel,
+                present: true,
+                volume: Some(1.0),
+            })
             .collect(),
         chatmix: 0.0,
         apps: vec![
-            AppStream { id: 90, name: "Discord".into(), binary: Some("discord".into()), channel: Channel::Chat },
-            AppStream { id: 91, name: "Firefox".into(), binary: Some("firefox".into()), channel: Channel::Media },
+            AppStream {
+                id: 90,
+                name: "Discord".into(),
+                binary: Some("discord".into()),
+                channel: Channel::Chat,
+            },
+            AppStream {
+                id: 91,
+                name: "Firefox".into(),
+                binary: Some("firefox".into()),
+                channel: Channel::Media,
+            },
         ],
-        eq: Channel::ALL.iter().map(|&channel| ChannelEq { channel, bands: fake_bands(10) }).collect(),
-        headphone: HeadphoneEq { preamp: 0.0, bands: fake_bands(12), name: None },
+        eq: Channel::ALL
+            .iter()
+            .map(|&channel| ChannelEq {
+                channel,
+                bands: fake_bands(10),
+            })
+            .collect(),
+        headphone: HeadphoneEq {
+            preamp: 0.0,
+            bands: fake_bands(12),
+            name: None,
+        },
         mic: MicState {
             available: true,
             present: true,
             input: Some("alsa_input.fake-headset".into()),
-            inputs: vec![AudioDevice { name: "alsa_input.fake-headset".into(), description: "Fake Headset Mic".into() }],
+            inputs: vec![AudioDevice {
+                name: "alsa_input.fake-headset".into(),
+                description: "Fake Headset Mic".into(),
+            }],
             volume: Some(1.0),
             settings: MicSettings::default(),
         },
-        stream: StreamMix { enabled: false, present: false, volumes: vec![1.0; 4], master: 1.0 },
-        smart_volume: SmartVolumeState { available: true, reason: None, settings: vec![SmartVolume::default(); 4] },
+        stream: StreamMix {
+            enabled: false,
+            present: false,
+            volumes: vec![1.0; 4],
+            master: 1.0,
+        },
+        smart_volume: SmartVolumeState {
+            available: true,
+            reason: None,
+            settings: vec![SmartVolume::default(); 4],
+        },
     }
 }
 
@@ -456,7 +561,13 @@ fn fake_keyboard() -> KeyboardState {
         connected: true,
         layout: ANSI_TKL
             .iter()
-            .map(|&(code, label, x, y, w)| KeyInfo { code, label: label.to_owned(), x, y, w })
+            .map(|&(code, label, x, y, w)| KeyInfo {
+                code,
+                label: label.to_owned(),
+                x,
+                y,
+                w,
+            })
             .collect(),
         lighting: Lighting::default(),
         reactive: ReactiveStatus::Off,
@@ -553,12 +664,25 @@ fn method_name(req: &Request) -> &'static str {
 /// One-line rendering of a request, so the log shows values and not just methods.
 fn describe(req: &Request) -> String {
     match req {
-        Request::SetMouseDpi { stages, active, save } => {
+        Request::SetMouseDpi {
+            stages,
+            active,
+            save,
+        } => {
             let list: Vec<String> = stages
                 .iter()
-                .map(|s| if s.x == s.y { s.x.to_string() } else { format!("{}:{}", s.x, s.y) })
+                .map(|s| {
+                    if s.x == s.y {
+                        s.x.to_string()
+                    } else {
+                        format!("{}:{}", s.x, s.y)
+                    }
+                })
                 .collect();
-            format!("set_mouse_dpi {} active={active} save={save}", list.join(","))
+            format!(
+                "set_mouse_dpi {} active={active} save={save}",
+                list.join(",")
+            )
         }
         Request::SetMousePolling { hz, save } => format!("set_mouse_polling {hz}Hz save={save}"),
         Request::SetMouseButtons { actions, save } => {
@@ -570,7 +694,10 @@ fn describe(req: &Request) -> String {
         ),
         Request::SetHeadset { change } => format!("set_headset {change:?}"),
         // Everything else with its params as they go over the wire.
-        other => match serde_json::to_value(other).ok().and_then(|mut v| v.get_mut("params").map(serde_json::Value::take)) {
+        other => match serde_json::to_value(other)
+            .ok()
+            .and_then(|mut v| v.get_mut("params").map(serde_json::Value::take))
+        {
             Some(params) => format!("{} {params}", method_name(other)),
             None => method_name(other).to_string(),
         },
@@ -650,17 +777,29 @@ mod tests {
 
     #[test]
     fn a_request_with_no_rendering_of_its_own_is_logged_with_its_params() {
-        let volume = Request::SetChannelVolume { channel: Channel::Chat, volume: 0.25 };
-        assert_eq!(describe(&volume), r#"set_channel_volume {"channel":"chat","volume":0.25}"#);
+        let volume = Request::SetChannelVolume {
+            channel: Channel::Chat,
+            volume: 0.25,
+        };
+        assert_eq!(
+            describe(&volume),
+            r#"set_channel_volume {"channel":"chat","volume":0.25}"#
+        );
 
         let lighting = Lighting {
             enabled: true,
-            effect: Effect::Breathing { color: Rgb { r: 255, g: 0, b: 0 }, period_s: 3.0 },
+            effect: Effect::Breathing {
+                color: Rgb { r: 255, g: 0, b: 0 },
+                period_s: 3.0,
+            },
             ..Lighting::default()
         };
         let shown = describe(&Request::SetLighting { lighting });
         assert!(shown.starts_with("set_lighting {"), "{shown}");
-        assert!(shown.contains(r#""kind":"breathing""#) && shown.contains(r#""period_s":3.0"#), "{shown}");
+        assert!(
+            shown.contains(r#""kind":"breathing""#) && shown.contains(r#""period_s":3.0"#),
+            "{shown}"
+        );
 
         // A request that carries nothing is still just its name.
         assert_eq!(describe(&Request::SaveClip), "save_clip");

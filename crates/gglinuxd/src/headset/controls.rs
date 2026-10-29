@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Headset settings between the IPC and the device: mapping a client's change
 //! onto the device's typed setting, and remembering what the device cannot
 //! report back.
@@ -96,12 +97,18 @@ mod tests {
             setting_for(&HeadsetChange::AutoOffMinutes(0)).unwrap(),
             Setting::AutoOff(AutoOff::Never)
         );
-        assert_eq!(setting_for(&HeadsetChange::Sidetone(2)).unwrap(), Setting::Sidetone(2));
+        assert_eq!(
+            setting_for(&HeadsetChange::Sidetone(2)).unwrap(),
+            Setting::Sidetone(2)
+        );
     }
 
     #[test]
     fn auto_off_minutes_must_be_a_device_level() {
-        assert!(setting_for(&HeadsetChange::AutoOffMinutes(45)).is_err(), "no rounding");
+        assert!(
+            setting_for(&HeadsetChange::AutoOffMinutes(45)).is_err(),
+            "no rounding"
+        );
     }
 
     #[test]

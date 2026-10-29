@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Reads key presses from the Apex's typing interfaces, for reactive lighting.
 //!
 //! Only while reactive lighting is on: the worker starts a [`Reader`] then,
@@ -65,7 +66,10 @@ impl Reader {
                 }
             })
             .expect("spawn gg-keys thread");
-        Reader { stop, thread: Some(thread) }
+        Reader {
+            stop,
+            thread: Some(thread),
+        }
     }
 }
 
@@ -84,10 +88,16 @@ fn typing_paths(api: &HidApi) -> Result<Vec<(PathBuf, Kind)>, OpenError> {
         .iter()
         .map(|&(iface, kind)| {
             api.device_list()
-                .find(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID && d.interface_number() == iface)
+                .find(|d| {
+                    d.vendor_id() == VENDOR_ID
+                        && d.product_id() == PRODUCT_ID
+                        && d.interface_number() == iface
+                })
                 .and_then(|d| d.path().to_str().ok().map(PathBuf::from))
                 .map(|p| (p, kind))
-                .ok_or_else(|| OpenError::Unavailable(format!("typing interface {iface} not found")))
+                .ok_or_else(|| {
+                    OpenError::Unavailable(format!("typing interface {iface} not found"))
+                })
         })
         .collect()
 }
@@ -117,7 +127,11 @@ fn run(files: &[(File, Kind)], stop: &AtomicBool, tx: &Sender<Command>) -> bool 
     while !stop.load(Ordering::Relaxed) {
         let mut fds: Vec<libc::pollfd> = files
             .iter()
-            .map(|(f, _)| libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLIN, revents: 0 })
+            .map(|(f, _)| libc::pollfd {
+                fd: f.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            })
             .collect();
         let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, POLL_MS) };
         if n < 0 {
@@ -131,7 +145,14 @@ fn run(files: &[(File, Kind)], stop: &AtomicBool, tx: &Sender<Command>) -> bool 
                 let len = match (&files[i].0).read(&mut buf) {
                     Ok(0) => return false, // end of file: the device is gone
                     Ok(len) => len,
-                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => continue,
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue
+                    }
                     Err(_) => return false,
                 };
                 let now = match files[i].1 {
@@ -141,7 +162,13 @@ fn run(files: &[(File, Kind)], stop: &AtomicBool, tx: &Sender<Command>) -> bool 
                 let Some(now) = now else { continue }; // rollover error or odd length: no change
                 let at = Instant::now();
                 for usage in keys::pressed(last[i], now) {
-                    if tx.send(Command::Pressed { code: keys::led(usage), at }).is_err() {
+                    if tx
+                        .send(Command::Pressed {
+                            code: keys::led(usage),
+                            at,
+                        })
+                        .is_err()
+                    {
                         return true; // the worker is gone; nobody to tell
                     }
                 }
@@ -167,7 +194,14 @@ mod tests {
     /// A connected pair of packet sockets: one write is one read, like a hidraw report.
     fn packet_pair() -> (File, File) {
         let mut fds = [0; 2];
-        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) };
+        let rc = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
         assert_eq!(rc, 0, "socketpair");
         unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
     }
@@ -198,7 +232,11 @@ mod tests {
         assert_eq!(code(next(&rx)), 0x05);
         kb.write_all(&[0, 0, 1, 1, 1, 1, 1, 1]).unwrap(); // rollover error
         kb.write_all(&[0, 0, 0x04, 0x05, 0x06, 0, 0, 0]).unwrap(); // C down
-        assert_eq!(code(next(&rx)), 0x06, "only C: the rollover error changed nothing");
+        assert_eq!(
+            code(next(&rx)),
+            0x06,
+            "only C: the rollover error changed nothing"
+        );
         kb.write_all(&[0; 8]).unwrap(); // all up
         assert!(next(&rx).is_none(), "releases are not presses");
     }
@@ -234,7 +272,10 @@ mod tests {
         assert!(matches!(next(&rx), Some(Command::ReaderStopped)));
         let started = Instant::now();
         drop(reader);
-        assert!(started.elapsed() < Duration::from_secs(1), "the thread had already ended");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the thread had already ended"
+        );
     }
 
     #[test]
@@ -244,9 +285,17 @@ mod tests {
         let reader = Reader::spawn(vec![(ours, Kind::Boot)], tx);
         let started = Instant::now();
         drop(reader);
-        assert!(started.elapsed() < Duration::from_secs(1), "stops within a poll interval");
-        assert!(matches!(rx.recv_timeout(Duration::from_millis(100)), Err(RecvTimeoutError::Disconnected)),
-            "no ReaderStopped for a stop we asked for");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stops within a poll interval"
+        );
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Disconnected)
+            ),
+            "no ReaderStopped for a stop we asked for"
+        );
     }
 
     #[test]
@@ -268,7 +317,10 @@ mod tests {
 
     #[test]
     fn a_press_never_prints_its_key() {
-        let c = Command::Pressed { code: 0x04, at: Instant::now() };
+        let c = Command::Pressed {
+            code: 0x04,
+            at: Instant::now(),
+        };
         assert_eq!(format!("{c:?}"), "Pressed");
     }
 }

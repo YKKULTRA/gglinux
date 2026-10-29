@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The virtual mic: RNNoise noise suppression → noise gate → compressor on a
 //! physical mic, as a source apps record from.
 //!
@@ -43,14 +44,17 @@ pub fn plugins_present_in(dirs: &[PathBuf]) -> bool {
 /// replace the defaults rather than come before them.
 pub(crate) fn ladspa_dirs(ladspa_path: Option<OsString>) -> Vec<PathBuf> {
     match ladspa_path {
-        Some(path) => std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()).collect(),
+        Some(path) => std::env::split_paths(&path)
+            .filter(|d| !d.as_os_str().is_empty())
+            .collect(),
         None => DEFAULT_LADSPA_DIRS.iter().map(PathBuf::from).collect(),
     }
 }
 
 /// Whether a plugin, named as PipeWire loads it (without `.so`), is a file in one of `dirs`.
 pub(crate) fn ladspa_found(dirs: &[PathBuf], plugin: &str) -> bool {
-    dirs.iter().any(|d| d.join(format!("{plugin}.so")).is_file())
+    dirs.iter()
+        .any(|d| d.join(format!("{plugin}.so")).is_file())
 }
 
 pub fn validate(s: &MicSettings) -> Result<()> {
@@ -117,10 +121,18 @@ pub fn module(input: &str) -> Result<String> {
 /// The `pw-cli set-param` Props for the chain's live controls.
 pub fn props(s: &MicSettings) -> String {
     let dry = if s.denoise { 0.0 } else { 1.0 };
-    let open = if s.gate { 10f32.powf(s.gate_threshold_db / 20.0) } else { 0.0 };
+    let open = if s.gate {
+        10f32.powf(s.gate_threshold_db / 20.0)
+    } else {
+        0.0
+    };
     // Close a little below the open level, so the gate doesn't chatter.
     let close = open * 0.7;
-    let (ratio, makeup) = if s.compressor { (COMP_RATIO, s.makeup_db) } else { (1.0, 0.0) };
+    let (ratio, makeup) = if s.compressor {
+        (COMP_RATIO, s.makeup_db)
+    } else {
+        (1.0, 0.0)
+    };
     format!(
         "{{ params = [ \"rnnoise:VAD Threshold (%)\" {strength:.1} \"rnnoise:Dry Mix\" {dry:.1} \
          \"gate:Open Threshold\" {open:.6} \"gate:Close Threshold\" {close:.6} \
@@ -136,13 +148,23 @@ mod tests {
     #[test]
     fn module_is_a_mono_nofail_chain_into_a_virtual_source() {
         let text = module("alsa_input.usb-arctis").unwrap();
-        assert!(text.contains("flags = [ nofail ]"), "a broken plugin must not take the channels down");
+        assert!(
+            text.contains("flags = [ nofail ]"),
+            "a broken plugin must not take the channels down"
+        );
         assert!(text.contains("audio.channels   = 1"));
-        for label in ["label = noise_suppressor_mono", "label = noisegate", "label = sc4m"] {
+        for label in [
+            "label = noise_suppressor_mono",
+            "label = noisegate",
+            "label = sc4m",
+        ] {
             assert!(text.contains(label), "{label}");
         }
         assert!(text.contains(r#"target.object      = "alsa_input.usb-arctis""#));
-        assert!(text.contains("node.dont-fallback = true"), "never falls back to the default input: itself");
+        assert!(
+            text.contains("node.dont-fallback = true"),
+            "never falls back to the default input: itself"
+        );
         assert!(text.contains(r#"node.name   = "gglinux_mic""#));
         assert!(text.contains(r#"media.class = "Audio/Source""#));
         assert_eq!(text.matches("input = ").count(), 2);
@@ -151,7 +173,12 @@ mod tests {
 
     #[test]
     fn every_stage_switches_off_with_its_own_controls() {
-        let off = MicSettings { denoise: false, gate: false, compressor: false, ..MicSettings::default() };
+        let off = MicSettings {
+            denoise: false,
+            gate: false,
+            compressor: false,
+            ..MicSettings::default()
+        };
         let p = props(&off);
         assert!(p.contains("\"rnnoise:Dry Mix\" 1.0"), "{p}");
         assert!(p.contains("\"gate:Open Threshold\" 0.000000"), "{p}");
@@ -183,10 +210,22 @@ mod tests {
     fn settings_are_range_checked() {
         assert!(validate(&MicSettings::default()).is_ok());
         for bad in [
-            MicSettings { denoise_strength: 99.0, ..MicSettings::default() },
-            MicSettings { gate_threshold_db: 0.0, ..MicSettings::default() },
-            MicSettings { makeup_db: 30.0, ..MicSettings::default() },
-            MicSettings { makeup_db: f32::NAN, ..MicSettings::default() },
+            MicSettings {
+                denoise_strength: 99.0,
+                ..MicSettings::default()
+            },
+            MicSettings {
+                gate_threshold_db: 0.0,
+                ..MicSettings::default()
+            },
+            MicSettings {
+                makeup_db: 30.0,
+                ..MicSettings::default()
+            },
+            MicSettings {
+                makeup_db: f32::NAN,
+                ..MicSettings::default()
+            },
         ] {
             assert!(validate(&bad).is_err(), "{bad:?}");
         }
@@ -205,8 +244,10 @@ mod tests {
 
     #[test]
     fn plugins_are_looked_for_where_pipewire_looks() {
-        let defaults: Vec<PathBuf> =
-            ["/usr/lib64/ladspa", "/usr/lib/ladspa", "/usr/lib"].iter().map(PathBuf::from).collect();
+        let defaults: Vec<PathBuf> = ["/usr/lib64/ladspa", "/usr/lib/ladspa", "/usr/lib"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
         assert_eq!(ladspa_dirs(None), defaults);
         assert_eq!(
             ladspa_dirs(Some("/opt/a::/opt/b".into())),

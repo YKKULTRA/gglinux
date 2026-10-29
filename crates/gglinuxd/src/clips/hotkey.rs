@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The save-clip hotkey, through the GlobalShortcuts portal: the daemon never
 //! sees the keyboard (reactive lighting's security choice), so KDE does.
 
@@ -27,11 +28,28 @@ async fn bind(internal: &mpsc::UnboundedSender<Internal>) -> ashpd::Result<()> {
         let _ = ashpd::register_host_app(id).await;
     }
     let portal = GlobalShortcuts::new().await?;
-    let session = OpenSession(Some(portal.create_session(CreateSessionOptions::default()).await?));
+    let session = OpenSession(Some(
+        portal
+            .create_session(CreateSessionOptions::default())
+            .await?,
+    ));
     let shortcut = NewShortcut::new(ID, "Save the last clip").preferred_trigger("ALT+S");
-    let request = portal.bind_shortcuts(session.get(), &[shortcut], None, BindShortcutsOptions::default()).await?;
+    let request = portal
+        .bind_shortcuts(
+            session.get(),
+            &[shortcut],
+            None,
+            BindShortcutsOptions::default(),
+        )
+        .await?;
     let bound = request.response()?;
-    let trigger = outcome(bound.shortcuts().iter().find(|s| s.id() == ID).map(|s| s.trigger_description()));
+    let trigger = outcome(
+        bound
+            .shortcuts()
+            .iter()
+            .find(|s| s.id() == ID)
+            .map(|s| s.trigger_description()),
+    );
     match &trigger {
         Ok(trigger) => info!(%trigger, "clip hotkey bound"),
         Err(e) => warn!(error = %e, "no clip hotkey"),
@@ -89,6 +107,9 @@ mod tests {
     #[test]
     fn a_shortcut_bound_with_no_key_is_no_hotkey() {
         assert_eq!(outcome(Some("Alt+S")), Ok("Alt+S".into()));
-        assert!(outcome(Some("")).is_err_and(|e| e.contains("no key")), "KDE asked already; nothing to wait for");
+        assert!(
+            outcome(Some("")).is_err_and(|e| e.contains("no key")),
+            "KDE asked already; nothing to wait for"
+        );
     }
 }

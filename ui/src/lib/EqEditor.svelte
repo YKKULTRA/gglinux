@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
   // A parametric EQ curve with draggable bands. Drag a point for frequency and
   // gain; scroll over it for Q. Changes go out at most every SEND_EVERY_MS while

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The Proton bridge: `coreProps.json` in every Proton prefix, so Windows games
 //! under Proton find the server — Wine maps `C:\ProgramData` to the prefix's
 //! `drive_c/ProgramData`, and pressure-vessel shares the host network, so the
@@ -30,7 +31,9 @@ pub fn steam_roots(home: &Path) -> Vec<PathBuf> {
 pub fn libraries(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut libs = Vec::new();
     for root in roots {
-        let Ok(text) = std::fs::read_to_string(root.join("steamapps/libraryfolders.vdf")) else { continue };
+        let Ok(text) = std::fs::read_to_string(root.join("steamapps/libraryfolders.vdf")) else {
+            continue;
+        };
         for path in text.lines().filter_map(vdf_path) {
             let p = PathBuf::from(path);
             let p = p.canonicalize().unwrap_or(p);
@@ -53,7 +56,9 @@ fn vdf_path(line: &str) -> Option<String> {
 pub fn program_data_dirs(libraries: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for lib in libraries {
-        let Ok(entries) = std::fs::read_dir(lib.join("steamapps/compatdata")) else { continue };
+        let Ok(entries) = std::fs::read_dir(lib.join("steamapps/compatdata")) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let pd = entry.path().join("pfx/drive_c/ProgramData");
             if pd.is_dir() {
@@ -72,8 +77,13 @@ pub fn contents(port: u16) -> String {
 
 /// Whether a coreProps.json is one gglinux wrote: only an `address`, on loopback.
 pub fn is_ours(text: &str) -> bool {
-    let Ok(Value::Object(o)) = serde_json::from_str::<Value>(text) else { return false };
-    o.len() == 1 && o.get("address").and_then(Value::as_str).is_some_and(|a| a.starts_with("127.0.0.1:"))
+    let Ok(Value::Object(o)) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    o.len() == 1
+        && o.get("address")
+            .and_then(Value::as_str)
+            .is_some_and(|a| a.starts_with("127.0.0.1:"))
 }
 
 pub enum Written {
@@ -137,8 +147,11 @@ mod tests {
     impl Tmp {
         fn new() -> Tmp {
             static N: AtomicU32 = AtomicU32::new(0);
-            let dir = std::env::temp_dir()
-                .join(format!("gglinux-prefixes-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+            let dir = std::env::temp_dir().join(format!(
+                "gglinux-prefixes-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
             std::fs::create_dir_all(&dir).unwrap();
             Tmp(dir)
         }
@@ -153,7 +166,8 @@ mod tests {
     /// A Steam root with a vdf listing itself and `extra`, and prefixes 10 (with ProgramData) and 20 (without).
     fn steam(tmp: &Tmp, extra: &Path) -> PathBuf {
         let root = tmp.0.join("Steam");
-        std::fs::create_dir_all(root.join("steamapps/compatdata/10/pfx/drive_c/ProgramData")).unwrap();
+        std::fs::create_dir_all(root.join("steamapps/compatdata/10/pfx/drive_c/ProgramData"))
+            .unwrap();
         std::fs::create_dir_all(root.join("steamapps/compatdata/20")).unwrap();
         std::fs::write(root.join("steamapps/libraryfolders.vdf"), format!(
             "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t\t\"label\"\t\t\"\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
@@ -165,10 +179,14 @@ mod tests {
     fn libraries_come_from_the_vdf_deduplicated() {
         let tmp = Tmp::new();
         let other = tmp.0.join("Games");
-        std::fs::create_dir_all(other.join("steamapps/compatdata/30/pfx/drive_c/ProgramData")).unwrap();
+        std::fs::create_dir_all(other.join("steamapps/compatdata/30/pfx/drive_c/ProgramData"))
+            .unwrap();
         let root = steam(&tmp, &other);
         let libs = libraries(&[root.clone(), root.clone()]);
-        assert_eq!(libs, vec![root.canonicalize().unwrap(), other.canonicalize().unwrap()]);
+        assert_eq!(
+            libs,
+            vec![root.canonicalize().unwrap(), other.canonicalize().unwrap()]
+        );
         let dirs = program_data_dirs(&libs);
         assert_eq!(dirs.len(), 2, "prefix 20 has no ProgramData yet");
         assert!(dirs.iter().all(|d| d.ends_with("pfx/drive_c/ProgramData")));
@@ -190,8 +208,14 @@ mod tests {
         assert!(matches!(write(&pd, 5000).unwrap(), Written::Wrote));
         assert!(matches!(write(&pd, 5000).unwrap(), Written::Unchanged));
         let file = pd.join("SteelSeries/SteelSeries Engine 3/coreProps.json");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"address":"127.0.0.1:5000"}"#);
-        assert!(matches!(write(&pd, 6000).unwrap(), Written::Wrote), "our own file follows the port");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            r#"{"address":"127.0.0.1:5000"}"#
+        );
+        assert!(
+            matches!(write(&pd, 6000).unwrap(), Written::Wrote),
+            "our own file follows the port"
+        );
         assert!(holds_ours(&pd));
     }
 
@@ -205,7 +229,10 @@ mod tests {
         std::fs::write(dir.join("coreProps.json"), gg).unwrap();
         assert!(matches!(write(&pd, 5000).unwrap(), Written::Foreign));
         assert!(!remove(&pd).unwrap());
-        assert_eq!(std::fs::read_to_string(dir.join("coreProps.json")).unwrap(), gg);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("coreProps.json")).unwrap(),
+            gg
+        );
         assert!(!holds_ours(&pd));
     }
 
@@ -216,12 +243,18 @@ mod tests {
         std::fs::create_dir_all(&pd).unwrap();
         write(&pd, 5000).unwrap();
         assert!(remove(&pd).unwrap());
-        assert!(!pd.join("SteelSeries").exists(), "both directories were ours and empty");
+        assert!(
+            !pd.join("SteelSeries").exists(),
+            "both directories were ours and empty"
+        );
         assert!(!remove(&pd).unwrap(), "nothing left to remove");
         write(&pd, 5000).unwrap();
         std::fs::write(pd.join("SteelSeries/other.txt"), "keep").unwrap();
         assert!(remove(&pd).unwrap());
-        assert!(pd.join("SteelSeries/other.txt").exists(), "a directory with other files stays");
+        assert!(
+            pd.join("SteelSeries/other.txt").exists(),
+            "a directory with other files stays"
+        );
     }
 
     #[test]

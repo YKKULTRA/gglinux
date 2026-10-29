@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Frequency response of an EQ chain, computed exactly as PipeWire's
 // filter-chain filters are (spa/plugins/audioconvert/biquad.c): RBJ cookbook
 // biquads with alpha = sin(w0) / 2Q for peaking bands and both shelves. What

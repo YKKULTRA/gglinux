@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Read-only probe for the Nova Pro Wireless base station.
 //!
 //! ```text
@@ -17,8 +18,7 @@ use gg_device_headset::{proto, Headset};
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -60,8 +60,7 @@ fn stream_events(headset: &Headset) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if let Some(report) = headset.read_event()? {
-            let tail: Vec<String> =
-                report.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            let tail: Vec<String> = report.iter().take(8).map(|b| format!("{b:02x}")).collect();
             let label = match report.get(1) {
                 Some(0x45) => "chatmix dial",
                 Some(0x25) => "volume",

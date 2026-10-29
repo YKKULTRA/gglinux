@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Instant replay: a supervised `gpu-screen-recorder` in replay mode, saved
 //! on `SIGUSR1`. Off by default. With `games_only`, it records only while a
 //! game from the profiles' rules runs (the profiles watcher says which). A
@@ -28,9 +29,15 @@ const INSTALL_POLL: Duration = Duration::from_secs(5);
 
 pub enum Command {
     GetState(Reply<ClipsState>),
-    SetSettings { settings: ClipsSettings, reply: Reply<()> },
+    SetSettings {
+        settings: ClipsSettings,
+        reply: Reply<()>,
+    },
     Save(Reply<()>),
-    Delete { name: String, reply: Reply<()> },
+    Delete {
+        name: String,
+        reply: Reply<()>,
+    },
     /// Stop the recorder before the daemon exits; it's a separate process.
     Shutdown(Reply<()>),
 }
@@ -50,8 +57,12 @@ pub struct Handle {
 impl Handle {
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(make(reply_tx)).map_err(|_| "clips are not running".to_string())?;
-        reply_rx.await.map_err(|_| "clips dropped the request".to_string())?
+        self.tx
+            .send(make(reply_tx))
+            .map_err(|_| "clips are not running".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "clips dropped the request".to_string())?
     }
 }
 
@@ -69,7 +80,10 @@ impl Running {
     /// notice may still be queued. Returns whether it was sent; once it says
     /// no, `exited` is spent and mustn't be awaited.
     fn signal(&mut self, sig: i32) -> bool {
-        if !matches!(self.exited.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+        if !matches!(
+            self.exited.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ) {
             return false;
         }
         // SAFETY: plain kill(2) on our own child. The waiter fires `exited`
@@ -112,7 +126,9 @@ pub struct Controller {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 impl Controller {
@@ -126,10 +142,24 @@ impl Controller {
     ) -> (Self, mpsc::UnboundedReceiver<Internal>) {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
         let c = Controller {
-            settings, path, program, event_tx, internal_tx,
-            running: None, generation: 0, delay: Duration::ZERO, retry_at: None,
-            game: None, linger_until: None, mixed: None,
-            error: None, hotkey: None, hotkey_error: None, hotkey_task: None, hotkey_allowed: false, published: None,
+            settings,
+            path,
+            program,
+            event_tx,
+            internal_tx,
+            running: None,
+            generation: 0,
+            delay: Duration::ZERO,
+            retry_at: None,
+            game: None,
+            linger_until: None,
+            mixed: None,
+            error: None,
+            hotkey: None,
+            hotkey_error: None,
+            hotkey_task: None,
+            hotkey_allowed: false,
+            published: None,
         };
         (c, internal_rx)
     }
@@ -164,7 +194,11 @@ impl Controller {
             return self.retry_later(format!("cannot create {}: {e}", dir.display()));
         }
         let argv = recorder::argv(&self.settings, &dir, self.mixed.as_deref());
-        let mut child = match Process::new(&program).args(&argv[1..]).kill_on_drop(false).spawn() {
+        let mut child = match Process::new(&program)
+            .args(&argv[1..])
+            .kill_on_drop(false)
+            .spawn()
+        {
             Ok(c) => c,
             Err(e) => return self.retry_later(format!("could not start gpu-screen-recorder: {e}")),
         };
@@ -179,7 +213,12 @@ impl Controller {
             let _ = internal.send(Internal::Exited { generation });
         });
         info!(pid, "replay buffer recording");
-        self.running = Some(Running { pid, generation, started: Instant::now(), exited });
+        self.running = Some(Running {
+            pid,
+            generation,
+            started: Instant::now(),
+            exited,
+        });
         self.error = None;
         self.retry_at = None;
         self.ensure_hotkey();
@@ -198,7 +237,11 @@ impl Controller {
 
     pub async fn stop(&mut self) {
         if let Some(mut r) = self.running.take() {
-            if r.signal(libc::SIGINT) && tokio::time::timeout(STOP_GRACE, &mut r.exited).await.is_err() {
+            if r.signal(libc::SIGINT)
+                && tokio::time::timeout(STOP_GRACE, &mut r.exited)
+                    .await
+                    .is_err()
+            {
                 warn!("gpu-screen-recorder ignored SIGINT; killing it");
                 if r.signal(libc::SIGKILL) {
                     let _ = tokio::time::timeout(Duration::from_secs(1), &mut r.exited).await;
@@ -216,8 +259,16 @@ impl Controller {
     pub async fn save(&mut self) -> Result<(), String> {
         // A child that's reaped but not yet handled stays in `running`, so its
         // `Exited` notice still schedules the restart.
-        if !self.running.as_mut().is_some_and(|r| r.signal(libc::SIGUSR1)) {
-            return Err(if self.settings.enabled { "the recorder isn't running".into() } else { "clips are off".into() });
+        if !self
+            .running
+            .as_mut()
+            .is_some_and(|r| r.signal(libc::SIGUSR1))
+        {
+            return Err(if self.settings.enabled {
+                "the recorder isn't running".into()
+            } else {
+                "clips are off".into()
+            });
         }
         let internal = self.internal_tx.clone();
         tokio::spawn(async move {
@@ -253,7 +304,8 @@ impl Controller {
         if self.game.is_some() {
             self.linger_until = None;
             self.start().await;
-        } else if self.settings.games_only && self.running.is_some() && self.linger_until.is_none() {
+        } else if self.settings.games_only && self.running.is_some() && self.linger_until.is_none()
+        {
             self.linger_until = Some(Instant::now() + GAME_GRACE);
         } else if self.running.is_none() && !self.wanted() {
             // A restart pending for the game that's gone won't happen.
@@ -288,15 +340,25 @@ impl Controller {
     pub async fn on_internal(&mut self, msg: Internal) {
         match msg {
             Internal::Exited { generation } => {
-                if self.running.as_ref().is_some_and(|r| r.generation == generation) {
+                if self
+                    .running
+                    .as_ref()
+                    .is_some_and(|r| r.generation == generation)
+                {
                     let r = self.running.take().expect("checked");
                     self.linger_until = None;
                     // After the game has gone, an exit just ends it.
                     if self.wanted() {
                         self.delay = recorder::next_delay(r.started.elapsed(), self.delay);
                         self.retry_at = Some(Instant::now() + self.delay);
-                        self.error = Some(format!("gpu-screen-recorder stopped; retrying in {} s", self.delay.as_secs()));
-                        warn!(delay_s = self.delay.as_secs(), "gpu-screen-recorder stopped unexpectedly");
+                        self.error = Some(format!(
+                            "gpu-screen-recorder stopped; retrying in {} s",
+                            self.delay.as_secs()
+                        ));
+                        warn!(
+                            delay_s = self.delay.as_secs(),
+                            "gpu-screen-recorder stopped unexpectedly"
+                        );
                     }
                 }
             }
@@ -308,7 +370,9 @@ impl Controller {
                 }
                 Err(e) => {
                     self.hotkey = None;
-                    self.hotkey_error = Some(format!("no hotkey ({e}); use the button or `ggctl clip save`"));
+                    self.hotkey_error = Some(format!(
+                        "no hotkey ({e}); use the button or `ggctl clip save`"
+                    ));
                 }
             },
             Internal::SaveFromHotkey => {
@@ -341,7 +405,10 @@ impl Controller {
             hotkey: self.hotkey.clone(),
             hotkey_error: self.hotkey_error.clone(),
             game: self.game.clone(),
-            waiting: self.settings.enabled && self.settings.games_only && self.running.is_none() && self.game.is_none(),
+            waiting: self.settings.enabled
+                && self.settings.games_only
+                && self.running.is_none()
+                && self.game.is_none(),
         }
     }
 
@@ -365,8 +432,9 @@ impl Controller {
                 let _ = reply.send(self.save().await);
             }
             Command::Delete { name, reply } => {
-                let result = recorder::clip_path(&self.dir(), &name)
-                    .and_then(|p| std::fs::remove_file(&p).map_err(|e| format!("could not delete {name}: {e}")));
+                let result = recorder::clip_path(&self.dir(), &name).and_then(|p| {
+                    std::fs::remove_file(&p).map_err(|e| format!("could not delete {name}: {e}"))
+                });
                 let _ = reply.send(result);
                 self.publish();
             }
@@ -436,7 +504,14 @@ mod tests {
         } else {
             format!("trap 'echo usr1 >> {l}' USR1\ntrap 'echo int >> {l}; exit 0' INT\nwhile true; do sleep 0.05; done", l = log.display())
         };
-        std::fs::write(&script, format!("#!/bin/sh\necho \"start $*\" >> {}\n{body}\n", log.display())).unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"start $*\" >> {}\n{body}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         script
@@ -449,7 +524,10 @@ mod tests {
         use std::hash::BuildHasher;
         use std::os::unix::fs::DirBuilderExt;
         let random = std::collections::hash_map::RandomState::new().hash_one(tag);
-        let d = std::env::temp_dir().join(format!("gglinux-clipctl-{}-{tag}-{random:016x}", std::process::id()));
+        let d = std::env::temp_dir().join(format!(
+            "gglinux-clipctl-{}-{tag}-{random:016x}",
+            std::process::id()
+        ));
         std::fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
         d
     }
@@ -459,14 +537,21 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let (a, b) = (scratch("probe"), scratch("probe"));
         assert_ne!(a, b, "a name nobody can guess, so nobody can make it first");
-        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         std::fs::remove_dir_all(a).unwrap();
         std::fs::remove_dir_all(b).unwrap();
     }
 
     fn controller(dir: &Path, program: PathBuf) -> (Controller, mpsc::UnboundedReceiver<Internal>) {
         let (event_tx, _) = broadcast::channel(8);
-        let settings = ClipsSettings { enabled: true, dir: Some(dir.join("clips").to_string_lossy().into_owned()), ..ClipsSettings::default() };
+        let settings = ClipsSettings {
+            enabled: true,
+            dir: Some(dir.join("clips").to_string_lossy().into_owned()),
+            ..ClipsSettings::default()
+        };
         Controller::new(settings, dir.join("clips.json"), Some(program), event_tx)
     }
 
@@ -492,7 +577,11 @@ mod tests {
 
     async fn log_has_line(dir: &Path, wanted: impl Fn(&str) -> bool) -> bool {
         for _ in 0..40 {
-            if std::fs::read_to_string(dir.join("log")).unwrap_or_default().lines().any(&wanted) {
+            if std::fs::read_to_string(dir.join("log"))
+                .unwrap_or_default()
+                .lines()
+                .any(&wanted)
+            {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -520,8 +609,16 @@ mod tests {
         let (mut c, _internal) = controller(&d, stand_in(&d, false));
         start(&mut c).await;
         assert!(log_has(&d, "start").await);
-        c.set_settings(ClipsSettings { enabled: false, ..c.settings.clone() }).await.unwrap();
-        assert!(log_has(&d, "int").await, "SIGINT, so the file being written is finished");
+        c.set_settings(ClipsSettings {
+            enabled: false,
+            ..c.settings.clone()
+        })
+        .await
+        .unwrap();
+        assert!(
+            log_has(&d, "int").await,
+            "SIGINT, so the file being written is finished"
+        );
         assert!(!c.state().recording);
         std::fs::remove_dir_all(d).unwrap();
     }
@@ -532,7 +629,10 @@ mod tests {
         let (mut c, mut internal) = controller(&d, stand_in(&d, true));
         start(&mut c).await;
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(2), internal.recv()).await.unwrap().unwrap();
+            let msg = tokio::time::timeout(Duration::from_secs(2), internal.recv())
+                .await
+                .unwrap()
+                .unwrap();
             let exited = matches!(msg, Internal::Exited { .. });
             c.on_internal(msg).await;
             if exited {
@@ -541,7 +641,11 @@ mod tests {
         }
         let s = c.state();
         assert!(!s.recording);
-        assert!(s.error.as_deref().is_some_and(|e| e.contains("stopped")), "{:?}", s.error);
+        assert!(
+            s.error.as_deref().is_some_and(|e| e.contains("stopped")),
+            "{:?}",
+            s.error
+        );
         assert_eq!(c.delay, Duration::from_secs(5));
         assert!(c.retry_at.is_some());
         std::fs::remove_dir_all(d).unwrap();
@@ -552,16 +656,32 @@ mod tests {
         let d = scratch("sonar");
         let (mut c, _internal) = controller(&d, stand_in(&d, false));
         start(&mut c).await;
-        assert!(log_has_line(&d, |l| l.starts_with("start") && l.ends_with("-a default_output")).await);
+        assert!(
+            log_has_line(&d, |l| l.starts_with("start")
+                && l.ends_with("-a default_output"))
+            .await
+        );
         // Sonar on: the default output is now the Game channel alone.
-        c.set_mixed(Some("alsa_output.usb-SteelSeries".into())).await;
+        c.set_mixed(Some("alsa_output.usb-SteelSeries".into()))
+            .await;
         start(&mut c).await; // retried if the stand-in was busy
-        assert!(log_has(&d, "int").await, "the recorder hearing the default output is stopped");
+        assert!(
+            log_has(&d, "int").await,
+            "the recorder hearing the default output is stopped"
+        );
         let monitor = "-a device:alsa_output.usb-SteelSeries.monitor";
-        assert!(log_has_line(&d, |l| l.starts_with("start") && l.ends_with(monitor)).await, "and started again on every channel");
-        c.set_mixed(Some("alsa_output.usb-SteelSeries".into())).await;
+        assert!(
+            log_has_line(&d, |l| l.starts_with("start") && l.ends_with(monitor)).await,
+            "and started again on every channel"
+        );
+        c.set_mixed(Some("alsa_output.usb-SteelSeries".into()))
+            .await;
         let log = std::fs::read_to_string(d.join("log")).unwrap();
-        assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 2, "the same output changes nothing:\n{log}");
+        assert_eq!(
+            log.lines().filter(|l| l.starts_with("start")).count(),
+            2,
+            "the same output changes nothing:\n{log}"
+        );
         c.stop().await;
         std::fs::remove_dir_all(d).unwrap();
     }
@@ -573,7 +693,13 @@ mod tests {
         // Something in the way, like a drive that's mounted only later.
         std::fs::write(d.join("clips"), b"").unwrap();
         c.start().await;
-        assert!(c.error.as_deref().is_some_and(|e| e.starts_with("cannot create")), "{:?}", c.error);
+        assert!(
+            c.error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("cannot create")),
+            "{:?}",
+            c.error
+        );
         assert!(c.retry_at.is_some(), "tried again after the backoff");
         assert_eq!(c.delay, Duration::from_secs(5));
         std::fs::remove_file(d.join("clips")).unwrap();
@@ -592,7 +718,13 @@ mod tests {
         std::fs::write(&program, "#!/bin/sh\n").unwrap(); // not executable
         let (mut c, _internal) = controller(&d, program);
         c.start().await;
-        assert!(c.error.as_deref().is_some_and(|e| e.starts_with("could not start")), "{:?}", c.error);
+        assert!(
+            c.error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("could not start")),
+            "{:?}",
+            c.error
+        );
         assert!(c.retry_at.is_some(), "tried again after the backoff");
         assert!(!c.state().recording);
         std::fs::remove_dir_all(d).unwrap();
@@ -622,17 +754,28 @@ mod tests {
         let (mut c, _internal) = controller(&d, stand_in(&d, false));
         start(&mut c).await;
         assert!(log_has(&d, "start").await);
-        c.set_settings(ClipsSettings { enabled: false, ..c.settings.clone() }).await.unwrap();
+        c.set_settings(ClipsSettings {
+            enabled: false,
+            ..c.settings.clone()
+        })
+        .await
+        .unwrap();
         assert_eq!(c.save().await, Err("clips are off".into()));
         let log = std::fs::read_to_string(d.join("log")).unwrap();
-        assert!(!log.lines().any(|l| l == "usr1"), "no signal was sent:\n{log}");
+        assert!(
+            !log.lines().any(|l| l == "usr1"),
+            "no signal was sent:\n{log}"
+        );
         std::fs::remove_dir_all(d).unwrap();
     }
 
     /// The next exit notice, left unhandled.
     async fn next_exit(internal: &mut mpsc::UnboundedReceiver<Internal>) -> Internal {
         loop {
-            let msg = tokio::time::timeout(Duration::from_secs(2), internal.recv()).await.unwrap().unwrap();
+            let msg = tokio::time::timeout(Duration::from_secs(2), internal.recv())
+                .await
+                .unwrap()
+                .unwrap();
             if matches!(msg, Internal::Exited { .. }) {
                 return msg;
             }
@@ -649,11 +792,16 @@ mod tests {
         let exited = next_exit(&mut internal).await;
         assert_eq!(c.save().await, Err("the recorder isn't running".into()));
         c.on_internal(exited).await;
-        assert!(c.retry_at.is_some(), "the notice still schedules the restart");
+        assert!(
+            c.retry_at.is_some(),
+            "the notice still schedules the restart"
+        );
         // Stopping signals nothing either, and never awaits the notice its check used up.
         start(&mut c).await;
         let _exited = next_exit(&mut internal).await;
-        tokio::time::timeout(Duration::from_secs(1), c.stop()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), c.stop())
+            .await
+            .unwrap();
         assert!(!c.state().recording);
         std::fs::remove_dir_all(d).unwrap();
     }
@@ -666,8 +814,17 @@ mod tests {
         let exited = next_exit(&mut internal).await;
         c.on_internal(exited).await;
         assert!(c.state().error.is_some_and(|e| e.contains("retrying")));
-        c.set_settings(ClipsSettings { enabled: false, ..c.settings.clone() }).await.unwrap();
-        assert_eq!((c.state().error, c.retry_at), (None, None), "nothing will be retried");
+        c.set_settings(ClipsSettings {
+            enabled: false,
+            ..c.settings.clone()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            (c.state().error, c.retry_at),
+            (None, None),
+            "nothing will be retried"
+        );
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -692,7 +849,10 @@ mod tests {
         assert!(s.recording && !s.waiting);
         assert_eq!(s.game.as_deref(), Some("game-a"));
         c.set_game(None).await;
-        assert!(c.state().recording, "kept through the grace, so the game's last moments can be saved");
+        assert!(
+            c.state().recording,
+            "kept through the grace, so the game's last moments can be saved"
+        );
         assert!(c.linger_until.is_some());
         c.linger_over().await;
         assert!(log_has(&d, "int").await, "stopped with SIGINT");
@@ -714,7 +874,11 @@ mod tests {
         c.linger_over().await; // a timer that fires late changes nothing
         assert!(c.state().recording);
         let log = std::fs::read_to_string(d.join("log")).unwrap();
-        assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 1, "one recorder throughout:\n{log}");
+        assert_eq!(
+            log.lines().filter(|l| l.starts_with("start")).count(),
+            1,
+            "one recorder throughout:\n{log}"
+        );
         assert!(!log.lines().any(|l| l == "int"), "{log}");
         c.stop().await;
         std::fs::remove_dir_all(d).unwrap();
@@ -732,7 +896,11 @@ mod tests {
         c.set_game(None).await;
         let s = c.state();
         assert!(s.waiting);
-        assert_eq!((s.error, c.retry_at), (None, None), "no game, nothing to retry");
+        assert_eq!(
+            (s.error, c.retry_at),
+            (None, None),
+            "no game, nothing to retry"
+        );
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -742,9 +910,14 @@ mod tests {
         let (mut c, _internal) = games_only(&d, stand_in(&d, false));
         c.set_game(Some("game-a".into())).await;
         start(&mut c).await;
-        c.on_internal(Internal::Hotkey(Err("the portal refused".into()))).await;
+        c.on_internal(Internal::Hotkey(Err("the portal refused".into())))
+            .await;
         let note = c.state().hotkey_error;
-        assert!(note.as_deref().is_some_and(|n| n.contains("the portal refused")), "{note:?}");
+        assert!(
+            note.as_deref()
+                .is_some_and(|n| n.contains("the portal refused")),
+            "{note:?}"
+        );
         // The game ends and another starts: a new recorder, and no new binding.
         c.set_game(None).await;
         c.linger_over().await;
@@ -763,7 +936,12 @@ mod tests {
         let (mut c, _internal) = controller(&d, stand_in(&d, false));
         start(&mut c).await;
         assert!(log_has(&d, "start").await);
-        c.set_settings(ClipsSettings { games_only: true, ..c.settings.clone() }).await.unwrap();
+        c.set_settings(ClipsSettings {
+            games_only: true,
+            ..c.settings.clone()
+        })
+        .await
+        .unwrap();
         assert!(log_has(&d, "int").await);
         assert!(c.state().waiting);
         std::fs::remove_dir_all(d).unwrap();
@@ -778,7 +956,10 @@ mod tests {
         c.set_game(None).await;
         let exited = next_exit(&mut internal).await;
         c.on_internal(exited).await;
-        assert!(c.retry_at.is_none() && c.linger_until.is_none(), "no restart without the game");
+        assert!(
+            c.retry_at.is_none() && c.linger_until.is_none(),
+            "no restart without the game"
+        );
         assert!(c.state().waiting);
         std::fs::remove_dir_all(d).unwrap();
     }

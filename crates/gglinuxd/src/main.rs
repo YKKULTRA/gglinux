@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! gglinuxd — the gglinux background daemon.
 //!
 //! Current scope: enumerate SteelSeries devices, monitor hotplug, control the
@@ -118,17 +119,25 @@ fn claim_socket(path: &Path) -> Result<UnixListener> {
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
             let _ = std::fs::remove_file(path);
         }
-        Err(e) => return Err(e).with_context(|| format!("checking {} for a running gglinuxd", path.display())),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("checking {} for a running gglinuxd", path.display()))
+        }
     }
     UnixListener::bind(path).with_context(|| format!("binding unix socket {}", path.display()))
 }
 
 /// Bridge the blocking gg-hid monitor thread into the async world via watch/broadcast.
-fn spawn_hid_monitor(snapshot_tx: watch::Sender<Vec<DeviceInfo>>, event_tx: broadcast::Sender<Event>) {
+fn spawn_hid_monitor(
+    snapshot_tx: watch::Sender<Vec<DeviceInfo>>,
+    event_tx: broadcast::Sender<Event>,
+) {
     std::thread::Builder::new()
         .name("gg-hid".into())
         .spawn(move || {
-            let res = gg_hid::run_monitor(|snapshot, events| publish(&snapshot_tx, &event_tx, snapshot, events));
+            let res = gg_hid::run_monitor(|snapshot, events| {
+                publish(&snapshot_tx, &event_tx, snapshot, events)
+            });
             if let Err(e) = res {
                 error!(error = %e, "HID monitor stopped");
             }
@@ -147,7 +156,9 @@ fn publish(
     // A change with no add or remove to tell it by goes out as the whole list:
     // above all the first scan, which a client that connected before it was
     // sent as empty.
-    let whole = events.is_empty().then(|| Event::DevicesChanged { devices: snapshot.clone() });
+    let whole = events.is_empty().then(|| Event::DevicesChanged {
+        devices: snapshot.clone(),
+    });
     // `send` here is synchronous — safe to call from this OS thread. The list
     // is updated first: a client subscribes before it reads the list, so one
     // connecting meanwhile gets the new list or the event, never neither.
@@ -348,34 +359,58 @@ async fn dispatch(
             Err(message) => ResponseData::Error { message },
         },
         Request::SetSonarEnabled { enabled } => outcome(
-            workers.sonar.send::<()>(|reply| SonarCommand::SetEnabled { enabled, reply }).await,
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetEnabled { enabled, reply })
+                .await,
         ),
         Request::SetSonarOutput { name } => outcome(
-            workers.sonar.send::<()>(|reply| SonarCommand::SetOutput { name, reply }).await,
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetOutput { name, reply })
+                .await,
         ),
         Request::SetChannelVolume { channel, volume } => outcome(
             workers
                 .sonar
-                .send::<()>(|reply| SonarCommand::SetVolume { channel, volume, reply })
+                .send::<()>(|reply| SonarCommand::SetVolume {
+                    channel,
+                    volume,
+                    reply,
+                })
                 .await,
         ),
         Request::SetChatMix { balance } => outcome(
-            workers.sonar.send::<()>(|reply| SonarCommand::SetChatMix { balance, reply }).await,
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetChatMix { balance, reply })
+                .await,
         ),
         Request::SetAppChannel { binary, channel } => outcome(
             workers
                 .sonar
-                .send::<()>(|reply| SonarCommand::SetAppChannel { binary, channel, reply })
+                .send::<()>(|reply| SonarCommand::SetAppChannel {
+                    binary,
+                    channel,
+                    reply,
+                })
                 .await,
         ),
         Request::SetChannelEq { channel, bands } => outcome(
             workers
                 .sonar
-                .send::<()>(|reply| SonarCommand::SetChannelEq { channel, bands, reply })
+                .send::<()>(|reply| SonarCommand::SetChannelEq {
+                    channel,
+                    bands,
+                    reply,
+                })
                 .await,
         ),
         Request::SetHeadphoneEq { eq } => outcome(
-            workers.sonar.send::<()>(|reply| SonarCommand::SetHeadphoneEq { eq, reply }).await,
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetHeadphoneEq { eq, reply })
+                .await,
         ),
         Request::ImportAutoEq { text, name } => outcome(
             workers
@@ -384,7 +419,10 @@ async fn dispatch(
                 .await,
         ),
         Request::SetMicInput { name } => outcome(
-            workers.sonar.send::<()>(|reply| SonarCommand::SetMicInput { name, reply }).await,
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetMicInput { name, reply })
+                .await,
         ),
         Request::SetMicSettings { settings } => outcome(
             workers
@@ -393,24 +431,41 @@ async fn dispatch(
                 .await,
         ),
         Request::SetMicVolume { volume } => outcome(
-            workers.sonar.send::<()>(|reply| SonarCommand::SetMicVolume { volume, reply }).await,
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetMicVolume { volume, reply })
+                .await,
         ),
         Request::SetStreamer { enabled } => outcome(
-            workers.sonar.send::<()>(|reply| SonarCommand::SetStreamer { enabled, reply }).await,
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetStreamer { enabled, reply })
+                .await,
         ),
         Request::SetStreamVolume { channel, volume } => outcome(
             workers
                 .sonar
-                .send::<()>(|reply| SonarCommand::SetStreamVolume { channel, volume, reply })
+                .send::<()>(|reply| SonarCommand::SetStreamVolume {
+                    channel,
+                    volume,
+                    reply,
+                })
                 .await,
         ),
         Request::SetStreamMaster { volume } => outcome(
-            workers.sonar.send::<()>(|reply| SonarCommand::SetStreamMaster { volume, reply }).await,
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetStreamMaster { volume, reply })
+                .await,
         ),
         Request::SetSmartVolume { channel, settings } => outcome(
             workers
                 .sonar
-                .send::<()>(|reply| SonarCommand::SetSmartVolume { channel, settings, reply })
+                .send::<()>(|reply| SonarCommand::SetSmartVolume {
+                    channel,
+                    settings,
+                    reply,
+                })
                 .await,
         ),
         Request::GetKeyboardState => match workers.keyboard.send(KeyboardCommand::GetState).await {
@@ -423,50 +478,80 @@ async fn dispatch(
                 .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
                 .await,
         ),
-        Request::GetGamesenseState => match workers.gamesense.send(GamesenseCommand::GetState).await {
-            Ok(state) => ResponseData::Gamesense { state },
-            Err(message) => ResponseData::Error { message },
-        },
+        Request::GetGamesenseState => {
+            match workers.gamesense.send(GamesenseCommand::GetState).await {
+                Ok(state) => ResponseData::Gamesense { state },
+                Err(message) => ResponseData::Error { message },
+            }
+        }
         Request::SetGamesenseEnabled { enabled } => outcome(
-            workers.gamesense.send::<()>(|reply| GamesenseCommand::SetEnabled { enabled, reply }).await,
+            workers
+                .gamesense
+                .send::<()>(|reply| GamesenseCommand::SetEnabled { enabled, reply })
+                .await,
         ),
         Request::SetGameEnabled { game, enabled } => outcome(
             workers
                 .gamesense
-                .send::<()>(|reply| GamesenseCommand::SetGameEnabled { game, enabled, reply })
+                .send::<()>(|reply| GamesenseCommand::SetGameEnabled {
+                    game,
+                    enabled,
+                    reply,
+                })
                 .await,
         ),
         Request::RemoveGame { game } => outcome(
-            workers.gamesense.send::<()>(|reply| GamesenseCommand::RemoveGame { game, reply }).await,
+            workers
+                .gamesense
+                .send::<()>(|reply| GamesenseCommand::RemoveGame { game, reply })
+                .await,
         ),
         Request::GamesenseTest => outcome(workers.gamesense.send(GamesenseCommand::RunTest).await),
         Request::GetProfiles => match workers.profiles.send(ProfilesCommand::GetState).await {
             Ok(state) => ResponseData::Profiles { state },
             Err(message) => ResponseData::Error { message },
         },
-        Request::SaveProfile { name } => {
-            outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::Save { name, reply }).await)
-        }
-        Request::ApplyProfile { name } => {
-            outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::Apply { name, reply }).await)
-        }
-        Request::DeleteProfile { name } => {
-            outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::Delete { name, reply }).await)
-        }
-        Request::SetGameRules { rules } => {
-            outcome(workers.profiles.send::<()>(|reply| ProfilesCommand::SetRules { rules, reply }).await)
-        }
+        Request::SaveProfile { name } => outcome(
+            workers
+                .profiles
+                .send::<()>(|reply| ProfilesCommand::Save { name, reply })
+                .await,
+        ),
+        Request::ApplyProfile { name } => outcome(
+            workers
+                .profiles
+                .send::<()>(|reply| ProfilesCommand::Apply { name, reply })
+                .await,
+        ),
+        Request::DeleteProfile { name } => outcome(
+            workers
+                .profiles
+                .send::<()>(|reply| ProfilesCommand::Delete { name, reply })
+                .await,
+        ),
+        Request::SetGameRules { rules } => outcome(
+            workers
+                .profiles
+                .send::<()>(|reply| ProfilesCommand::SetRules { rules, reply })
+                .await,
+        ),
         Request::GetClipsState => match workers.clips.send(ClipsCommand::GetState).await {
             Ok(state) => ResponseData::Clips { state },
             Err(message) => ResponseData::Error { message },
         },
-        Request::SetClipsSettings { settings } => {
-            outcome(workers.clips.send::<()>(|reply| ClipsCommand::SetSettings { settings, reply }).await)
-        }
+        Request::SetClipsSettings { settings } => outcome(
+            workers
+                .clips
+                .send::<()>(|reply| ClipsCommand::SetSettings { settings, reply })
+                .await,
+        ),
         Request::SaveClip => outcome(workers.clips.send(ClipsCommand::Save).await),
-        Request::DeleteClip { name } => {
-            outcome(workers.clips.send::<()>(|reply| ClipsCommand::Delete { name, reply }).await)
-        }
+        Request::DeleteClip { name } => outcome(
+            workers
+                .clips
+                .send::<()>(|reply| ClipsCommand::Delete { name, reply })
+                .await,
+        ),
     };
     ServerMessage::response(frame.id, result)
 }
@@ -520,7 +605,10 @@ async fn shutdown_devices(workers: &Workers) {
     }
 }
 
-async fn write_message(write_half: &mut (impl AsyncWriteExt + Unpin), msg: &ServerMessage) -> Result<()> {
+async fn write_message(
+    write_half: &mut (impl AsyncWriteExt + Unpin),
+    msg: &ServerMessage,
+) -> Result<()> {
     let line = msg.to_line()?;
     write_half.write_all(line.as_bytes()).await?;
     Ok(())
@@ -539,7 +627,10 @@ mod tests {
             use std::hash::BuildHasher;
             use std::os::unix::fs::DirBuilderExt;
             let random = std::collections::hash_map::RandomState::new().hash_one(tag);
-            let d = std::env::temp_dir().join(format!("gglinuxd-{}-{tag}-{random:016x}", std::process::id()));
+            let d = std::env::temp_dir().join(format!(
+                "gglinuxd-{}-{tag}-{random:016x}",
+                std::process::id()
+            ));
             std::fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
             Scratch(d)
         }
@@ -558,11 +649,16 @@ mod tests {
         let running = claim_socket(&path).unwrap();
 
         let second = claim_socket(&path);
-        assert!(second.is_err(), "a second daemon must not start while one listens");
+        assert!(
+            second.is_err(),
+            "a second daemon must not start while one listens"
+        );
         assert!(format!("{:#}", second.err().unwrap()).contains("already running"));
 
         // Clients still reach the first one.
-        let client = UnixStream::connect(&path).await.expect("the running daemon's socket is still there");
+        let client = UnixStream::connect(&path)
+            .await
+            .expect("the running daemon's socket is still there");
         tokio::time::timeout(Duration::from_secs(1), running.accept())
             .await
             .expect("the running daemon hears the client")
@@ -580,7 +676,10 @@ mod tests {
 
         let listener = claim_socket(&path).expect("nobody listens there, so it can go");
         let _client = UnixStream::connect(&path).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), listener.accept()).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// Run [`serve`] with `answer` while `client` talks to it over a socket
@@ -593,15 +692,28 @@ mod tests {
         let (daemon_end, client_end) = UnixStream::pair().unwrap();
         let (_snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
         let (event_tx, _) = broadcast::channel(8);
-        let both = async { tokio::join!(serve(daemon_end, &snapshot_rx, &event_tx, answer), client(client_end)) };
-        let (served, ()) = tokio::time::timeout(Duration::from_secs(5), both).await.expect("the connection finishes");
+        let both = async {
+            tokio::join!(
+                serve(daemon_end, &snapshot_rx, &event_tx, answer),
+                client(client_end)
+            )
+        };
+        let (served, ()) = tokio::time::timeout(Duration::from_secs(5), both)
+            .await
+            .expect("the connection finishes");
         served.unwrap();
     }
 
     /// The id of the next response, past any notifications.
-    async fn next_response(lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>) -> u64 {
+    async fn next_response(
+        lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    ) -> u64 {
         loop {
-            let line = lines.next_line().await.unwrap().expect("the daemon hung up");
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("the daemon hung up");
             if let ServerMessage::Response { id, .. } = serde_json::from_str(&line).unwrap() {
                 return id;
             }
@@ -630,8 +742,13 @@ mod tests {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
             write.write_all(b"slow\nfast\n").await.unwrap();
-            let first = tokio::time::timeout(Duration::from_secs(1), next_response(&mut lines)).await;
-            assert_eq!(first.ok(), Some(2), "the fast request is answered while the slow one waits");
+            let first =
+                tokio::time::timeout(Duration::from_secs(1), next_response(&mut lines)).await;
+            assert_eq!(
+                first.ok(),
+                Some(2),
+                "the fast request is answered while the slow one waits"
+            );
             notify.notify_one();
             assert_eq!(next_response(&mut lines).await, 1);
         })
@@ -696,7 +813,12 @@ mod tests {
         }
 
         // An unplug after that goes out as itself, not the whole list again.
-        publish(&snapshot_tx, &event_tx, Vec::new(), vec![Event::DeviceRemoved { id: mouse().id }]);
+        publish(
+            &snapshot_tx,
+            &event_tx,
+            Vec::new(),
+            vec![Event::DeviceRemoved { id: mouse().id }],
+        );
         assert!(matches!(client.try_recv(), Ok(Event::DeviceRemoved { .. })));
         assert!(client.try_recv().is_err(), "nothing more");
     }
@@ -712,7 +834,11 @@ mod tests {
             Ok(frame) => panic!("parsed as {frame:?}"),
         }
         // With no id to be found there is nothing else to answer on.
-        for line in ["not json", r#"{"req":{"method":"ping"}}"#, r#"{"id":"7","req":{"method":"nope"}}"#] {
+        for line in [
+            "not json",
+            r#"{"req":{"method":"ping"}}"#,
+            r#"{"id":"7","req":{"method":"nope"}}"#,
+        ] {
             match parse_request(line) {
                 Err((0, _)) => {}
                 other => panic!("{line} answered as {other:?}"),

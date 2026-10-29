@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 post_install() {
   cat <<'EOF'
 ==> gglinux: if you installed it with scripts/install-local.sh before, remove that copy, or

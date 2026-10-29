@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! What games send: the GameSense requests, and colour handlers parsed into
 //! something the painter can use. Parsing is lenient about devices this
 //! machine can't show and strict about malformed colours.
@@ -16,7 +17,9 @@ pub const MAX_NAME: usize = 128;
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME
-        && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -160,9 +163,18 @@ impl Handler {
             .ok_or("a handler needs a device-type")?;
         let mode = o.get("mode").and_then(Value::as_str).unwrap_or("color");
         if !KEY_DEVICES.contains(&device) || matches!(mode, "bitmap" | "partial-bitmap") {
-            return Ok(Handler { target: Target::Unsupported, mode: Mode::Color, color: None, rate: None, context_frame_key: None });
+            return Ok(Handler {
+                target: Target::Unsupported,
+                mode: Mode::Color,
+                color: None,
+                rate: None,
+                context_frame_key: None,
+            });
         }
-        let target = match (o.get("custom-zone-keys"), o.get("zone").and_then(Value::as_str)) {
+        let target = match (
+            o.get("custom-zone-keys"),
+            o.get("zone").and_then(Value::as_str),
+        ) {
             (Some(keys), _) => Target::Keys(custom_keys(keys)?),
             (None, Some(zone)) => Target::Keys(zones::named(zone)),
             (None, None) => return Err("a handler needs a zone or custom-zone-keys".into()),
@@ -174,7 +186,10 @@ impl Handler {
             "context-color" => Mode::ContextColor,
             other => return Err(format!("unknown handler mode {other:?}")),
         };
-        let context_frame_key = o.get("context-frame-key").and_then(Value::as_str).map(str::to_owned);
+        let context_frame_key = o
+            .get("context-frame-key")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let color = match (mode, o.get("color")) {
             (Mode::ContextColor, _) if context_frame_key.is_none() => {
                 return Err("context-color needs a context-frame-key".into())
@@ -184,7 +199,13 @@ impl Handler {
             (_, None) => return Err("a handler needs a color".into()),
         };
         let rate = o.get("rate").map(rate).transpose()?;
-        Ok(Handler { target, mode, color, rate, context_frame_key })
+        Ok(Handler {
+            target,
+            mode,
+            color,
+            rate,
+            context_frame_key,
+        })
     }
 }
 
@@ -197,11 +218,17 @@ pub fn parse_rgb(v: &Value) -> Result<Rgb, String> {
             .map(|n| n as u8)
             .ok_or_else(|| format!("a colour needs {k} in 0..=255"))
     };
-    Ok(Rgb { r: channel("red")?, g: channel("green")?, b: channel("blue")? })
+    Ok(Rgb {
+        r: channel("red")?,
+        g: channel("green")?,
+        b: channel("blue")?,
+    })
 }
 
 fn custom_keys(v: &Value) -> Result<Vec<u8>, String> {
-    let list = v.as_array().ok_or("custom-zone-keys must be a list of HID codes")?;
+    let list = v
+        .as_array()
+        .ok_or("custom-zone-keys must be a list of HID codes")?;
     Ok(list
         .iter()
         .filter_map(Value::as_u64)
@@ -232,24 +259,42 @@ fn color_spec(v: &Value) -> Result<ColorSpec, String> {
 }
 
 fn rate(v: &Value) -> Result<Rate, String> {
-    let frequency = ranged(v.get("frequency").ok_or("a rate needs a frequency")?, "frequency", |x| {
-        x.as_f64().map(|f| f as f32).filter(|f| f.is_finite() && *f >= 0.0)
-    })?;
+    let frequency = ranged(
+        v.get("frequency").ok_or("a rate needs a frequency")?,
+        "frequency",
+        |x| {
+            x.as_f64()
+                .map(|f| f as f32)
+                .filter(|f| f.is_finite() && *f >= 0.0)
+        },
+    )?;
     let repeat_limit = v
         .get("repeat_limit")
-        .map(|r| ranged(r, "repeat_limit", |x| x.as_u64().map(|n| n.min(u64::from(u32::MAX)) as u32)))
+        .map(|r| {
+            ranged(r, "repeat_limit", |x| {
+                x.as_u64().map(|n| n.min(u64::from(u32::MAX)) as u32)
+            })
+        })
         .transpose()?;
-    Ok(Rate { frequency, repeat_limit })
+    Ok(Rate {
+        frequency,
+        repeat_limit,
+    })
 }
 
 fn ranged<T>(v: &Value, key: &str, num: impl Fn(&Value) -> Option<T>) -> Result<Ranged<T>, String> {
     let Some(list) = v.as_array() else {
-        return num(v).map(Ranged::Fixed).ok_or_else(|| format!("bad {key}"));
+        return num(v)
+            .map(Ranged::Fixed)
+            .ok_or_else(|| format!("bad {key}"));
     };
     list.iter()
         .map(|r| {
             let (low, high) = bounds(r, key)?;
-            let x = r.get(key).and_then(&num).ok_or_else(|| format!("a {key} range needs {key}"))?;
+            let x = r
+                .get(key)
+                .and_then(&num)
+                .ok_or_else(|| format!("a {key} range needs {key}"))?;
             Ok((low, high, x))
         })
         .collect::<Result<_, String>>()
@@ -257,8 +302,14 @@ fn ranged<T>(v: &Value, key: &str, num: impl Fn(&Value) -> Option<T>) -> Result<
 }
 
 fn bounds(r: &Value, what: &str) -> Result<(i64, i64), String> {
-    let low = r.get("low").and_then(Value::as_i64).ok_or_else(|| format!("a {what} range needs low"))?;
-    let high = r.get("high").and_then(Value::as_i64).ok_or_else(|| format!("a {what} range needs high"))?;
+    let low = r
+        .get("low")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("a {what} range needs low"))?;
+    let high = r
+        .get("high")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("a {what} range needs high"))?;
     Ok((low, high))
 }
 
@@ -290,15 +341,25 @@ mod tests {
                 "rate": { "frequency": [{ "low": 0, "high": 20, "frequency": 4 }],
                           "repeat_limit": [{ "low": 0, "high": 20, "repeat_limit": 5 }] }
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         let h = Handler::parse(&bind.handlers[0]).unwrap();
         assert_eq!(h.target, Target::Keys((0x3A..=0x45).collect()));
         assert_eq!(h.mode, Mode::Percent);
-        assert_eq!(h.color, Some(ColorSpec::Gradient { zero: RED, hundred: GREEN }));
-        assert_eq!(h.rate, Some(Rate {
-            frequency: Ranged::Ranges(vec![(0, 20, 4.0)]),
-            repeat_limit: Some(Ranged::Ranges(vec![(0, 20, 5)])),
-        }));
+        assert_eq!(
+            h.color,
+            Some(ColorSpec::Gradient {
+                zero: RED,
+                hundred: GREEN
+            })
+        );
+        assert_eq!(
+            h.rate,
+            Some(Rate {
+                frequency: Ranged::Ranges(vec![(0, 20, 4.0)]),
+                repeat_limit: Some(Ranged::Ranges(vec![(0, 20, 5)])),
+            })
+        );
     }
 
     #[test]
@@ -309,7 +370,11 @@ mod tests {
             json!({ "device-type": "mouse", "zone": "wheel", "color": { "red": 1, "green": 2, "blue": 3 } }),
             json!({ "device-type": "rgb-2-zone", "zone": "two", "color": { "red": 1, "green": 2, "blue": 3 } }),
         ] {
-            assert_eq!(Handler::parse(&v).unwrap().target, Target::Unsupported, "{v}");
+            assert_eq!(
+                Handler::parse(&v).unwrap().target,
+                Target::Unsupported,
+                "{v}"
+            );
         }
     }
 
@@ -319,7 +384,11 @@ mod tests {
             json!({ "device-type": "rgb-per-key-zones", "mode": "bitmap" }),
             json!({ "device-type": "rgb-per-key-zones", "mode": "partial-bitmap", "excluded-events": ["HEALTH"] }),
         ] {
-            assert_eq!(Handler::parse(&v).unwrap().target, Target::Unsupported, "{v}");
+            assert_eq!(
+                Handler::parse(&v).unwrap().target,
+                Target::Unsupported,
+                "{v}"
+            );
         }
     }
 
@@ -328,8 +397,13 @@ mod tests {
         let h = Handler::parse(&json!({
             "device-type": "rgb-per-key-zones", "custom-zone-keys": [26, 4, 89, 22, 7],
             "color": { "red": 0, "green": 0, "blue": 255 }
-        })).unwrap();
-        assert_eq!(h.target, Target::Keys(vec![26, 4, 22, 7]), "WASD, without keypad 1 (89)");
+        }))
+        .unwrap();
+        assert_eq!(
+            h.target,
+            Target::Keys(vec![26, 4, 22, 7]),
+            "WASD, without keypad 1 (89)"
+        );
         assert_eq!(h.mode, Mode::Color, "mode defaults to color");
     }
 
@@ -341,23 +415,43 @@ mod tests {
                        { "low": 11, "high": 100, "color": { "gradient": { "zero": { "red": 255, "green": 0, "blue": 0 },
                                                                            "hundred": { "red": 0, "green": 255, "blue": 0 } } } } ]
         })).unwrap();
-        assert_eq!(ranges.color, Some(ColorSpec::Ranges(vec![
-            ColorRange { low: 0, high: 10, color: ColorSpec::Static(RED) },
-            ColorRange { low: 11, high: 100, color: ColorSpec::Gradient { zero: RED, hundred: GREEN } },
-        ])));
+        assert_eq!(
+            ranges.color,
+            Some(ColorSpec::Ranges(vec![
+                ColorRange {
+                    low: 0,
+                    high: 10,
+                    color: ColorSpec::Static(RED)
+                },
+                ColorRange {
+                    low: 11,
+                    high: 100,
+                    color: ColorSpec::Gradient {
+                        zero: RED,
+                        hundred: GREEN
+                    }
+                },
+            ]))
+        );
         let fixed = Handler::parse(&json!({ "device-type": "keyboard", "zone": "all",
             "color": { "red": 1, "green": 2, "blue": 3 }, "rate": { "frequency": 2.5, "repeat_limit": 3 } })).unwrap();
-        assert_eq!(fixed.rate, Some(Rate { frequency: Ranged::Fixed(2.5), repeat_limit: Some(Ranged::Fixed(3)) }));
+        assert_eq!(
+            fixed.rate,
+            Some(Rate {
+                frequency: Ranged::Fixed(2.5),
+                repeat_limit: Some(Ranged::Fixed(3))
+            })
+        );
     }
 
     #[test]
     fn malformed_handlers_are_errors() {
         for bad in [
-            json!({ "zone": "all", "color": { "red": 1, "green": 2, "blue": 3 } }),                 // no device-type
-            json!({ "device-type": "keyboard", "color": { "red": 1, "green": 2, "blue": 3 } }),     // no zone
+            json!({ "zone": "all", "color": { "red": 1, "green": 2, "blue": 3 } }), // no device-type
+            json!({ "device-type": "keyboard", "color": { "red": 1, "green": 2, "blue": 3 } }), // no zone
             json!({ "device-type": "keyboard", "zone": "all", "color": { "red": 300, "green": 0, "blue": 0 } }),
-            json!({ "device-type": "keyboard", "zone": "all" }),                                     // no color
-            json!({ "device-type": "keyboard", "zone": "all", "mode": "context-color" }),            // no context-frame-key
+            json!({ "device-type": "keyboard", "zone": "all" }), // no color
+            json!({ "device-type": "keyboard", "zone": "all", "mode": "context-color" }), // no context-frame-key
             json!({ "device-type": "keyboard", "zone": "all", "mode": "sparkle", "color": { "red": 1, "green": 2, "blue": 3 } }),
             json!("not an object"),
         ] {
@@ -367,9 +461,15 @@ mod tests {
 
     #[test]
     fn context_color_needs_only_its_frame_key() {
-        let h = Handler::parse(&json!({ "device-type": "keyboard", "zone": "q-row", "mode": "context-color",
-            "context-frame-key": "zone-color" })).unwrap();
-        assert_eq!((h.mode, h.context_frame_key.as_deref(), h.color), (Mode::ContextColor, Some("zone-color"), None));
+        let h = Handler::parse(
+            &json!({ "device-type": "keyboard", "zone": "q-row", "mode": "context-color",
+            "context-frame-key": "zone-color" }),
+        )
+        .unwrap();
+        assert_eq!(
+            (h.mode, h.context_frame_key.as_deref(), h.color),
+            (Mode::ContextColor, Some("zone-color"), None)
+        );
     }
 
     #[test]
@@ -379,7 +479,8 @@ mod tests {
         assert_eq!(e.data.value, Some(42.6));
         assert!(e.data.frame.unwrap().contains_key("zone-color"));
         let m: MultipleEvents = serde_json::from_value(json!({ "game": "G",
-            "events": [ { "event": "A", "data": { "value": 1 } }, { "event": "B", "data": {} } ] })).unwrap();
+            "events": [ { "event": "A", "data": { "value": 1 } }, { "event": "B", "data": {} } ] }))
+        .unwrap();
         assert_eq!((m.events.len(), m.events[1].data.value), (2, None));
     }
 }

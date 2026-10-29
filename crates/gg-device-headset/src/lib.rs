@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Control for the SteelSeries **Arctis Nova Pro Wireless** (`1038:12e0`).
 //!
 //! Talks to the base station's vendor HID interface. Unlike the Rival 3, this
@@ -183,7 +184,11 @@ impl Headset {
         let volume = self
             .request(&proto::audio_settings_packet(), &mut events)?
             .and_then(|r| proto::decode_volume(&r));
-        Ok(Poll { status, volume, events })
+        Ok(Poll {
+            status,
+            volume,
+            events,
+        })
     }
 
     /// Send a request and return its reply, filing events that arrive around it.
@@ -209,7 +214,9 @@ impl Headset {
             let deadline = Instant::now() + REPLY_DEADLINE;
             let mut seen = 0usize;
             while Instant::now() < deadline && seen < MAX_REPLY_REPORTS {
-                let Some(report) = self.read_event_timeout(READ_TIMEOUT_MS)? else { continue };
+                let Some(report) = self.read_event_timeout(READ_TIMEOUT_MS)? else {
+                    continue;
+                };
                 seen += 1;
                 if let Some(reply) = proto::sort_report(report, Some(opcode), events) {
                     if attempt > 1 {

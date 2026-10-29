@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Mirrors the wire types in crates/gg-ipc. Keep the two in sync — the daemon is
 // the source of truth and these are hand-written because the payloads are small.
 

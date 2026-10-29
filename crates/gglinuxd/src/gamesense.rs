@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! GameSense: the SDK server, its files in Proton prefixes, and the games it
 //! lets draw on the keyboard. A tokio task owns the on/off switch, the server,
 //! the prefix scan and the settings file; the registry is shared with the
@@ -31,9 +32,19 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 pub enum Command {
     GetState(Reply<GameSenseState>),
-    SetEnabled { enabled: bool, reply: Reply<()> },
-    SetGameEnabled { game: String, enabled: bool, reply: Reply<()> },
-    RemoveGame { game: String, reply: Reply<()> },
+    SetEnabled {
+        enabled: bool,
+        reply: Reply<()>,
+    },
+    SetGameEnabled {
+        game: String,
+        enabled: bool,
+        reply: Reply<()>,
+    },
+    RemoveGame {
+        game: String,
+        reply: Reply<()>,
+    },
     RunTest(Reply<()>),
 }
 
@@ -45,8 +56,12 @@ pub struct Handle {
 impl Handle {
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx.send(make(reply_tx)).map_err(|_| "GameSense is not running".to_string())?;
-        reply_rx.await.map_err(|_| "GameSense dropped the request".to_string())?
+        self.tx
+            .send(make(reply_tx))
+            .map_err(|_| "GameSense is not running".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "GameSense dropped the request".to_string())?
     }
 }
 
@@ -103,11 +118,19 @@ impl Engine {
         let settings_path = gg_ipc::config_dir().join("gamesense.json");
         let settings = load_settings(&settings_path);
         let registry = Registry::restore(settings.games.clone());
-        Engine { registry: Arc::new(Mutex::new(registry)), clock: Clock::start(), settings_path, settings }
+        Engine {
+            registry: Arc::new(Mutex::new(registry)),
+            clock: Clock::start(),
+            settings_path,
+            settings,
+        }
     }
 
     pub fn overlay(&self) -> Arc<dyn Overlay> {
-        Arc::new(GameOverlay { registry: Arc::clone(&self.registry), clock: self.clock })
+        Arc::new(GameOverlay {
+            registry: Arc::clone(&self.registry),
+            clock: self.clock,
+        })
     }
 }
 
@@ -118,7 +141,10 @@ struct GameOverlay {
 
 impl Overlay for GameOverlay {
     fn paint(&self, now: Instant) -> Option<Layer> {
-        self.registry.lock().unwrap_or_else(|e| e.into_inner()).paint(self.clock.at(now))
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .paint(self.clock.at(now))
     }
 }
 
@@ -136,7 +162,11 @@ pub async fn bind_loopback(port: Option<u16>) -> std::io::Result<TcpListener> {
 /// Prefixes that failed this scan and didn't last time, so each is warned about once.
 pub fn newly_failed(seen: &mut HashSet<PathBuf>, failed: &[PathBuf]) -> Vec<PathBuf> {
     let now: HashSet<PathBuf> = failed.iter().cloned().collect();
-    let new = failed.iter().filter(|p| !seen.contains(*p)).cloned().collect();
+    let new = failed
+        .iter()
+        .filter(|p| !seen.contains(*p))
+        .cloned()
+        .collect();
     *seen = now;
     new
 }
@@ -145,7 +175,11 @@ pub fn newly_failed(seen: &mut HashSet<PathBuf>, failed: &[PathBuf]) -> Vec<Path
 /// held for five steps: a new value restarts the flash, and one every step
 /// would never reach the dark half of the 4 Hz flash.
 pub fn test_values() -> Vec<i64> {
-    (0..=100).rev().chain(1..=100).map(|v| if v <= 20 { (v + 4) / 5 * 5 } else { v }).collect()
+    (0..=100)
+        .rev()
+        .chain(1..=100)
+        .map(|v| if v <= 20 { (v + 4) / 5 * 5 } else { v })
+        .collect()
 }
 
 fn define_test_game(r: &mut Registry) -> Result<(), String> {
@@ -155,23 +189,32 @@ fn define_test_game(r: &mut Registry) -> Result<(), String> {
         developer: Some("gglinux".into()),
         deinitialize_timer_length_ms: None,
     })?;
-    r.bind_event(serde_json::from_value(serde_json::json!({
-        "game": TEST_GAME, "event": "HEALTH", "min_value": 0, "max_value": 100,
-        "handlers": [{
-            "device-type": "keyboard", "zone": "function-keys", "mode": "percent",
-            "color": { "gradient": { "zero": { "red": 255, "green": 0, "blue": 0 },
-                                     "hundred": { "red": 0, "green": 255, "blue": 0 } } },
-            "rate": { "frequency": [{ "low": 0, "high": 20, "frequency": 4 }] }
-        }]
-    })).map_err(|e| e.to_string())?)
+    r.bind_event(
+        serde_json::from_value(serde_json::json!({
+            "game": TEST_GAME, "event": "HEALTH", "min_value": 0, "max_value": 100,
+            "handlers": [{
+                "device-type": "keyboard", "zone": "function-keys", "mode": "percent",
+                "color": { "gradient": { "zero": { "red": 255, "green": 0, "blue": 0 },
+                                         "hundred": { "red": 0, "green": 255, "blue": 0 } } },
+                "rate": { "frequency": [{ "low": 0, "high": 20, "frequency": 4 }] }
+            }]
+        }))
+        .map_err(|e| e.to_string())?,
+    )
 }
 
 fn send_test_value(r: &mut Registry, value: i64, now: f64) -> Result<(), String> {
-    r.game_event(proto::GameEvent {
-        game: TEST_GAME.into(),
-        event: "HEALTH".into(),
-        data: proto::EventData { value: Some(value as f64), frame: None },
-    }, now)
+    r.game_event(
+        proto::GameEvent {
+            game: TEST_GAME.into(),
+            event: "HEALTH".into(),
+            data: proto::EventData {
+                value: Some(value as f64),
+                frame: None,
+            },
+        },
+        now,
+    )
 }
 
 fn game_infos(r: &Registry, now: f64) -> Vec<GameInfo> {
@@ -208,7 +251,11 @@ struct Controller {
     published: Option<GameSenseState>,
 }
 
-pub fn spawn(engine: Engine, event_tx: broadcast::Sender<Event>, keyboard: keyboard::Handle) -> Handle {
+pub fn spawn(
+    engine: Engine,
+    event_tx: broadcast::Sender<Event>,
+    keyboard: keyboard::Handle,
+) -> Handle {
     let (tx, rx) = mpsc::unbounded_channel();
     let (changes, changes_rx) = mpsc::unbounded_channel();
     let c = Controller {
@@ -228,7 +275,11 @@ pub fn spawn(engine: Engine, event_tx: broadcast::Sender<Event>, keyboard: keybo
     Handle { tx }
 }
 
-async fn run(mut c: Controller, mut rx: mpsc::UnboundedReceiver<Command>, mut changes: mpsc::UnboundedReceiver<Change>) {
+async fn run(
+    mut c: Controller,
+    mut rx: mpsc::UnboundedReceiver<Command>,
+    mut changes: mpsc::UnboundedReceiver<Change>,
+) {
     if c.engine.settings.enabled {
         if let Err(e) = c.start().await {
             warn!(error = %e, "could not start the GameSense server");
@@ -268,11 +319,19 @@ impl Controller {
                 let _ = reply.send(Ok(self.state()));
             }
             Command::SetEnabled { enabled, reply } => {
-                let result = if enabled { self.start().await } else { self.stop().await };
+                let result = if enabled {
+                    self.start().await
+                } else {
+                    self.stop().await
+                };
                 let _ = reply.send(result);
                 self.publish();
             }
-            Command::SetGameEnabled { game, enabled, reply } => {
+            Command::SetGameEnabled {
+                game,
+                enabled,
+                reply,
+            } => {
                 let result = self.registry().set_enabled(&game, enabled);
                 self.after_edit(result, reply);
             }
@@ -300,7 +359,10 @@ impl Controller {
     }
 
     fn registry(&self) -> std::sync::MutexGuard<'_, Registry> {
-        self.engine.registry.lock().unwrap_or_else(|e| e.into_inner())
+        self.engine
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Start the server, remember its port, and put the files in the prefixes.
@@ -308,7 +370,9 @@ impl Controller {
         if self.running.is_some() {
             return Ok(());
         }
-        let listener = bind_loopback(self.engine.settings.port).await.map_err(|e| format!("GameSense server: {e}"))?;
+        let listener = bind_loopback(self.engine.settings.port)
+            .await
+            .map_err(|e| format!("GameSense server: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let keyboard = self.keyboard.clone();
         let changes = self.changes.clone();
@@ -321,11 +385,20 @@ impl Controller {
             }),
         };
         let (shutdown, stop) = oneshot::channel::<()>();
-        let task = tokio::spawn(server::serve(listener, server::router(shared), server::LIMITS, async {
-            let _ = stop.await;
-        }));
+        let task = tokio::spawn(server::serve(
+            listener,
+            server::router(shared),
+            server::LIMITS,
+            async {
+                let _ = stop.await;
+            },
+        ));
         info!(port, "GameSense server listening on 127.0.0.1");
-        self.running = Some(Running { port, shutdown, task });
+        self.running = Some(Running {
+            port,
+            shutdown,
+            task,
+        });
         self.engine.settings.enabled = true;
         self.engine.settings.port = Some(port);
         self.save();
@@ -364,7 +437,9 @@ impl Controller {
 
     fn libraries_or_read(&mut self) -> Vec<PathBuf> {
         if self.libraries.is_empty() || self.scans.is_multiple_of(LIBRARY_REFRESH_SCANS) {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
             self.libraries = prefixes::libraries(&prefixes::steam_roots(&home));
         }
         self.libraries.clone()
@@ -372,7 +447,9 @@ impl Controller {
 
     /// Write the file into any prefix that lacks it; count the ones that hold it.
     async fn scan(&mut self) {
-        let Some(port) = self.running.as_ref().map(|r| r.port) else { return };
+        let Some(port) = self.running.as_ref().map(|r| r.port) else {
+            return;
+        };
         let libraries = self.libraries_or_read();
         self.scans = self.scans.wrapping_add(1);
         let (holding, failed) = tokio::task::spawn_blocking(move || {
@@ -420,7 +497,10 @@ impl Controller {
                 let _ = changes.send(Change::Live);
                 tokio::time::sleep(TEST_STEP).await;
             }
-            let _ = registry.lock().unwrap_or_else(|e| e.into_inner()).stop_game(TEST_GAME);
+            let _ = registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .stop_game(TEST_GAME);
             keyboard.wake();
             let _ = changes.send(Change::Live);
         }));
@@ -429,7 +509,10 @@ impl Controller {
     fn state(&self) -> GameSenseState {
         GameSenseState {
             enabled: self.running.is_some(),
-            address: self.running.as_ref().map(|r| format!("127.0.0.1:{}", r.port)),
+            address: self
+                .running
+                .as_ref()
+                .map(|r| format!("127.0.0.1:{}", r.port)),
             prefixes: self.holding,
             games: game_infos(&self.registry(), self.engine.clock.now()),
         }
@@ -496,7 +579,11 @@ mod tests {
         assert_eq!(load_settings(&path), Settings::default(), "corrupted file");
         assert!(!path.exists(), "moved aside, so a save can't destroy it");
         assert!(!Settings::default().enabled, "GameSense is off until asked");
-        let s = Settings { enabled: true, port: Some(5000), games: Vec::new() };
+        let s = Settings {
+            enabled: true,
+            port: Some(5000),
+            games: Vec::new(),
+        };
         save_settings(&path, &s);
         assert_eq!(load_settings(&path), s);
         std::fs::remove_dir_all(dir).unwrap();
@@ -516,12 +603,28 @@ mod tests {
         send_test_value(&mut r, 100, 0.0).unwrap();
         let full = r.paint(0.0).unwrap();
         assert_eq!(full.len(), 12);
-        assert_eq!(full[&0x45], gg_device_keyboard::Rgb { r: 0, g: 255, b: 0 }, "F12 green at 100");
+        assert_eq!(
+            full[&0x45],
+            gg_device_keyboard::Rgb { r: 0, g: 255, b: 0 },
+            "F12 green at 100"
+        );
         send_test_value(&mut r, 10, 1.0).unwrap();
         let low = r.paint(1.0).unwrap();
-        assert_eq!(low[&0x45], gg_device_keyboard::Rgb::default(), "F12 dark at 10%");
-        assert_ne!(low[&0x3A], gg_device_keyboard::Rgb::default(), "F1 lit (first half of a flash)");
-        assert_eq!(r.paint(1.2).unwrap()[&0x3A], gg_device_keyboard::Rgb::default(), "…and dark in the second half at 4 Hz");
+        assert_eq!(
+            low[&0x45],
+            gg_device_keyboard::Rgb::default(),
+            "F12 dark at 10%"
+        );
+        assert_ne!(
+            low[&0x3A],
+            gg_device_keyboard::Rgb::default(),
+            "F1 lit (first half of a flash)"
+        );
+        assert_eq!(
+            r.paint(1.2).unwrap()[&0x3A],
+            gg_device_keyboard::Rgb::default(),
+            "…and dark in the second half at 4 Hz"
+        );
     }
 
     #[test]
@@ -533,15 +636,22 @@ mod tests {
         for (i, value) in test_values().into_iter().enumerate() {
             let t = i as f64 * step;
             send_test_value(&mut r, value, t).unwrap();
-            for frame in 0..3 { // the keyboard draws every 33 ms
+            for frame in 0..3 {
+                // the keyboard draws every 33 ms
                 let f1 = r.paint(t + f64::from(frame) / 30.0).unwrap()[&0x3A];
                 if value > 0 && f1 == gg_device_keyboard::Rgb::default() {
                     dark.push(value);
                 }
             }
         }
-        assert!(!dark.is_empty(), "F1 never went dark: every step restarted the flash");
-        assert!(dark.iter().all(|&v| v <= 20), "only low values flash: {dark:?}");
+        assert!(
+            !dark.is_empty(),
+            "F1 never went dark: every step restarted the flash"
+        );
+        assert!(
+            dark.iter().all(|&v| v <= 20),
+            "only low values flash: {dark:?}"
+        );
     }
 
     #[test]
@@ -549,11 +659,21 @@ mod tests {
         let mut seen = HashSet::new();
         let a = PathBuf::from("/a");
         let b = PathBuf::from("/b");
-        assert_eq!(newly_failed(&mut seen, std::slice::from_ref(&a)), vec![a.clone()]);
-        assert!(newly_failed(&mut seen, std::slice::from_ref(&a)).is_empty(), "already warned");
+        assert_eq!(
+            newly_failed(&mut seen, std::slice::from_ref(&a)),
+            vec![a.clone()]
+        );
+        assert!(
+            newly_failed(&mut seen, std::slice::from_ref(&a)).is_empty(),
+            "already warned"
+        );
         assert_eq!(newly_failed(&mut seen, &[a.clone(), b.clone()]), vec![b]);
         assert!(newly_failed(&mut seen, &[]).is_empty());
-        assert_eq!(newly_failed(&mut seen, std::slice::from_ref(&a)), vec![a], "fixed, then broken again: warn again");
+        assert_eq!(
+            newly_failed(&mut seen, std::slice::from_ref(&a)),
+            vec![a],
+            "fixed, then broken again: warn again"
+        );
     }
 
     #[tokio::test]

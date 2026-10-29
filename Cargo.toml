@@ -7,7 +7,7 @@ exclude = ["ui"]
 version = "0.0.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/ykk/gglinux"
+repository = "https://github.com/YKKULTRA/gglinux"
 rust-version = "1.87"
 
 [workspace.dependencies]

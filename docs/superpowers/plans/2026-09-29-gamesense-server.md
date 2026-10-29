@@ -19,7 +19,7 @@ gglinux lighting is off.
 
 **Spec:** `docs/superpowers/specs/2026-09-29-gamesense-server-design.md`
 
-**Branch:** `m6a-gamesense` (exists; the spec is `52a2416`).
+**Branch:** `m6a-gamesense` (exists; the spec is `077bd23`).
 
 ## Global Constraints
 
@@ -3600,5 +3600,4 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 3. Turn gglinux lighting **off**, then Run test: the keyboard is taken over (the rest shows the saved
    effect) and handed back to the onboard profile when the test ends.
 4. Turn GameSense off: the `find` count drops to 0.
-5. Add the prefix files (and `gamesense.json`) to the Obsidian system-changes note and the
-   `gglinux-system-changes` memory.
+5. Add the prefix files (and `gamesense.json`) to the list of files gglinux writes.

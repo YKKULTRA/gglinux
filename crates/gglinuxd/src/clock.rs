@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Small timing helper shared by the device workers.
 
 use std::time::{Duration, Instant};

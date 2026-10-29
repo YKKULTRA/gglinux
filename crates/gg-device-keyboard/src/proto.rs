@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Apex Pro TKL Gen 3 (`1038:1642`) lighting protocol.
 //!
 //! From OpenRGB's `SteelSeriesApexController` (GPL-2.0-or-later), verified on
@@ -17,8 +18,15 @@ pub const OP_FIRMWARE: u8 = 0x90;
 /// Every opcode gglinux may send. The firmware-update (FIZZ) commands share
 /// this interface and can brick the keyboard; an allowlist makes them — and
 /// anything else unvetted, typos included — impossible to frame.
-pub const ALLOWED: [u8; 7] =
-    [OP_INIT, OP_DIRECT, OP_ONBOARD, OP_SET_BRIGHTNESS, OP_GET_BRIGHTNESS, OP_REGION, OP_FIRMWARE];
+pub const ALLOWED: [u8; 7] = [
+    OP_INIT,
+    OP_DIRECT,
+    OP_ONBOARD,
+    OP_SET_BRIGHTNESS,
+    OP_GET_BRIGHTNESS,
+    OP_REGION,
+    OP_FIRMWARE,
+];
 
 /// Command reports: report id 0, opcode, arguments, zero padding.
 pub const COMMAND_REPORT: usize = 65;
@@ -44,14 +52,20 @@ pub struct Rgb {
 }
 
 pub fn check(op: u8) -> Result<()> {
-    ensure!(ALLOWED.contains(&op), "opcode {op:#04x} is not on the keyboard's allowlist");
+    ensure!(
+        ALLOWED.contains(&op),
+        "opcode {op:#04x} is not on the keyboard's allowlist"
+    );
     Ok(())
 }
 
 /// A command report for an allowed opcode.
 pub fn command(op: u8, args: &[u8]) -> Result<Vec<u8>> {
     check(op)?;
-    ensure!(args.len() <= COMMAND_REPORT - 2, "command arguments too long");
+    ensure!(
+        args.len() <= COMMAND_REPORT - 2,
+        "command arguments too long"
+    );
     let mut report = vec![0u8; COMMAND_REPORT];
     report[1] = op;
     report[2..2 + args.len()].copy_from_slice(args);
@@ -87,7 +101,10 @@ mod tests {
         let allowed: Vec<u8> = (0..=255u8).filter(|&op| check(op).is_ok()).collect();
         assert_eq!(allowed, [0x23, 0x40, 0x41, 0x4B, 0x90, 0xA3, 0xF5]);
         for fizz in [0x02, 0x03, 0x04] {
-            assert!(command(fizz, &[]).is_err(), "firmware opcode {fizz:#04x} must never be framed");
+            assert!(
+                command(fizz, &[]).is_err(),
+                "firmware opcode {fizz:#04x} must never be framed"
+            );
         }
     }
 
@@ -96,23 +113,40 @@ mod tests {
         let init = command(OP_INIT, &[]).unwrap();
         assert_eq!(init.len(), 65);
         assert_eq!(&init[..3], &[0x00, 0x4B, 0x00]);
-        assert!(command(OP_REGION, &[0; 64]).is_err(), "arguments longer than the report");
+        assert!(
+            command(OP_REGION, &[0; 64]).is_err(),
+            "arguments longer than the report"
+        );
     }
 
     #[test]
     fn a_direct_frame_lists_every_led() {
-        let frame = direct_frame(|code| if code == 0x0A { Rgb { r: 0, g: 255, b: 0 } } else { Rgb::default() });
+        let frame = direct_frame(|code| {
+            if code == 0x0A {
+                Rgb { r: 0, g: 255, b: 0 }
+            } else {
+                Rgb::default()
+            }
+        });
         assert_eq!(frame.len(), 643);
         assert_eq!(&frame[..3], &[0x00, 0x40, 112]);
         let g = KEYS.iter().position(|&c| c == 0x0A).unwrap();
-        assert_eq!(&frame[3 + g * 4..7 + g * 4], &[0x0A, 0, 255, 0], "G green, as seen on the keyboard");
+        assert_eq!(
+            &frame[3 + g * 4..7 + g * 4],
+            &[0x0A, 0, 255, 0],
+            "G green, as seen on the keyboard"
+        );
         assert_eq!(&frame[3..7], &[0x04, 0, 0, 0], "A dark");
         assert!(frame[3 + 112 * 4..].iter().all(|&b| b == 0), "padding");
     }
 
     #[test]
     fn region_decodes_from_the_reply() {
-        assert_eq!(decode_region(&[0xF5, 0x00, 0x01, 0x00]), Some(1), "captured on this unit: US");
+        assert_eq!(
+            decode_region(&[0xF5, 0x00, 0x01, 0x00]),
+            Some(1),
+            "captured on this unit: US"
+        );
         assert_eq!(decode_region(&[0xA3, 0x00, 0x01]), None);
     }
 }

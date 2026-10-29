@@ -77,7 +77,7 @@
   Tests use the existing PipeWire fake and the stand-in recorder script.
 - **Checks:**
   - `bash -c 'cargo test --workspace --all-targets 2>&1 | grep -E "^test result" | awk "{p+=\$4;f+=\$6} END{print \"passed=\"p\" failed=\"f; exit f>0}"'`
-    (`passed=279 failed=0` at the base, `58df557`);
+    (`passed=279 failed=0` at the base, `5c07997`);
   - expected totals: Task 1 281, Task 2 286, Task 3 289, Task 4 295, Task 5 301, Task 6 301,
     Task 7 302, Task 8 306, Tasks 9 and 10 306;
   - `cargo clippy --workspace --all-targets 2>&1 | grep -cE "^(warning|error)"` → `0`;
@@ -1847,7 +1847,7 @@ channels are missing from the next login until gglinux starts and puts them back
   `**Accept:** a GameSense title under Proton (e.g. CS2) drives the Apex OLED/RGB live; a heartbeat timeout`
   / `clears state after 15 s.`, followed by a blank line and the M6a progress note.
 - Delete the stranded line after M6b.
-- M7's "**Accept:**" sentence is whole at `58df557`: check it still is, and leave its wording.
+- M7's "**Accept:**" sentence is whole at `5c07997`: check it still is, and leave its wording.
 
 - [ ] **Step 3: PLAN.md, M2 and Risks: the headset kernel backend.**
 - In M2, after the "Hardware session 2026-09-27" paragraph, add:

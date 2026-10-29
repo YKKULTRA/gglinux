@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Sonar: the channels, routing apps into them, their volumes, and ChatMix.
 //!
 //! PipeWire hosts the graph (see [`config`]); this drives it through
@@ -10,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    AppStream, AudioDevice, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, MicSettings, MicState,
-    SmartVolume, SmartVolumeState, SonarState, StreamMix,
+    AppStream, AudioDevice, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, MicSettings,
+    MicState, SmartVolume, SmartVolumeState, SonarState, StreamMix,
 };
 use tracing::{debug, info, warn};
 
@@ -30,7 +31,9 @@ const VOLUME_SLACK: f32 = 0.005;
 
 /// Whether PipeWire has all four channel sinks.
 fn channels_up(g: &Graph) -> bool {
-    Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some())
+    Channel::ALL
+        .iter()
+        .all(|&c| g.node(&config::sink_name(c)).is_some())
 }
 
 pub struct Sonar<T: PwTools> {
@@ -144,7 +147,11 @@ impl<T: PwTools> Sonar<T> {
                 .iter()
                 .map(|&channel| {
                     let node = self.graph.node(&config::sink_name(channel));
-                    ChannelState { channel, present: node.is_some(), volume: node.and_then(|n| n.volume) }
+                    ChannelState {
+                        channel,
+                        present: node.is_some(),
+                        volume: node.and_then(|n| n.volume),
+                    }
                 })
                 .collect(),
             chatmix: self.settings.chatmix,
@@ -163,7 +170,10 @@ impl<T: PwTools> Sonar<T> {
                 .collect(),
             eq: Channel::ALL
                 .iter()
-                .map(|&channel| ChannelEq { channel, bands: self.settings.channel_eq(channel) })
+                .map(|&channel| ChannelEq {
+                    channel,
+                    bands: self.settings.channel_eq(channel),
+                })
                 .collect(),
             headphone: self.settings.headphone.clone(),
             mic: MicState {
@@ -184,13 +194,19 @@ impl<T: PwTools> Sonar<T> {
             stream: StreamMix {
                 enabled: self.settings.streamer,
                 present: self.graph.node(config::STREAM_SINK).is_some(),
-                volumes: Channel::ALL.iter().map(|&c| self.settings.stream_volume(c)).collect(),
+                volumes: Channel::ALL
+                    .iter()
+                    .map(|&c| self.settings.stream_volume(c))
+                    .collect(),
                 master: self.settings.stream_master,
             },
             smart_volume: SmartVolumeState {
                 available: self.smart_volume_available(),
                 reason: self.smart_volume_unavailable().map(str::to_owned),
-                settings: Channel::ALL.iter().map(|&c| self.settings.smart_volume(c)).collect(),
+                settings: Channel::ALL
+                    .iter()
+                    .map(|&c| self.settings.smart_volume(c))
+                    .collect(),
             },
         }
     }
@@ -205,12 +221,27 @@ impl<T: PwTools> Sonar<T> {
         if !self.available {
             bail!("PipeWire is not reachable (pw-dump failed)");
         }
-        let previous_default = self.graph.default_sink.clone().filter(|n| !config::is_ours(n));
-        let previous_default_source = self.graph.default_source.clone().filter(|n| !config::is_ours(n));
-        let output = self.choose_output().context("no output device for the channels to play into")?;
+        let previous_default = self
+            .graph
+            .default_sink
+            .clone()
+            .filter(|n| !config::is_ours(n));
+        let previous_default_source = self
+            .graph
+            .default_source
+            .clone()
+            .filter(|n| !config::is_ours(n));
+        let output = self
+            .choose_output()
+            .context("no output device for the channels to play into")?;
         let mic_input = self.choose_mic();
 
-        let text = config::dropin(&output, mic_input.as_deref(), self.settings.streamer, self.stage_wanted())?;
+        let text = config::dropin(
+            &output,
+            mic_input.as_deref(),
+            self.settings.streamer,
+            self.stage_wanted(),
+        )?;
         if let Some(dir) = self.dropin_path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
@@ -268,7 +299,9 @@ impl<T: PwTools> Sonar<T> {
         match std::fs::remove_file(&self.dropin_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing {}", self.dropin_path.display())),
+            Err(e) => {
+                return Err(e).with_context(|| format!("removing {}", self.dropin_path.display()))
+            }
         }
         info!("disabling Sonar; restarting PipeWire");
         self.tools.run(&tools::restart_pipewire())?;
@@ -436,7 +469,11 @@ impl<T: PwTools> Sonar<T> {
         if !self.settings.enabled {
             return Ok(());
         }
-        let output = self.settings.output.clone().context("Sonar has no output device")?;
+        let output = self
+            .settings
+            .output
+            .clone()
+            .context("Sonar has no output device")?;
         let text = self.expected_dropin(&output)?;
         std::fs::write(&self.dropin_path, text)
             .with_context(|| format!("writing {}", self.dropin_path.display()))?;
@@ -447,12 +484,16 @@ impl<T: PwTools> Sonar<T> {
         self.stream_levels_applied = false;
         self.routed.clear();
         self.tools.run(&tools::restart_pipewire())?;
-        let ready = |g: &Graph| channels_up(g) && (!enabled || g.node(config::STREAM_SINK).is_some());
+        let ready =
+            |g: &Graph| channels_up(g) && (!enabled || g.node(config::STREAM_SINK).is_some());
         if !self.wait_until(ready) {
             let mic = self.dropin_mic();
             if channels_up(&self.graph) || !self.drop_refused_stage(&output, mic.as_deref()) {
                 // Never undone for this: the channels may be fine without the stream.
-                warn!(enabled, "the channels or the stream mix did not appear after the restart");
+                warn!(
+                    enabled,
+                    "the channels or the stream mix did not appear after the restart"
+                );
             }
         }
         self.take_defaults()?;
@@ -483,7 +524,8 @@ impl<T: PwTools> Sonar<T> {
         self.settings.stream_master = volume.clamp(0.0, 1.0);
         self.persist();
         if let Some(node) = self.graph.node(config::STREAM_SINK) {
-            self.tools.run(&tools::set_volume(node.id, self.settings.stream_master))?;
+            self.tools
+                .run(&tools::set_volume(node.id, self.settings.stream_master))?;
         }
         Ok(())
     }
@@ -592,12 +634,20 @@ impl<T: PwTools> Sonar<T> {
 
     /// The mic the drop-in carries: the saved one, if the plugins exist.
     fn dropin_mic(&self) -> Option<String> {
-        self.settings.mic_input.clone().filter(|_| self.tools.mic_plugins_present())
+        self.settings
+            .mic_input
+            .clone()
+            .filter(|_| self.tools.mic_plugins_present())
     }
 
     /// The drop-in this version writes for the saved output and mic.
     fn expected_dropin(&self, output: &str) -> Result<String> {
-        config::dropin(output, self.dropin_mic().as_deref(), self.settings.streamer, self.stage_wanted())
+        config::dropin(
+            output,
+            self.dropin_mic().as_deref(),
+            self.settings.streamer,
+            self.stage_wanted(),
+        )
     }
 
     /// The drop-in for a write PipeWire isn't restarted for: it keeps the
@@ -605,14 +655,21 @@ impl<T: PwTools> Sonar<T> {
     /// stage PipeWire hasn't loaded.
     fn running_dropin(&self, output: &str) -> Result<String> {
         let stage = self.stage_loaded && self.stage_wanted();
-        config::dropin(output, self.dropin_mic().as_deref(), self.settings.streamer, stage)
+        config::dropin(
+            output,
+            self.dropin_mic().as_deref(),
+            self.settings.streamer,
+            stage,
+        )
     }
 
     fn apply_mic(&self) -> Result<()> {
         if let Some(node) = self.graph.node(mic::CAPTURE) {
-            self.tools.run(&tools::set_params(node.id, &mic::props(&self.settings.mic)))?;
+            self.tools
+                .run(&tools::set_params(node.id, &mic::props(&self.settings.mic)))?;
         }
-        if let (Some(volume), Some(node)) = (self.settings.mic_volume, self.graph.node(mic::SOURCE)) {
+        if let (Some(volume), Some(node)) = (self.settings.mic_volume, self.graph.node(mic::SOURCE))
+        {
             self.tools.run(&tools::set_volume(node.id, volume))?;
         }
         Ok(())
@@ -621,7 +678,9 @@ impl<T: PwTools> Sonar<T> {
     /// If the drop-in on disk was written by an older gglinux, rewrite it and
     /// restart PipeWire once so the channels get the current graph.
     fn upgrade_dropin(&mut self) {
-        let Some(output) = self.settings.output.clone() else { return };
+        let Some(output) = self.settings.output.clone() else {
+            return;
+        };
         // Plugins installed since Sonar was turned on: give it a mic now, and,
         // as turning Sonar on does, make it the default input once it's there.
         let mut new_mic = false;
@@ -630,13 +689,18 @@ impl<T: PwTools> Sonar<T> {
             if self.settings.mic_input.is_some() {
                 new_mic = true;
                 if self.settings.previous_default_source.is_none() {
-                    self.settings.previous_default_source =
-                        self.graph.default_source.clone().filter(|n| !config::is_ours(n));
+                    self.settings.previous_default_source = self
+                        .graph
+                        .default_source
+                        .clone()
+                        .filter(|n| !config::is_ours(n));
                 }
                 self.persist();
             }
         }
-        let Ok(expected) = self.expected_dropin(&output) else { return };
+        let Ok(expected) = self.expected_dropin(&output) else {
+            return;
+        };
         if std::fs::read_to_string(&self.dropin_path).ok().as_deref() == Some(expected.as_str()) {
             return;
         }
@@ -672,7 +736,9 @@ impl<T: PwTools> Sonar<T> {
     /// On startup with Sonar on, whether or not the drop-in was just rewritten:
     /// a PipeWire upgraded since may refuse a stage it took before.
     fn check_stage(&mut self) {
-        let Some(output) = self.settings.output.clone() else { return };
+        let Some(output) = self.settings.output.clone() else {
+            return;
+        };
         if self.staged() && !self.wait_until(channels_up) {
             let mic = self.dropin_mic();
             self.drop_refused_stage(&output, mic.as_deref());
@@ -717,10 +783,15 @@ impl<T: PwTools> Sonar<T> {
         if !gone || !self.staged() {
             return;
         }
-        let Some(output) = self.settings.output.clone() else { return };
-        warn!("Smart Volume's compressor (swh-plugins) is gone; taking it out of the Sonar channels");
+        let Some(output) = self.settings.output.clone() else {
+            return;
+        };
+        warn!(
+            "Smart Volume's compressor (swh-plugins) is gone; taking it out of the Sonar channels"
+        );
         let written = self.expected_dropin(&output).and_then(|text| {
-            std::fs::write(&self.dropin_path, text).with_context(|| format!("writing {}", self.dropin_path.display()))
+            std::fs::write(&self.dropin_path, text)
+                .with_context(|| format!("writing {}", self.dropin_path.display()))
         });
         if let Err(e) = written {
             warn!(error = %format!("{e:#}"), "could not take Smart Volume's stage out");
@@ -795,16 +866,25 @@ impl<T: PwTools> Sonar<T> {
 
     /// Send every app stream whose channel changed (or is new) to its channel.
     fn route(&mut self) {
-        let present: Vec<(u32, Option<u64>)> = self.graph.app_streams().map(|s| (s.id, s.serial)).collect();
+        let present: Vec<(u32, Option<u64>)> =
+            self.graph.app_streams().map(|s| (s.id, s.serial)).collect();
         self.routed.retain(|stream, _| present.contains(stream));
         let moves: Vec<((u32, Option<u64>), Channel)> = self
             .graph
             .app_streams()
-            .map(|s| ((s.id, s.serial), self.settings.rules.channel_for(s.route_key().as_deref())))
+            .map(|s| {
+                (
+                    (s.id, s.serial),
+                    self.settings.rules.channel_for(s.route_key().as_deref()),
+                )
+            })
             .filter(|(stream, channel)| self.routed.get(stream) != Some(channel))
             .collect();
         for ((id, serial), channel) in moves {
-            match self.tools.run(&tools::set_target(id, &config::sink_name(channel))) {
+            match self
+                .tools
+                .run(&tools::set_target(id, &config::sink_name(channel)))
+            {
                 Ok(()) => {
                     debug!(id, ?channel, "routed app stream");
                     self.routed.insert((id, serial), channel);
@@ -822,10 +902,17 @@ impl<T: PwTools> Sonar<T> {
         if !self.levels_applied || !channels_up(&self.graph) {
             return;
         }
-        let differs = |saved: Option<f32>, now: f32| saved.is_none_or(|s| (s - now).abs() > VOLUME_SLACK);
+        let differs =
+            |saved: Option<f32>, now: f32| saved.is_none_or(|s| (s - now).abs() > VOLUME_SLACK);
         let mut changed = false;
         for channel in Channel::ALL {
-            let Some(now) = self.graph.node(&config::sink_name(channel)).and_then(|n| n.volume) else { continue };
+            let Some(now) = self
+                .graph
+                .node(&config::sink_name(channel))
+                .and_then(|n| n.volume)
+            else {
+                continue;
+            };
             let now = now.clamp(0.0, 1.0);
             if differs(self.settings.volumes.get(&channel).copied(), now) {
                 self.settings.volumes.insert(channel, now);
@@ -849,7 +936,9 @@ impl<T: PwTools> Sonar<T> {
     /// is on). Each waits only for its own nodes. Each appearance of the
     /// channels also says whether they carry Smart Volume's stage.
     fn keep_levels(&mut self) {
-        let channels = Channel::ALL.iter().all(|&c| self.graph.node(&config::sink_name(c)).is_some());
+        let channels = Channel::ALL
+            .iter()
+            .all(|&c| self.graph.node(&config::sink_name(c)).is_some());
         if !channels {
             self.levels_applied = false;
         } else if !self.levels_applied {
@@ -861,7 +950,9 @@ impl<T: PwTools> Sonar<T> {
         }
         let stream = self.settings.streamer
             && self.graph.node(config::STREAM_SINK).is_some()
-            && Channel::ALL.iter().all(|&c| self.graph.node(&config::stream_feed_name(c)).is_some());
+            && Channel::ALL
+                .iter()
+                .all(|&c| self.graph.node(&config::stream_feed_name(c)).is_some());
         if !stream {
             self.stream_levels_applied = false;
         } else if !self.stream_levels_applied {
@@ -892,11 +983,15 @@ impl<T: PwTools> Sonar<T> {
     fn apply_stream_levels(&self) -> Result<()> {
         for channel in Channel::ALL {
             if let Some(node) = self.graph.node(&config::stream_feed_name(channel)) {
-                self.tools.run(&tools::set_volume(node.id, self.settings.stream_volume(channel)))?;
+                self.tools.run(&tools::set_volume(
+                    node.id,
+                    self.settings.stream_volume(channel),
+                ))?;
             }
         }
         if let Some(node) = self.graph.node(config::STREAM_SINK) {
-            self.tools.run(&tools::set_volume(node.id, self.settings.stream_master))?;
+            self.tools
+                .run(&tools::set_volume(node.id, self.settings.stream_master))?;
         }
         Ok(())
     }
@@ -1013,7 +1108,11 @@ mod tests {
         }
 
         fn count(&self, program: &str) -> usize {
-            self.runs.borrow().iter().filter(|r| r[0] == program).count()
+            self.runs
+                .borrow()
+                .iter()
+                .filter(|r| r[0] == program)
+                .count()
         }
     }
 
@@ -1035,14 +1134,16 @@ mod tests {
                     (32, "gglinux_media.out", "Stream/Output/Audio", None),
                     (33, "gglinux_aux.out", "Stream/Output/Audio", None),
                 ]);
-                let wrote_mic = std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("gglinux_mic"));
+                let wrote_mic =
+                    std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("gglinux_mic"));
                 if wrote_mic && self.mic_comes_up {
                     nodes.extend([
                         (24, "gglinux_mic", "Audio/Source", None),
                         (34, "gglinux_mic.in", "Stream/Input/Audio", None),
                     ]);
                 }
-                let wrote_stream = std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("gglinux_stream"));
+                let wrote_stream = std::fs::read_to_string(&self.dropin)
+                    .is_ok_and(|t| t.contains("gglinux_stream"));
                 if wrote_stream && *self.stream_comes_up.borrow() {
                     nodes.extend([
                         (25, "gglinux_stream", "Audio/Sink", None),
@@ -1058,23 +1159,39 @@ mod tests {
                 }
             }
             let streams = self.streams.borrow();
-            nodes.extend(streams.iter().map(|&(id, bin)| (id, bin, "Stream/Output/Audio", Some(bin))));
+            nodes.extend(
+                streams
+                    .iter()
+                    .map(|&(id, bin)| (id, bin, "Stream/Output/Audio", Some(bin))),
+            );
             let dump = dump_with_source(&nodes, self.configured_sink, Some(MIC));
-            let Value::Array(mut objects) = serde_json::from_str(&dump)? else { unreachable!() };
-            for object in objects.iter_mut().filter(|o| o["type"] == "PipeWire:Interface:Metadata") {
-                let in_use = |kind: &str, name: &str| {
-                    json!({ "subject": 0, "key": format!("default.audio.{kind}"), "type": "Spa:String:JSON", "value": { "name": name } })
-                };
+            let Value::Array(mut objects) = serde_json::from_str(&dump)? else {
+                unreachable!()
+            };
+            for object in objects
+                .iter_mut()
+                .filter(|o| o["type"] == "PipeWire:Interface:Metadata")
+            {
+                let in_use = |kind: &str, name: &str| json!({ "subject": 0, "key": format!("default.audio.{kind}"), "type": "Spa:String:JSON", "value": { "name": name } });
                 let entries = object["metadata"].as_array_mut().unwrap();
                 entries.extend([in_use("sink", BT), in_use("source", MIC)]);
             }
-            for object in objects.iter_mut().filter(|o| o["type"] == "PipeWire:Interface:Node") {
+            for object in objects
+                .iter_mut()
+                .filter(|o| o["type"] == "PipeWire:Interface:Node")
+            {
                 let id = object["id"].as_u64().unwrap() as u32;
-                let serial = self.serials.borrow().get(&id).copied().unwrap_or(u64::from(id));
+                let serial = self
+                    .serials
+                    .borrow()
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(u64::from(id));
                 object["info"]["props"]["object.serial"] = json!(serial);
                 if let Some(&v) = self.volumes.borrow().get(&id) {
                     let linear = f64::from(v).powi(3);
-                    object["info"]["params"]["Props"][0]["channelVolumes"] = json!([linear, linear]);
+                    object["info"]["params"]["Props"][0]["channelVolumes"] =
+                        json!([linear, linear]);
                 }
             }
             let core = json!({ "id": 0, "type": "PipeWire:Interface:Core", "info": { "cookie": *self.cookie.borrow() } });
@@ -1084,7 +1201,9 @@ mod tests {
 
         fn run(&self, argv: &[String]) -> Result<()> {
             if argv[..2] == ["wpctl", "set-volume"] {
-                self.volumes.borrow_mut().insert(argv[2].parse().unwrap(), argv[3].parse().unwrap());
+                self.volumes
+                    .borrow_mut()
+                    .insert(argv[2].parse().unwrap(), argv[3].parse().unwrap());
             }
             if argv[0] == "systemctl" {
                 *self.cookie.borrow_mut() += 1;
@@ -1095,7 +1214,10 @@ mod tests {
             }
             self.runs.borrow_mut().push(argv.to_vec());
             let fails = *self.fails.borrow();
-            if !fails.is_empty() && argv.len() >= fails.len() && argv.iter().zip(fails).all(|(a, f)| a == f) {
+            if !fails.is_empty()
+                && argv.len() >= fails.len()
+                && argv.iter().zip(fails).all(|(a, f)| a == f)
+            {
                 bail!("`{}` failed", argv.join(" "));
             }
             Ok(())
@@ -1117,7 +1239,10 @@ mod tests {
     /// One test's settings and drop-in paths, in a directory removed when the guard goes.
     fn paths(name: &str) -> (Scratch, PathBuf, PathBuf) {
         let dir = scratch(name);
-        let (settings, dropin) = (dir.join("sonar.json"), dir.join("pipewire.conf.d").join(config::FILE_NAME));
+        let (settings, dropin) = (
+            dir.join("sonar.json"),
+            dir.join("pipewire.conf.d").join(config::FILE_NAME),
+        );
         (dir, settings, dropin)
     }
 
@@ -1131,9 +1256,22 @@ mod tests {
         sonar.enable().unwrap();
 
         let text = std::fs::read_to_string(&dropin).unwrap();
-        assert!(text.contains(&format!("target.object      = \"{BT}\"")), "plays into the default output");
-        assert!(fake.ran(&["systemctl", "--user", "restart", "pipewire.service", "pipewire-pulse.service", "wireplumber.service"]));
-        assert!(fake.ran(&["wpctl", "set-default", "20"]), "Game becomes the default");
+        assert!(
+            text.contains(&format!("target.object      = \"{BT}\"")),
+            "plays into the default output"
+        );
+        assert!(fake.ran(&[
+            "systemctl",
+            "--user",
+            "restart",
+            "pipewire.service",
+            "pipewire-pulse.service",
+            "wireplumber.service"
+        ]));
+        assert!(
+            fake.ran(&["wpctl", "set-default", "20"]),
+            "Game becomes the default"
+        );
         assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]));
         assert!(fake.ran(&["pw-metadata", "41", "target.object", "gglinux_media"]));
         assert!(fake.ran(&["pw-metadata", "42", "target.object", "gglinux_game"]));
@@ -1152,9 +1290,16 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         assert!(sonar.enable().is_err());
         assert!(!dropin.exists(), "the drop-in is removed again");
-        assert_eq!(fake.count("systemctl"), 3, "to apply, again without Smart Volume's stage, then to undo");
+        assert_eq!(
+            fake.count("systemctl"),
+            3,
+            "to apply, again without Smart Volume's stage, then to undo"
+        );
         let saved = settings::load(&settings_path);
-        assert!(!saved.enabled && !saved.smart_volume_refused, "the stage wasn't to blame");
+        assert!(
+            !saved.enabled && !saved.smart_volume_refused,
+            "the stage wasn't to blame"
+        );
     }
 
     #[test]
@@ -1165,7 +1310,10 @@ mod tests {
         *fake.fails.borrow_mut() = &["wpctl", "set-default"];
         assert!(sonar.enable().is_err());
         assert!(!dropin.exists(), "the drop-in is removed again");
-        assert!(sonar.state().channels.iter().all(|c| !c.present), "and the channels are gone");
+        assert!(
+            sonar.state().channels.iter().all(|c| !c.present),
+            "and the channels are gone"
+        );
         // systemctl reports a failure though PipeWire did restart (no pipewire-pulse, say).
         *fake.fails.borrow_mut() = &["systemctl"];
         assert!(sonar.enable().is_err());
@@ -1182,7 +1330,11 @@ mod tests {
         sonar.enable().unwrap();
         let before = fake.count("pw-metadata");
         sonar.tick();
-        assert_eq!(fake.count("pw-metadata"), before, "nothing new, nothing sent");
+        assert_eq!(
+            fake.count("pw-metadata"),
+            before,
+            "nothing new, nothing sent"
+        );
         fake.streams.borrow_mut().push((43, "mpv"));
         sonar.tick();
         assert_eq!(fake.count("pw-metadata"), before + 1);
@@ -1214,7 +1366,11 @@ mod tests {
         sonar.tick();
         for id in ["30", "31", "32", "33"] {
             assert!(
-                !fake.runs.borrow().iter().any(|r| r[0] == "pw-metadata" && r[1] == id),
+                !fake
+                    .runs
+                    .borrow()
+                    .iter()
+                    .any(|r| r[0] == "pw-metadata" && r[1] == id),
                 "outlet {id} was routed into a channel"
             );
         }
@@ -1228,7 +1384,12 @@ mod tests {
         sonar.enable().unwrap();
         sonar.set_app_channel("firefox", Channel::Game).unwrap();
         assert!(fake.ran(&["pw-metadata", "41", "target.object", "gglinux_game"]));
-        assert_eq!(settings::load(&settings_path).rules.channel_for(Some("firefox")), Channel::Game);
+        assert_eq!(
+            settings::load(&settings_path)
+                .rules
+                .channel_for(Some("firefox")),
+            Channel::Game
+        );
     }
 
     #[test]
@@ -1238,8 +1399,14 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
         sonar.set_chatmix(0.5).unwrap();
-        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "Game outlet down");
-        assert!(fake.ran(&["wpctl", "set-volume", "31", "1.000"]), "Chat outlet full");
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "30", "0.500"]),
+            "Game outlet down"
+        );
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "31", "1.000"]),
+            "Chat outlet full"
+        );
     }
 
     #[test]
@@ -1250,7 +1417,10 @@ mod tests {
         sonar.enable().unwrap();
         sonar.set_volume(Channel::Chat, 0.4).unwrap();
         assert!(fake.ran(&["wpctl", "set-volume", "21", "0.400"]));
-        assert_eq!(settings::load(&settings_path).volumes.get(&Channel::Chat), Some(&0.4));
+        assert_eq!(
+            settings::load(&settings_path).volumes.get(&Channel::Chat),
+            Some(&0.4)
+        );
     }
 
     #[test]
@@ -1278,7 +1448,10 @@ mod tests {
         sonar.disable().unwrap();
         assert!(!dropin.exists());
         assert_eq!(fake.count("systemctl"), 2);
-        assert!(fake.ran(&["wpctl", "set-default", "11"]), "back to the Bluetooth output");
+        assert!(
+            fake.ran(&["wpctl", "set-default", "11"]),
+            "back to the Bluetooth output"
+        );
         assert!(!settings::load(&settings_path).enabled);
     }
 
@@ -1291,23 +1464,42 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
         let saved = settings::load(&settings_path);
-        assert_eq!(saved.output.as_deref(), Some(BT), "the channels play where the user hears audio now");
-        assert_eq!(saved.previous_default.as_deref(), Some("bluez_output.away"), "still the default to give back");
+        assert_eq!(
+            saved.output.as_deref(),
+            Some(BT),
+            "the channels play where the user hears audio now"
+        );
+        assert_eq!(
+            saved.previous_default.as_deref(),
+            Some("bluez_output.away"),
+            "still the default to give back"
+        );
         let waits = *fake.pauses.borrow();
         sonar.disable().unwrap();
-        assert_eq!(*fake.pauses.borrow(), waits, "no waiting for a device that isn't there");
+        assert_eq!(
+            *fake.pauses.borrow(),
+            waits,
+            "no waiting for a device that isn't there"
+        );
     }
 
     #[test]
     fn a_removed_dropin_means_sonar_is_off() {
         let (_dir, settings_path, dropin) = paths("removed");
-        let saved = Settings { enabled: true, ..Settings::default() };
+        let saved = Settings {
+            enabled: true,
+            ..Settings::default()
+        };
         settings::save(&settings_path, &saved).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         assert!(!sonar.is_enabled());
         assert!(!settings::load(&settings_path).enabled);
-        assert_eq!(fake.count("systemctl"), 0, "nothing re-installed behind the user's back");
+        assert_eq!(
+            fake.count("systemctl"),
+            0,
+            "nothing re-installed behind the user's back"
+        );
     }
 
     #[test]
@@ -1322,7 +1514,11 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         assert!(!sonar.is_enabled());
         assert!(!dropin.exists());
-        assert_eq!(fake.count("systemctl"), 1, "one restart takes the channels down");
+        assert_eq!(
+            fake.count("systemctl"),
+            1,
+            "one restart takes the channels down"
+        );
         assert!(sonar.state().channels.iter().all(|c| !c.present));
         assert!(!settings::load(&settings_path).enabled);
     }
@@ -1340,7 +1536,10 @@ mod tests {
         fake.runs.borrow_mut().clear();
         *fake.up.borrow_mut() = true;
         sonar.tick();
-        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix re-applied");
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "30", "0.500"]),
+            "ChatMix re-applied"
+        );
         fake.runs.borrow_mut().clear();
         sonar.tick();
         assert_eq!(fake.count("wpctl"), 0, "and only once");
@@ -1358,9 +1557,21 @@ mod tests {
         // PipeWire restarted by something else, so quickly that no tick saw the channels gone.
         *fake.cookie.borrow_mut() += 1;
         sonar.tick();
-        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(
+            fake.ran(&[
+                "pw-cli",
+                "set-param",
+                "20",
+                "Props",
+                &chain_of(&sonar, Channel::Game)
+            ]),
+            "the EQ"
+        );
         assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
-        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "the apps routed again");
+        assert!(
+            fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]),
+            "the apps routed again"
+        );
         fake.runs.borrow_mut().clear();
         sonar.tick();
         assert!(fake.runs.borrow().is_empty(), "and only once");
@@ -1375,7 +1586,11 @@ mod tests {
         sonar.set_volume(Channel::Game, 0.9).unwrap();
         sonar.set_mic_volume(0.8).unwrap();
         sonar.tick();
-        assert_eq!(settings::load(&settings_path).volumes.get(&Channel::Game), Some(&0.9), "the slider's level stands");
+        assert_eq!(
+            settings::load(&settings_path).volumes.get(&Channel::Game),
+            Some(&0.9),
+            "the slider's level stands"
+        );
         // The volume keys turn Game down, and an app's AGC the mic.
         fake.volumes.borrow_mut().extend([(20, 0.15), (24, 0.5)]);
         sonar.tick();
@@ -1384,11 +1599,23 @@ mod tests {
         *fake.cookie.borrow_mut() += 1;
         fake.runs.borrow_mut().clear();
         sonar.tick();
-        assert!(fake.ran(&["wpctl", "set-volume", "20", "0.150"]), "Game as the user left it");
-        assert!(fake.ran(&["wpctl", "set-volume", "24", "0.500"]), "and the mic");
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "20", "0.150"]),
+            "Game as the user left it"
+        );
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "24", "0.500"]),
+            "and the mic"
+        );
         let saved = settings::load(&settings_path);
-        assert!((saved.volumes[&Channel::Game] - 0.15).abs() < 1e-3, "{saved:?}");
-        assert!(saved.mic_volume.is_some_and(|v| (v - 0.5).abs() < 1e-3), "{saved:?}");
+        assert!(
+            (saved.volumes[&Channel::Game] - 0.15).abs() < 1e-3,
+            "{saved:?}"
+        );
+        assert!(
+            saved.mic_volume.is_some_and(|v| (v - 0.5).abs() < 1e-3),
+            "{saved:?}"
+        );
     }
 
     #[test]
@@ -1418,9 +1645,17 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
-        for (id, channel) in [("20", Channel::Game), ("21", Channel::Chat), ("22", Channel::Media), ("23", Channel::Aux)] {
+        for (id, channel) in [
+            ("20", Channel::Game),
+            ("21", Channel::Chat),
+            ("22", Channel::Media),
+            ("23", Channel::Aux),
+        ] {
             let props = chain_of(&sonar, channel);
-            assert!(fake.ran(&["pw-cli", "set-param", id, "Props", &props]), "{channel:?}");
+            assert!(
+                fake.ran(&["pw-cli", "set-param", id, "Props", &props]),
+                "{channel:?}"
+            );
         }
     }
 
@@ -1433,14 +1668,31 @@ mod tests {
         let mut bands = crate::eq::flat_channel();
         bands[3].gain = 4.0;
         sonar.set_channel_eq(Channel::Chat, bands.clone()).unwrap();
-        assert!(fake.ran(&["pw-cli", "set-param", "21", "Props", &chain_of(&sonar, Channel::Chat)]));
-        assert_eq!(settings::load(&settings_path).eq.get(&Channel::Chat), Some(&bands));
+        assert!(fake.ran(&[
+            "pw-cli",
+            "set-param",
+            "21",
+            "Props",
+            &chain_of(&sonar, Channel::Chat)
+        ]));
+        assert_eq!(
+            settings::load(&settings_path).eq.get(&Channel::Chat),
+            Some(&bands)
+        );
 
         let before = fake.runs.borrow().len();
         bands[3].gain = 40.0;
         assert!(sonar.set_channel_eq(Channel::Chat, bands).is_err());
         assert_eq!(fake.runs.borrow().len(), before, "nothing sent");
-        assert_eq!(settings::load(&settings_path).eq.get(&Channel::Chat).unwrap()[3].gain, 4.0, "nothing stored");
+        assert_eq!(
+            settings::load(&settings_path)
+                .eq
+                .get(&Channel::Chat)
+                .unwrap()[3]
+                .gain,
+            4.0,
+            "nothing stored"
+        );
     }
 
     #[test]
@@ -1450,7 +1702,10 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
         fake.runs.borrow_mut().clear();
-        let hp = HeadphoneEq { preamp: -3.0, ..crate::eq::flat_headphone() };
+        let hp = HeadphoneEq {
+            preamp: -3.0,
+            ..crate::eq::flat_headphone()
+        };
         sonar.set_headphone_eq(hp).unwrap();
         assert_eq!(fake.count("pw-cli"), 4);
     }
@@ -1462,7 +1717,10 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
         sonar
-            .import_autoeq("Preamp: -6.2 dB\nFilter 1: ON PK Fc 180 Hz Gain -3.4 dB Q 0.53", Some("HD 650".into()))
+            .import_autoeq(
+                "Preamp: -6.2 dB\nFilter 1: ON PK Fc 180 Hz Gain -3.4 dB Q 0.53",
+                Some("HD 650".into()),
+            )
             .unwrap();
         let hp = sonar.snapshot().headphone;
         assert_eq!(hp.name.as_deref(), Some("HD 650"));
@@ -1473,14 +1731,21 @@ mod tests {
     #[test]
     fn an_outdated_dropin_is_rewritten_with_one_restart() {
         let (_dir, settings_path, dropin) = paths("upgrade");
-        let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
+        let saved = Settings {
+            enabled: true,
+            output: Some(BT.into()),
+            ..Settings::default()
+        };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
         std::fs::write(&dropin, "# an M3a loopback drop-in\n").unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let sonar = Sonar::new(&fake, settings_path, dropin.clone());
         assert!(sonar.is_enabled());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, true).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), false, true).unwrap()
+        );
         assert_eq!(fake.count("systemctl"), 1);
     }
 
@@ -1510,9 +1775,15 @@ mod tests {
         sonar.enable().unwrap();
         let text = std::fs::read_to_string(&dropin).unwrap();
         assert!(text.contains(&format!("target.object      = \"{MIC}\"")));
-        assert!(fake.ran(&["wpctl", "set-default", "24"]), "gglinux Mic becomes the default input");
+        assert!(
+            fake.ran(&["wpctl", "set-default", "24"]),
+            "gglinux Mic becomes the default input"
+        );
         let props = crate::mic::props(&MicSettings::default());
-        assert!(fake.ran(&["pw-cli", "set-param", "34", "Props", &props]), "controls on the capture node");
+        assert!(
+            fake.ran(&["pw-cli", "set-param", "34", "Props", &props]),
+            "controls on the capture node"
+        );
         let saved = settings::load(&settings_path);
         assert_eq!(saved.mic_input.as_deref(), Some(MIC));
         assert_eq!(saved.previous_default_source.as_deref(), Some(MIC));
@@ -1526,7 +1797,9 @@ mod tests {
         fake.mic_plugins = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
-        assert!(!std::fs::read_to_string(&dropin).unwrap().contains("gglinux_mic"));
+        assert!(!std::fs::read_to_string(&dropin)
+            .unwrap()
+            .contains("gglinux_mic"));
         let mic = sonar.snapshot().mic;
         assert!(!mic.available && !mic.present);
         assert!(!fake.ran(&["wpctl", "set-default", "24"]));
@@ -1550,12 +1823,27 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
-        let on = MicSettings { gate: true, gate_threshold_db: -40.0, ..MicSettings::default() };
+        let on = MicSettings {
+            gate: true,
+            gate_threshold_db: -40.0,
+            ..MicSettings::default()
+        };
         sonar.set_mic_settings(on).unwrap();
-        assert!(fake.ran(&["pw-cli", "set-param", "34", "Props", &crate::mic::props(&on)]));
+        assert!(fake.ran(&[
+            "pw-cli",
+            "set-param",
+            "34",
+            "Props",
+            &crate::mic::props(&on)
+        ]));
         assert_eq!(settings::load(&settings_path).mic, on);
         let before = fake.runs.borrow().len();
-        assert!(sonar.set_mic_settings(MicSettings { makeup_db: 40.0, ..on }).is_err());
+        assert!(sonar
+            .set_mic_settings(MicSettings {
+                makeup_db: 40.0,
+                ..on
+            })
+            .is_err());
         assert_eq!(fake.runs.borrow().len(), before);
         assert_eq!(settings::load(&settings_path).mic, on);
     }
@@ -1577,38 +1865,65 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
         sonar.disable().unwrap();
-        assert!(fake.ran(&["wpctl", "set-default", "12"]), "back to the physical mic");
+        assert!(
+            fake.ran(&["wpctl", "set-default", "12"]),
+            "back to the physical mic"
+        );
     }
 
     #[test]
     fn plugins_installed_later_add_the_mic_on_startup() {
         let (_dir, settings_path, dropin) = paths("mic-later");
-        let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
+        let saved = Settings {
+            enabled: true,
+            output: Some(BT.into()),
+            ..Settings::default()
+        };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
         std::fs::write(&dropin, config::dropin(BT, None, false, true).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let _sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
-        assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_mic"));
+        assert!(std::fs::read_to_string(&dropin)
+            .unwrap()
+            .contains("gglinux_mic"));
         assert_eq!(fake.count("systemctl"), 1);
-        assert_eq!(settings::load(&settings_path).mic_input.as_deref(), Some(MIC));
+        assert_eq!(
+            settings::load(&settings_path).mic_input.as_deref(),
+            Some(MIC)
+        );
     }
 
     #[test]
     fn a_mic_added_on_startup_becomes_the_default_input() {
         let (_dir, settings_path, dropin) = paths("mic-later-default");
         // Sonar was turned on without the plugins, by a gglinux that had no mic to remember inputs for.
-        let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
+        let saved = Settings {
+            enabled: true,
+            output: Some(BT.into()),
+            ..Settings::default()
+        };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
         std::fs::write(&dropin, config::dropin(BT, None, false, true).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.up.borrow_mut() = true; // PipeWire runs the drop-in without the mic
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
-        assert!(fake.ran(&["wpctl", "set-default", "24"]), "gglinux Mic becomes the default input");
-        assert_eq!(settings::load(&settings_path).previous_default_source.as_deref(), Some(MIC));
+        assert!(
+            fake.ran(&["wpctl", "set-default", "24"]),
+            "gglinux Mic becomes the default input"
+        );
+        assert_eq!(
+            settings::load(&settings_path)
+                .previous_default_source
+                .as_deref(),
+            Some(MIC)
+        );
         sonar.disable().unwrap();
-        assert!(fake.ran(&["wpctl", "set-default", "12"]), "the physical mic is given back with Sonar off");
+        assert!(
+            fake.ran(&["wpctl", "set-default", "12"]),
+            "the physical mic is given back with Sonar off"
+        );
     }
 
     #[test]
@@ -1620,7 +1935,12 @@ mod tests {
         assert_eq!(fake.count("systemctl"), 0, "no PipeWire restart");
         assert!(settings::load(&settings_path).streamer);
         sonar.enable().unwrap();
-        assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_stream"), "applied at the next enable");
+        assert!(
+            std::fs::read_to_string(&dropin)
+                .unwrap()
+                .contains("gglinux_stream"),
+            "applied at the next enable"
+        );
     }
 
     #[test]
@@ -1633,11 +1953,27 @@ mod tests {
         let restarts = fake.count("systemctl");
         sonar.set_streamer(true).unwrap();
         assert_eq!(fake.count("systemctl"), restarts + 1, "one restart");
-        assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_stream"));
-        assert!(fake.ran(&["wpctl", "set-volume", "36", "0.200"]), "Chat's stream level");
-        assert!(fake.ran(&["wpctl", "set-volume", "25", "1.000"]), "the master level");
-        let defaults = fake.runs.borrow().iter().filter(|r| r[..] == ["wpctl", "set-default", "20"]).count();
-        assert!(defaults >= 2, "Game is made the default again after the extra restart");
+        assert!(std::fs::read_to_string(&dropin)
+            .unwrap()
+            .contains("gglinux_stream"));
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "36", "0.200"]),
+            "Chat's stream level"
+        );
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "25", "1.000"]),
+            "the master level"
+        );
+        let defaults = fake
+            .runs
+            .borrow()
+            .iter()
+            .filter(|r| r[..] == ["wpctl", "set-default", "20"])
+            .count();
+        assert!(
+            defaults >= 2,
+            "Game is made the default again after the extra restart"
+        );
         let s = sonar.snapshot();
         assert!(s.stream.enabled && s.stream.present);
         assert_eq!(s.stream.volumes, vec![1.0, 0.2, 1.0, 1.0]);
@@ -1667,7 +2003,11 @@ mod tests {
         sonar.tick();
         for id in [35, 36, 37, 38, 45, 46, 47, 48] {
             assert!(
-                !fake.runs.borrow().iter().any(|r| r[0] == "pw-metadata" && r[1] == id.to_string()),
+                !fake
+                    .runs
+                    .borrow()
+                    .iter()
+                    .any(|r| r[0] == "pw-metadata" && r[1] == id.to_string()),
                 "node {id} was routed"
             );
         }
@@ -1681,7 +2021,13 @@ mod tests {
         sonar.enable().unwrap();
         sonar.set_streamer(true).unwrap();
         sonar.set_stream_volume(Channel::Media, 0.3).unwrap();
-        let media = |fake: &Fake| fake.runs.borrow().iter().filter(|r| r[..] == ["wpctl", "set-volume", "37", "0.300"]).count();
+        let media = |fake: &Fake| {
+            fake.runs
+                .borrow()
+                .iter()
+                .filter(|r| r[..] == ["wpctl", "set-volume", "37", "0.300"])
+                .count()
+        };
         let before = media(&fake);
         *fake.up.borrow_mut() = false; // PipeWire restarted elsewhere…
         sonar.tick();
@@ -1706,16 +2052,34 @@ mod tests {
         sonar.set_streamer(true).unwrap();
         assert!(sonar.is_enabled(), "never rolled back for the stream");
         assert!(!sonar.snapshot().stream.present);
-        assert!(fake.ran(&["wpctl", "set-volume", "21", "0.400"]), "Chat's own volume");
-        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "21", "0.400"]),
+            "Chat's own volume"
+        );
+        assert!(
+            fake.ran(&[
+                "pw-cli",
+                "set-param",
+                "20",
+                "Props",
+                &chain_of(&sonar, Channel::Game)
+            ]),
+            "the EQ"
+        );
         assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
 
         // The stream mix turns up later: only its own levels are pushed.
         fake.runs.borrow_mut().clear();
         *fake.stream_comes_up.borrow_mut() = true;
         sonar.tick();
-        assert!(fake.ran(&["wpctl", "set-volume", "25", "1.000"]), "the master level");
-        assert!(!fake.ran(&["wpctl", "set-volume", "21", "0.400"]), "the channels are not pushed again");
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "25", "1.000"]),
+            "the master level"
+        );
+        assert!(
+            !fake.ran(&["wpctl", "set-volume", "21", "0.400"]),
+            "the channels are not pushed again"
+        );
     }
 
     #[test]
@@ -1731,9 +2095,21 @@ mod tests {
         *fake.fails.borrow_mut() = &[];
         fake.runs.borrow_mut().clear();
         sonar.tick();
-        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(
+            fake.ran(&[
+                "pw-cli",
+                "set-param",
+                "20",
+                "Props",
+                &chain_of(&sonar, Channel::Game)
+            ]),
+            "the EQ"
+        );
         assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
-        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "the apps routed again");
+        assert!(
+            fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]),
+            "the apps routed again"
+        );
     }
 
     #[test]
@@ -1742,10 +2118,15 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
-        assert!(std::fs::read_to_string(&dropin).unwrap().contains("name = sv_comp"));
+        assert!(std::fs::read_to_string(&dropin)
+            .unwrap()
+            .contains("name = sv_comp"));
         let off = crate::smart::props(&SmartVolume::default());
         for id in ["20", "21", "22", "23"] {
-            assert!(fake.ran(&["pw-cli", "set-param", id, "Props", &off]), "channel {id} starts off");
+            assert!(
+                fake.ran(&["pw-cli", "set-param", id, "Props", &off]),
+                "channel {id} starts off"
+            );
         }
     }
 
@@ -1756,17 +2137,50 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
         let restarts = fake.count("systemctl");
-        let loud = SmartVolume { enabled: true, level: SmartLevel::Loud };
+        let loud = SmartVolume {
+            enabled: true,
+            level: SmartLevel::Loud,
+        };
         sonar.set_smart_volume(Channel::Media, loud).unwrap();
-        assert!(fake.ran(&["pw-cli", "set-param", "22", "Props", &crate::smart::props(&loud)]));
-        let off = SmartVolume { enabled: false, ..loud };
+        assert!(fake.ran(&[
+            "pw-cli",
+            "set-param",
+            "22",
+            "Props",
+            &crate::smart::props(&loud)
+        ]));
+        let off = SmartVolume {
+            enabled: false,
+            ..loud
+        };
         sonar.set_smart_volume(Channel::Media, off).unwrap();
-        assert!(fake.ran(&["pw-cli", "set-param", "22", "Props", &crate::smart::props(&off)]));
-        assert_eq!(fake.count("systemctl"), restarts, "never a PipeWire restart");
-        assert_eq!(settings::load(&settings_path).smart_volume(Channel::Media), off);
+        assert!(fake.ran(&[
+            "pw-cli",
+            "set-param",
+            "22",
+            "Props",
+            &crate::smart::props(&off)
+        ]));
+        assert_eq!(
+            fake.count("systemctl"),
+            restarts,
+            "never a PipeWire restart"
+        );
+        assert_eq!(
+            settings::load(&settings_path).smart_volume(Channel::Media),
+            off
+        );
         let s = sonar.snapshot().smart_volume;
         assert!(s.available && s.reason.is_none());
-        assert_eq!(s.settings, vec![SmartVolume::default(), SmartVolume::default(), off, SmartVolume::default()]);
+        assert_eq!(
+            s.settings,
+            vec![
+                SmartVolume::default(),
+                SmartVolume::default(),
+                off,
+                SmartVolume::default()
+            ]
+        );
     }
 
     #[test]
@@ -1776,14 +2190,29 @@ mod tests {
         *fake.smart_volume.borrow_mut() = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), false, false).unwrap()
+        );
         let s = sonar.snapshot().smart_volume;
         assert!(!s.available, "{s:?}");
-        assert!(s.reason.as_deref().is_some_and(|r| r.contains("Install swh-plugins")), "asks for the package: {s:?}");
-        let on = SmartVolume { enabled: true, ..SmartVolume::default() };
+        assert!(
+            s.reason
+                .as_deref()
+                .is_some_and(|r| r.contains("Install swh-plugins")),
+            "asks for the package: {s:?}"
+        );
+        let on = SmartVolume {
+            enabled: true,
+            ..SmartVolume::default()
+        };
         assert!(sonar.set_smart_volume(Channel::Game, on).is_err());
         assert!(
-            !fake.runs.borrow().iter().any(|r| r[0] == "pw-cli" && r[4].contains("sv_mix")),
+            !fake
+                .runs
+                .borrow()
+                .iter()
+                .any(|r| r[0] == "pw-cli" && r[4].contains("sv_mix")),
             "no Smart Volume controls sent"
         );
     }
@@ -1791,29 +2220,52 @@ mod tests {
     #[test]
     fn a_compressor_that_disappears_takes_the_stage_out_on_startup() {
         let (_dir, settings_path, dropin) = paths("smart-gone");
-        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        let saved = Settings {
+            enabled: true,
+            output: Some(BT.into()),
+            mic_input: Some(MIC.into()),
+            ..Settings::default()
+        };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
         std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, true).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.smart_volume.borrow_mut() = false; // swh-plugins removed while gglinux was off
         let _sonar = Sonar::new(&fake, settings_path, dropin.clone());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), false, false).unwrap()
+        );
         assert_eq!(fake.count("systemctl"), 1, "one restart");
     }
 
     #[test]
     fn a_compressor_that_appears_adds_the_stage_on_startup() {
         let (_dir, settings_path, dropin) = paths("smart-new");
-        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        let saved = Settings {
+            enabled: true,
+            output: Some(BT.into()),
+            mic_input: Some(MIC.into()),
+            ..Settings::default()
+        };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
-        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, false).unwrap()).unwrap();
+        std::fs::write(
+            &dropin,
+            config::dropin(BT, Some(MIC), false, false).unwrap(),
+        )
+        .unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let sonar = Sonar::new(&fake, settings_path, dropin.clone());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, true).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), false, true).unwrap()
+        );
         assert_eq!(fake.count("systemctl"), 1, "one restart");
-        assert!(sonar.snapshot().smart_volume.available, "the channels came back with the stage");
+        assert!(
+            sonar.snapshot().smart_volume.available,
+            "the channels came back with the stage"
+        );
     }
 
     #[test]
@@ -1824,21 +2276,45 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
         assert!(sonar.is_enabled(), "the channels run, without Smart Volume");
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
-        assert_eq!(fake.count("systemctl"), 2, "once with the stage, once without");
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), false, false).unwrap()
+        );
+        assert_eq!(
+            fake.count("systemctl"),
+            2,
+            "once with the stage, once without"
+        );
         assert!(settings::load(&settings_path).smart_volume_refused);
         let s = sonar.snapshot().smart_volume;
-        assert!(!s.available && s.reason.as_deref().is_some_and(|r| r.contains("off and on")), "{s:?}");
-        let on = SmartVolume { enabled: true, ..SmartVolume::default() };
+        assert!(
+            !s.available
+                && s.reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains("off and on")),
+            "{s:?}"
+        );
+        let on = SmartVolume {
+            enabled: true,
+            ..SmartVolume::default()
+        };
         assert!(sonar.set_smart_volume(Channel::Game, on).is_err());
         sonar.disable().unwrap();
-        assert!(!settings::load(&settings_path).smart_volume_refused, "turning Sonar on again tries the stage again");
+        assert!(
+            !settings::load(&settings_path).smart_volume_refused,
+            "turning Sonar on again tries the stage again"
+        );
     }
 
     #[test]
     fn a_refused_stage_is_taken_out_on_startup() {
         let (_dir, settings_path, dropin) = paths("smart-refused-upgrade");
-        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        let saved = Settings {
+            enabled: true,
+            output: Some(BT.into()),
+            mic_input: Some(MIC.into()),
+            ..Settings::default()
+        };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
         // Sonar was on before Smart Volume, so the startup upgrade adds the stage.
@@ -1849,7 +2325,11 @@ mod tests {
         let sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         assert!(sonar.is_enabled());
         assert_eq!(std::fs::read_to_string(&dropin).unwrap(), before);
-        assert_eq!(fake.count("systemctl"), 2, "the upgrade, then the stage taken out");
+        assert_eq!(
+            fake.count("systemctl"),
+            2,
+            "the upgrade, then the stage taken out"
+        );
         assert!(settings::load(&settings_path).smart_volume_refused);
         assert!(!sonar.snapshot().smart_volume.available);
     }
@@ -1857,7 +2337,12 @@ mod tests {
     #[test]
     fn a_stage_refused_at_login_is_taken_out_on_startup() {
         let (_dir, settings_path, dropin) = paths("smart-refused-login");
-        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        let saved = Settings {
+            enabled: true,
+            output: Some(BT.into()),
+            mic_input: Some(MIC.into()),
+            ..Settings::default()
+        };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
         // The drop-in is current, but this PipeWire (a newer one, say) refused it at login.
@@ -1865,7 +2350,10 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.refuses_stage.borrow_mut() = true;
         let _sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), false, false).unwrap()
+        );
         assert_eq!(fake.count("systemctl"), 1, "one restart, without the stage");
         assert!(settings::load(&settings_path).smart_volume_refused);
     }
@@ -1878,8 +2366,15 @@ mod tests {
         sonar.enable().unwrap();
         *fake.refuses_stage.borrow_mut() = true; // PipeWire was upgraded since
         sonar.set_streamer(true).unwrap();
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), true, false).unwrap());
-        assert_eq!(fake.count("systemctl"), 3, "on, streamer mode, then without the stage");
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), true, false).unwrap()
+        );
+        assert_eq!(
+            fake.count("systemctl"),
+            3,
+            "on, streamer mode, then without the stage"
+        );
         assert!(sonar.is_enabled() && settings::load(&settings_path).smart_volume_refused);
     }
 
@@ -1892,14 +2387,24 @@ mod tests {
         let restarts = fake.count("systemctl");
         *fake.smart_volume.borrow_mut() = false; // swh-plugins removed
         sonar.tick();
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
-        assert_eq!(fake.count("systemctl"), restarts, "PipeWire still runs the stage it loaded: no restart");
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), false, false).unwrap()
+        );
+        assert_eq!(
+            fake.count("systemctl"),
+            restarts,
+            "PipeWire still runs the stage it loaded: no restart"
+        );
         assert!(!sonar.snapshot().smart_volume.available);
         sonar.tick();
         assert_eq!(fake.count("systemctl"), restarts, "once is enough");
         *fake.smart_volume.borrow_mut() = true; // installed again
         sonar.tick();
-        assert!(!sonar.snapshot().smart_volume.available, "the drop-in lost the stage: it waits for Sonar off and on");
+        assert!(
+            !sonar.snapshot().smart_volume.available,
+            "the drop-in lost the stage: it waits for Sonar off and on"
+        );
     }
 
     #[test]
@@ -1912,21 +2417,45 @@ mod tests {
         *fake.smart_volume.borrow_mut() = true; // swh-plugins installed
         sonar.tick();
         let s = sonar.snapshot().smart_volume;
-        assert!(!s.available && s.reason.as_deref().is_some_and(|r| r.contains("before swh-plugins")), "{s:?}");
-        let on = SmartVolume { enabled: true, ..SmartVolume::default() };
+        assert!(
+            !s.available
+                && s.reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains("before swh-plugins")),
+            "{s:?}"
+        );
+        let on = SmartVolume {
+            enabled: true,
+            ..SmartVolume::default()
+        };
         assert!(sonar.set_smart_volume(Channel::Game, on).is_err());
         assert!(
-            !fake.runs.borrow().iter().any(|r| r[0] == "pw-cli" && r[4].contains("sv_mix")),
+            !fake
+                .runs
+                .borrow()
+                .iter()
+                .any(|r| r[0] == "pw-cli" && r[4].contains("sv_mix")),
             "no Smart Volume controls sent"
         );
         sonar.set_output(HEADSET).unwrap();
-        assert!(!std::fs::read_to_string(&dropin).unwrap().contains("sv_comp"), "the stage comes only with a restart");
+        assert!(
+            !std::fs::read_to_string(&dropin)
+                .unwrap()
+                .contains("sv_comp"),
+            "the stage comes only with a restart"
+        );
 
         sonar.disable().unwrap();
         sonar.enable().unwrap();
         assert!(sonar.snapshot().smart_volume.available);
         sonar.set_smart_volume(Channel::Game, on).unwrap();
-        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &crate::smart::props(&on)]));
+        assert!(fake.ran(&[
+            "pw-cli",
+            "set-param",
+            "20",
+            "Props",
+            &crate::smart::props(&on)
+        ]));
     }
 
     #[test]
@@ -1942,11 +2471,29 @@ mod tests {
         *fake.smart_volume.borrow_mut() = false;
         *fake.up.borrow_mut() = false;
         sonar.tick();
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&dropin).unwrap(),
+            config::dropin(BT, Some(MIC), false, false).unwrap()
+        );
         assert_eq!(fake.count("systemctl"), 1, "one restart, without the stage");
         assert!(sonar.snapshot().channels.iter().all(|c| c.present));
-        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ is pushed again");
-        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "and ChatMix");
-        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "and the apps routed again");
+        assert!(
+            fake.ran(&[
+                "pw-cli",
+                "set-param",
+                "20",
+                "Props",
+                &chain_of(&sonar, Channel::Game)
+            ]),
+            "the EQ is pushed again"
+        );
+        assert!(
+            fake.ran(&["wpctl", "set-volume", "30", "0.500"]),
+            "and ChatMix"
+        );
+        assert!(
+            fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]),
+            "and the apps routed again"
+        );
     }
 }

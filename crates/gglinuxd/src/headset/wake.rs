@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Which status changes are worth lighting the base-station screen for.
 //!
 //! The worker compares consecutive `06 b0` reads with [`wake_reason`]. A `Some`
@@ -67,16 +68,26 @@ mod tests {
 
     #[test]
     fn power_changes_wake() {
-        let off = Status { power: PowerStatus::Offline, headset_battery: None, ..status() };
+        let off = Status {
+            power: PowerStatus::Offline,
+            headset_battery: None,
+            ..status()
+        };
         assert_eq!(wake_reason(&status(), &off), Some(WakeReason::Power));
         assert_eq!(wake_reason(&off, &status()), Some(WakeReason::Power));
-        let cable = Status { power: PowerStatus::Charging, ..status() };
+        let cable = Status {
+            power: PowerStatus::Charging,
+            ..status()
+        };
         assert_eq!(wake_reason(&status(), &cable), Some(WakeReason::Power));
     }
 
     #[test]
     fn battery_wakes_only_when_dropping_while_low() {
-        let at = |pct| Status { headset_battery: Some(pct), ..status() };
+        let at = |pct| Status {
+            headset_battery: Some(pct),
+            ..status()
+        };
         assert_eq!(wake_reason(&at(50), &at(37)), None, "not low yet");
         assert_eq!(wake_reason(&at(37), &at(25)), Some(WakeReason::Battery));
         assert_eq!(wake_reason(&at(25), &at(12)), Some(WakeReason::Battery));
@@ -85,17 +96,54 @@ mod tests {
 
     #[test]
     fn spare_pack_in_or_out_wakes() {
-        let none = Status { spare_battery: None, ..status() };
+        let none = Status {
+            spare_battery: None,
+            ..status()
+        };
         assert_eq!(wake_reason(&status(), &none), Some(WakeReason::Spare));
         assert_eq!(wake_reason(&none, &status()), Some(WakeReason::Spare));
-        let lower = Status { spare_battery: Some(87), ..status() };
-        assert_eq!(wake_reason(&status(), &lower), None, "a charging spare is not news");
+        let lower = Status {
+            spare_battery: Some(87),
+            ..status()
+        };
+        assert_eq!(
+            wake_reason(&status(), &lower),
+            None,
+            "a charging spare is not news"
+        );
     }
 
     #[test]
     fn control_changes_wake() {
-        assert_eq!(wake_reason(&status(), &Status { anc_raw: 0, ..status() }), Some(WakeReason::Controls));
-        assert_eq!(wake_reason(&status(), &Status { mic_status_raw: 1, ..status() }), Some(WakeReason::Controls));
-        assert_eq!(wake_reason(&status(), &Status { transparency_raw: 5, ..status() }), Some(WakeReason::Controls));
+        assert_eq!(
+            wake_reason(
+                &status(),
+                &Status {
+                    anc_raw: 0,
+                    ..status()
+                }
+            ),
+            Some(WakeReason::Controls)
+        );
+        assert_eq!(
+            wake_reason(
+                &status(),
+                &Status {
+                    mic_status_raw: 1,
+                    ..status()
+                }
+            ),
+            Some(WakeReason::Controls)
+        );
+        assert_eq!(
+            wake_reason(
+                &status(),
+                &Status {
+                    transparency_raw: 5,
+                    ..status()
+                }
+            ),
+            Some(WakeReason::Controls)
+        );
     }
 }

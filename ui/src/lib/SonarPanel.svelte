@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <script lang="ts">
   // Sonar: Game / Chat / Media / Aux channels hosted by PipeWire, apps routed
   // into them by rule, and ChatMix between Game and Chat.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Packet builders and reply decoding for the Arctis Nova Pro Wireless.
 //!
 //! Commands are written as report `0x06`. The opcode is the byte *after* the
@@ -356,7 +357,9 @@ impl AutoOff {
             15 => AutoOff::Min15,
             30 => AutoOff::Min30,
             60 => AutoOff::Min60,
-            other => bail!("unsupported auto-off timer {other} min (want 0 for never, 1, 5, 10, 15, 30 or 60)"),
+            other => bail!(
+                "unsupported auto-off timer {other} min (want 0 for never, 1, 5, 10, 15, 30 or 60)"
+            ),
         })
     }
 }
@@ -592,7 +595,10 @@ mod tests {
     fn setters_reject_out_of_range_values() {
         assert!(sidetone_packet(4).is_err());
         assert!(eq_preset_packet(5).is_err());
-        assert!(mic_volume_packet(0x00).is_err(), "0x00 is below the mute floor of 0x01");
+        assert!(
+            mic_volume_packet(0x00).is_err(),
+            "0x00 is below the mute floor of 0x01"
+        );
         assert!(mic_volume_packet(0xa1).is_err());
         assert!(mic_led_packet(11).is_err());
         assert!(volume_packet(57).is_err());
@@ -606,7 +612,8 @@ mod tests {
         assert_eq!(flat[0], 0x33);
         assert!(flat[1..].iter().all(|&b| b == 0x14), "{flat:02x?}");
 
-        let boosted = eq_bands_packet(&[10.0, -10.0, 0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        let boosted =
+            eq_bands_packet(&[10.0, -10.0, 0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
         assert_eq!(&boosted[1..5], &[40, 0, 21, 19]);
     }
 
@@ -648,7 +655,10 @@ mod tests {
         let s = Status::decode(&status_reply(0x01, 3, 0)).unwrap();
         assert_eq!(s.power, PowerStatus::Offline);
         assert_eq!(s.headset_battery, None);
-        assert_eq!(s.spare_battery, None, "an empty charge slot is absent, not flat");
+        assert_eq!(
+            s.spare_battery, None,
+            "an empty charge slot is absent, not flat"
+        );
     }
 
     /// The protocol has no correlation id, so a stray interrupt must not be
@@ -667,14 +677,21 @@ mod tests {
     fn battery_scale_saturates() {
         assert_eq!(battery_percent(0), 0);
         assert_eq!(battery_percent(8), 100);
-        assert_eq!(battery_percent(200), 100, "a bogus gauge must not exceed 100%");
+        assert_eq!(
+            battery_percent(200),
+            100,
+            "a bogus gauge must not exceed 100%"
+        );
     }
 
     #[test]
     fn oled_brightness_is_one_to_ten() {
         assert_eq!(oled_brightness_packet(1).unwrap(), vec![0x85, 0x01]);
         assert_eq!(oled_brightness_packet(10).unwrap(), vec![0x85, 0x0a]);
-        assert!(oled_brightness_packet(0).is_err(), "0 does not turn the screen off");
+        assert!(
+            oled_brightness_packet(0).is_err(),
+            "0 does not turn the screen off"
+        );
         assert!(oled_brightness_packet(11).is_err());
         assert_eq!(oled_return_to_ui_packet(), vec![0x95]);
         assert_eq!(audio_settings_packet(), vec![0x20]);
@@ -697,10 +714,18 @@ mod tests {
         // Captured on this unit 2026-09-27: 06 20 <input> <volume> ...
         let reply = [0x06, 0x20, 0x00, 0x06, 0x01, 0x00, 0x00, 0x14, 0x14];
         assert_eq!(decode_volume(&reply), Some(6));
-        assert_eq!(decode_volume(&[0x06, 0x20, 0x00, 57]), None, "past silent is not a volume");
+        assert_eq!(
+            decode_volume(&[0x06, 0x20, 0x00, 57]),
+            None,
+            "past silent is not a volume"
+        );
         assert_eq!(decode_volume(&[0x06, 0xb0, 0x00, 0x06]), None);
         assert_eq!(decode_volume_event(&[0x07, 0x25, 0x07]), Some(7));
-        assert_eq!(decode_volume_event(&[0x06, 0x25, 0x07]), None, "a reply, not an event");
+        assert_eq!(
+            decode_volume_event(&[0x06, 0x25, 0x07]),
+            None,
+            "a reply, not an event"
+        );
     }
 
     #[test]
@@ -709,7 +734,10 @@ mod tests {
         let wheel = vec![0x07, 0x25, 0x06];
         let status = vec![0x06, 0xb0, 0x00, 0x00, 0x01];
         assert_eq!(sort_report(wheel.clone(), Some(0xb0), &mut events), None);
-        assert_eq!(sort_report(status.clone(), Some(0xb0), &mut events), Some(status));
+        assert_eq!(
+            sort_report(status.clone(), Some(0xb0), &mut events),
+            Some(status)
+        );
         assert_eq!(events, vec![wheel]);
     }
 
@@ -724,9 +752,16 @@ mod tests {
     #[test]
     fn queued_reports_sort_with_nothing_awaited() {
         let mut events = Vec::new();
-        assert_eq!(sort_report(vec![0x06, 0x20, 0x00, 0x06], None, &mut events), None);
+        assert_eq!(
+            sort_report(vec![0x06, 0x20, 0x00, 0x06], None, &mut events),
+            None
+        );
         assert_eq!(sort_report(vec![0x07, 0xbd, 0x01], None, &mut events), None);
-        assert_eq!(sort_report(vec![0x07], None, &mut events), None, "too short to be an event");
+        assert_eq!(
+            sort_report(vec![0x07], None, &mut events),
+            None,
+            "too short to be an event"
+        );
         assert_eq!(events, vec![vec![0x07, 0xbd, 0x01]]);
     }
 
@@ -734,21 +769,31 @@ mod tests {
     fn every_setting_encodes_to_its_documented_commands() {
         let cases: Vec<(Setting, Vec<Vec<u8>>)> = vec![
             (Setting::NoiseMode(NoiseMode::Off), vec![vec![0xbd, 0]]),
-            (Setting::NoiseMode(NoiseMode::Transparency), vec![vec![0xbd, 1]]),
+            (
+                Setting::NoiseMode(NoiseMode::Transparency),
+                vec![vec![0xbd, 1]],
+            ),
             (Setting::NoiseMode(NoiseMode::Anc), vec![vec![0xbd, 2]]),
             (Setting::Transparency(10), vec![vec![0xb9, 10]]),
             (Setting::Sidetone(3), vec![vec![0x39, 3]]),
             (Setting::MicVolume(1), vec![vec![0x37, 1]]),
             (Setting::MicLed(1), vec![vec![0xbf, 1]]),
             (Setting::AutoOff(AutoOff::Never), vec![vec![0xc1, 0]]),
-            (Setting::WirelessMode(WirelessMode::Speed), vec![vec![0xc3, 0]]),
+            (
+                Setting::WirelessMode(WirelessMode::Speed),
+                vec![vec![0xc3, 0]],
+            ),
             (Setting::EqPreset(1), vec![vec![0x2e, 1]]),
         ];
         for (setting, expected) in cases {
             assert_eq!(setting.packets().unwrap(), expected, "{setting:?}");
         }
         let bands = Setting::EqBands(vec![0.0; EQ_BANDS]).packets().unwrap();
-        assert_eq!(bands[0], vec![0x2e, 0x04], "custom slot first, or the bands stay inaudible");
+        assert_eq!(
+            bands[0],
+            vec![0x2e, 0x04],
+            "custom slot first, or the bands stay inaudible"
+        );
         assert_eq!(bands[1][0], 0x33);
         assert_eq!(bands.len(), 2);
     }
@@ -758,8 +803,14 @@ mod tests {
         assert!(Setting::Transparency(0).packets().is_err());
         assert!(Setting::Transparency(11).packets().is_err());
         assert!(Setting::MicVolume(0).packets().is_err());
-        assert!(Setting::MicVolume(11).packets().is_err(), "the old 0xa0 scale is gone");
-        assert!(Setting::MicLed(0).packets().is_err(), "1 is the dimmest; 0 is not a level");
+        assert!(
+            Setting::MicVolume(11).packets().is_err(),
+            "the old 0xa0 scale is gone"
+        );
+        assert!(
+            Setting::MicLed(0).packets().is_err(),
+            "1 is the dimmest; 0 is not a level"
+        );
         assert!(Setting::MicLed(11).packets().is_err());
         assert!(Setting::Sidetone(4).packets().is_err());
         assert!(Setting::EqPreset(5).packets().is_err());
@@ -788,7 +839,11 @@ mod tests {
         r[offset::ANC] = 9;
         r[offset::MIC_STATUS] = 7;
         let odd = Status::decode(&r).unwrap();
-        assert_eq!(odd.noise_mode(), None, "unknown byte is unknown, not a mode");
+        assert_eq!(
+            odd.noise_mode(),
+            None,
+            "unknown byte is unknown, not a mode"
+        );
         assert_eq!(odd.mic_muted(), None);
     }
 }
