@@ -2,11 +2,13 @@
 //!
 //! [`scan`] returns the currently-connected logical devices. [`run_monitor`] blocks
 //! forever on a dedicated thread, calling back with a fresh snapshot (and a diff of
-//! add/remove [`Event`]s) whenever the device set changes — woken promptly by a udev
-//! monitor, with a periodic rescan as a safety net.
+//! add/remove [`Event`]s, plus the whole list when a device changed in place)
+//! whenever the device set changes — woken promptly by a udev monitor, with a
+//! periodic rescan as a safety net.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::io::AsRawFd;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Result;
 use gg_ipc::{DeviceInfo, DeviceKind, Event, InterfaceInfo};
@@ -24,6 +26,16 @@ const RESCAN_INTERVAL_MS: i32 = 10_000;
 /// Rescan interval when no udev monitor could be opened — polling is then the only
 /// way we notice a device appearing, so it has to be frequent enough to feel live.
 const POLL_ONLY_INTERVAL_MS: i32 = 1_500;
+
+/// Hold while enumerating or opening through hidapi (`HidApi::new`,
+/// `refresh_devices`, opening a device), on every thread. Its C library keeps
+/// one error string for the whole process and frees and replaces it on each
+/// of those calls without a lock, so two at once can free it twice. Reads and
+/// writes on an open device keep their own error and need no lock.
+pub fn lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Map a SteelSeries product id to its kind and display name.
 fn classify(pid: u16) -> (DeviceKind, &'static str) {
@@ -86,7 +98,10 @@ pub fn scan(api: &HidApi) -> Vec<DeviceInfo> {
     devices
 }
 
-/// Compute add/remove events between two snapshots (matched by `id`).
+/// Compute add/remove events between two snapshots (matched by `id`), then the
+/// whole new list if a device that stayed changed in place — its interfaces
+/// still binding after it was first seen, or its hidraw nodes made anew —
+/// which no add or remove would tell.
 fn diff(old: &[DeviceInfo], new: &[DeviceInfo]) -> Vec<Event> {
     let old_ids: BTreeSet<&str> = old.iter().map(|d| d.id.as_str()).collect();
     let new_ids: BTreeSet<&str> = new.iter().map(|d| d.id.as_str()).collect();
@@ -101,6 +116,9 @@ fn diff(old: &[DeviceInfo], new: &[DeviceInfo]) -> Vec<Event> {
             events.push(Event::DeviceRemoved { id: d.id.clone() });
         }
     }
+    if new.iter().any(|d| old.iter().any(|o| o.id == d.id && o != d)) {
+        events.push(Event::DevicesChanged { devices: new.to_vec() });
+    }
     events
 }
 
@@ -110,7 +128,9 @@ fn diff(old: &[DeviceInfo], new: &[DeviceInfo]) -> Vec<Event> {
 /// on every subsequent change. Intended to run on its own OS thread — `hidapi` and
 /// `udev` are blocking C libraries.
 pub fn run_monitor(mut on_change: impl FnMut(Vec<DeviceInfo>, Vec<Event>)) -> Result<()> {
+    let hid = lock();
     let mut api = HidApi::new()?;
+    drop(hid);
     let mut known = scan(&api);
     debug!(count = known.len(), "initial device scan");
     on_change(known.clone(), Vec::new());
@@ -147,7 +167,10 @@ pub fn run_monitor(mut on_change: impl FnMut(Vec<DeviceInfo>, Vec<Event>)) -> Re
             for _event in m.iter() {}
         }
 
-        if let Err(e) = api.refresh_devices() {
+        let hid = lock();
+        let refreshed = api.refresh_devices();
+        drop(hid);
+        if let Err(e) = refreshed {
             warn!(error = %e, "hid refresh failed");
             continue;
         }
@@ -245,7 +268,33 @@ mod tests {
             usage: 0x01,
             path: "/dev/hidraw3".into(),
         });
-        assert!(diff(&before, &[changed]).is_empty());
+        let events = diff(&before, &[changed]);
+        assert!(added(&events).is_empty() && removed(&events).is_empty(), "{events:?}");
+    }
+
+    /// A device that changed in place goes out as the whole list, even when
+    /// another device came in on the same rescan (a hub or KVM switch bringing
+    /// several at once): the add alone would leave the keyboard as it was
+    /// first seen, its interfaces still binding.
+    #[test]
+    fn a_device_that_changed_in_place_goes_out_as_the_whole_list() {
+        let before = vec![dev("1038:1642")];
+        let mut keyboard = dev("1038:1642");
+        keyboard.interfaces.push(InterfaceInfo {
+            interface_number: 1,
+            usage_page: 0xffc0,
+            usage: 0x01,
+            path: "/dev/hidraw4".into(),
+        });
+        let after = vec![keyboard, dev("1038:1872")];
+        let events = diff(&before, &after);
+        assert_eq!(added(&events), ["1038:1872"]);
+        assert!(removed(&events).is_empty());
+        let whole = events.iter().find_map(|e| match e {
+            Event::DevicesChanged { devices } => Some(devices),
+            _ => None,
+        });
+        assert_eq!(whole, Some(&after), "{events:?}");
     }
 
     #[test]
@@ -254,5 +303,15 @@ mod tests {
         assert_eq!(classify(0x1872).0, DeviceKind::Mouse);
         assert_eq!(classify(0x12e0).0, DeviceKind::Headset);
         assert_eq!(classify(0x0000).0, DeviceKind::Other);
+    }
+
+    #[test]
+    fn a_thread_that_panics_holding_the_hid_lock_does_not_wedge_the_others() {
+        let _ = std::thread::spawn(|| {
+            let _hid = lock();
+            panic!("a worker died mid-enumeration");
+        })
+        .join();
+        drop(lock());
     }
 }

@@ -53,7 +53,8 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 pub enum Command {
     GetState(Reply<KeyboardState>),
     SetLighting { lighting: Lighting, reply: Reply<()> },
-    /// A key went down on the Apex, as the reader saw it. Never logged.
+    /// A key went down on the Apex, as the reader saw it: the code of its LED.
+    /// Never logged.
     Pressed { code: u8, at: Instant },
     /// The reader ended by itself (keyboard gone, read error); it retries later.
     ReaderStopped,
@@ -63,6 +64,9 @@ pub enum Command {
     AudioStopped,
     /// The default microphone was muted or unmuted.
     MicMuted(bool),
+    /// The visualizer should listen to this output (a `node.name`), or to the
+    /// default output when `None`. From Sonar; no reply.
+    ListenTo(Option<String>),
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
 }
@@ -78,6 +82,7 @@ impl std::fmt::Debug for Command {
             Command::Wake => "Wake",
             Command::AudioStopped => "AudioStopped",
             Command::MicMuted(_) => "MicMuted",
+            Command::ListenTo(_) => "ListenTo",
             Command::Shutdown(_) => "Shutdown",
         })
     }
@@ -103,6 +108,12 @@ impl Handle {
     pub fn wake(&self) {
         let _ = self.tx.send(Command::Wake);
     }
+
+    /// Point the visualizer at the output everything playing mixes into
+    /// (`None`: the default output); fire and forget.
+    pub fn listen_to(&self, output: Option<String>) {
+        let _ = self.tx.send(Command::ListenTo(output));
+    }
 }
 
 pub fn spawn(event_tx: broadcast::Sender<Event>, overlays: Vec<Arc<dyn Overlay>>) -> Handle {
@@ -120,6 +131,8 @@ struct State {
     device: Option<Keyboard>,
     /// Whether this handle has taken the lighting over (init sent).
     taken: bool,
+    /// When the device list was last read: to open the keyboard, or to see
+    /// that the open one is still there.
     last_open_attempt: Option<Instant>,
     last_frame: Option<Instant>,
     lighting: Lighting,
@@ -138,15 +151,20 @@ struct State {
     /// Painters over the lighting, and what they painted this loop.
     overlays: Vec<Arc<dyn Overlay>>,
     layers: Vec<Layer>,
+    /// Whether any overlay painted on the last pass, to tell when they stop.
+    overlay_was_active: bool,
     /// Visualizer band levels, written by the capture thread.
     levels: Levels,
     capture: Option<Capture>,
     last_capture_attempt: Option<Instant>,
+    /// The output the capture listens to; `None` is the default output.
+    listen_to: Option<String>,
     mic_watch: Option<mic::Watch>,
     mic_muted: bool,
 }
 
 fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sender<Event>, overlays: Vec<Arc<dyn Overlay>>) {
+    let hid = gg_hid::lock();
     let api = match HidApi::new() {
         Ok(api) => api,
         Err(e) => {
@@ -154,6 +172,7 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
             return;
         }
     };
+    drop(hid);
     let settings_path = gg_ipc::config_dir().join("lighting.json");
     let mut state = State {
         api,
@@ -173,9 +192,11 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
         hits: Vec::new(),
         overlays,
         layers: Vec::new(),
+        overlay_was_active: false,
         levels: Arc::new(Mutex::new([0.0; BANDS])),
         capture: None,
         last_capture_attempt: None,
+        listen_to: None,
         mic_watch: None,
         mic_muted: false,
     };
@@ -200,6 +221,14 @@ fn worker(rx: Receiver<Command>, tx: Sender<Command>, event_tx: broadcast::Sende
         }
         let now = Instant::now();
         state.layers = state.overlays.iter().filter_map(|o| o.paint(now)).collect();
+        let overlay_active = !state.layers.is_empty();
+        if overlay_ended(state.overlay_was_active, overlay_active) {
+            state.last_frame = None;
+        }
+        state.overlay_was_active = overlay_active;
+        if should_look_for(state.device.is_some(), drawing(state.lighting.enabled, !state.layers.is_empty())) {
+            look_for(&mut state);
+        }
         sync_reader(&mut state);
         sync_audio(&mut state);
         sync_mic(&mut state);
@@ -241,6 +270,12 @@ fn drawing(lighting_enabled: bool, overlay_active: bool) -> bool {
     lighting_enabled || overlay_active
 }
 
+/// Whether to look for the open keyboard in the device list: with nothing
+/// drawn nothing is written, so no failed write tells that it went.
+fn should_look_for(open: bool, drawing: bool) -> bool {
+    open && !drawing
+}
+
 /// Give the keyboard back: gglinux holds it, but nothing wants to draw any more.
 fn should_hand_back(taken: bool, lighting_enabled: bool, overlay_active: bool) -> bool {
     taken && !drawing(lighting_enabled, overlay_active)
@@ -249,6 +284,12 @@ fn should_hand_back(taken: bool, lighting_enabled: bool, overlay_active: bool) -
 /// The colour overlays give this key: the last active overlay that paints it.
 fn overlay_color(layers: &[Layer], code: u8) -> Option<Rgb> {
     layers.iter().rev().find_map(|l| l.get(&code).copied())
+}
+
+/// Whether the overlays just stopped: what's under them is drawn at once, not
+/// at a static effect's next slow refresh.
+fn overlay_ended(was_active: bool, active: bool) -> bool {
+    was_active && !active
 }
 
 /// A wake draws at once only if the last frame is at least a frame old, so a
@@ -292,7 +333,7 @@ fn sync_audio(state: &mut State) {
         return;
     }
     state.last_capture_attempt = Some(Instant::now());
-    match Capture::start(&audio::PW_RECORD, Arc::clone(&state.levels), state.tx.clone()) {
+    match Capture::start(&audio::pw_record(state.listen_to.as_deref()), Arc::clone(&state.levels), state.tx.clone()) {
         Ok(c) => {
             debug!("capturing audio for the visualizer");
             state.capture = Some(c);
@@ -394,6 +435,13 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             state.mic_muted = m;
             state.last_frame = None;
         }
+        Command::ListenTo(output) => {
+            if output != state.listen_to {
+                state.listen_to = output;
+                state.capture = None; // the loop starts it again, listening there
+                state.last_capture_attempt = None;
+            }
+        }
         Command::ReaderStopped => {
             state.reader = None;
             state.reactive = ReactiveStatus::Off;
@@ -413,10 +461,13 @@ fn try_open(state: &mut State) {
         return;
     }
     state.last_open_attempt = Some(Instant::now());
+    let hid = gg_hid::lock();
     if state.api.refresh_devices().is_err() {
         return;
     }
-    match Keyboard::open(&state.api) {
+    let opened = Keyboard::open(&state.api);
+    drop(hid);
+    match opened {
         Ok(keyboard) => {
             info!("keyboard connected");
             state.device = Some(keyboard);
@@ -424,6 +475,26 @@ fn try_open(state: &mut State) {
             state.last_frame = None;
         }
         Err(e) => debug!(error = %format!("{e:#}"), "keyboard not available"),
+    }
+}
+
+/// Let the keyboard go if it's gone from the device list, at most every
+/// [`REOPEN_INTERVAL`].
+fn look_for(state: &mut State) {
+    if !is_older_than(state.last_open_attempt, REOPEN_INTERVAL) {
+        return;
+    }
+    state.last_open_attempt = Some(Instant::now());
+    let hid = gg_hid::lock();
+    let refreshed = state.api.refresh_devices();
+    drop(hid);
+    if refreshed.is_err() {
+        return;
+    }
+    if state.device.as_ref().is_some_and(|d| !d.is_listed(&state.api)) {
+        info!("keyboard disconnected");
+        state.device = None;
+        state.taken = false;
     }
 }
 
@@ -499,10 +570,12 @@ fn publish(state: &mut State, event_tx: &broadcast::Sender<Event>) {
 }
 
 /// Saved lighting; a missing or unreadable file means the defaults (lighting off).
+/// An unreadable one is moved aside first.
 fn load(path: &Path) -> Lighting {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            warn!(path = %path.display(), error = %e, "ignoring unreadable lighting settings");
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            let moved_to = gg_ipc::set_aside(path);
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable lighting settings");
             Lighting::default()
         }),
         Err(_) => Lighting::default(),
@@ -573,6 +646,13 @@ mod tests {
     }
 
     #[test]
+    fn an_open_keyboard_is_looked_for_while_nothing_is_drawn_since_no_write_would_fail() {
+        assert!(should_look_for(true, false), "open and idle: only the device list can tell it went");
+        assert!(!should_look_for(true, true), "drawing: a failed frame tells");
+        assert!(!should_look_for(false, false), "not open: opening looks already");
+    }
+
+    #[test]
     fn the_last_active_overlay_that_paints_a_key_wins() {
         let red = gg_device_keyboard::Rgb { r: 255, g: 0, b: 0 };
         let blue = gg_device_keyboard::Rgb { r: 0, g: 0, b: 255 };
@@ -587,6 +667,14 @@ mod tests {
         let still = lighting(true, false, Effect::Static);
         assert_eq!(interval(&still, false, true), FRAME);
         assert_eq!(interval(&still, false, false), STATIC_REFRESH);
+    }
+
+    #[test]
+    fn the_lighting_under_an_overlay_is_drawn_at_once_when_it_ends() {
+        assert!(overlay_ended(true, false), "a static effect would otherwise wait out its slow refresh");
+        assert!(!overlay_ended(true, true), "still painting: frames are due 30 times a second");
+        assert!(!overlay_ended(false, true), "starting: its frames are due at once anyway");
+        assert!(!overlay_ended(false, false));
     }
 
     #[test]

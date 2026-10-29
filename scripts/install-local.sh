@@ -39,7 +39,9 @@ built() {
 
 if [[ $do_build -eq 1 ]]; then
   echo "==> building (release)"
-  cargo build --release --manifest-path "$repo/Cargo.toml" --bins
+  # Into the repo's own target/, where the steps below look, even if CARGO_TARGET_DIR or a
+  # cargo config names another target dir; the UI's build does the same.
+  CARGO_TARGET_DIR="$repo/target" cargo build --release --manifest-path "$repo/Cargo.toml" --bins
 fi
 
 echo "==> installing gglinuxd -> ~/.local/bin"
@@ -53,11 +55,15 @@ echo "==> installing systemd --user unit"
 install -Dm644 "$repo/data/systemd/gglinuxd.service" \
   "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/gglinuxd.service"
 systemctl --user daemon-reload
+# A daemon already running keeps running the binary it started from, and `enable --now` below
+# leaves a running one alone, so restart it onto the new one. A stopped one stays stopped.
+systemctl --user try-restart gglinuxd
 
 if [[ $do_ui -eq 1 ]]; then
   if [[ $do_build -eq 1 ]]; then
     echo "==> building the UI (release)"
-    (cd "$repo/ui" && npm ci && npm run tauri build -- --no-bundle)
+    (cd "$repo/ui" && npm ci \
+      && CARGO_TARGET_DIR="$repo/ui/src-tauri/target" npm run tauri build -- --no-bundle)
   fi
   if built "$repo/ui/src-tauri/target/release/gglinux" "the UI"; then
     echo "==> installing the UI -> ~/.local/bin/gglinux"

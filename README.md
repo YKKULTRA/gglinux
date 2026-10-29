@@ -4,11 +4,16 @@ An open-source **SteelSeries GG** replacement for Linux — device control (Engi
 (Sonar), game-event lighting (GameSense), and clip capture (Moments) — for the hardware SteelSeries
 never supported on Linux.
 
-**Status:** early. **M0 (skeleton)** is done — the daemon enumerates devices, tracks hotplug, and
-serves them over its socket. **M1 (mouse)** is built but **parked**: DPI stages, polling rate, button
-remap, onboard save and a battery poller for the Rival 3 Wireless Gen 2, driveable from the desktop
-UI or the `ggctl` CLI, but never confirmed against the physical mouse — that hardware is no longer in
-use here. See [PLAN.md](PLAN.md) for the roadmap.
+**Status:** early. Most features are built and tested against fakes but not yet seen working on
+real hardware. **Verified** on the owner's devices: the live device list, the Apex's per-key
+lighting (static colours, the wave effect and hand-back to onboard lighting), the headset's status,
+battery and base-station screen protection, and the mouse's battery. **Built, not yet tried live:**
+Sonar (channels, EQ, virtual mic, Smart Volume, streamer mode), the headset's controls, the other
+lighting effects and reactive lighting, GameSense with its audio visualizer and mic-mute light,
+clips, lighting profiles, settings backup, start at login and the Arch `PKGBUILD`. **Parked:** the
+mouse's DPI, polling, button and onboard-save settings, never confirmed on the Rival 3 Wireless
+Gen 2, which is no longer in use here. **Blocked:** the Apex OLED and actuation, which need a USB
+capture of GG on Windows. See [PLAN.md](PLAN.md) for the roadmap and the full feature checklist.
 
 ## Supported hardware (initial targets)
 
@@ -34,7 +39,7 @@ byte-level device protocol reference.
 
 ## Building
 
-The daemon needs only a Rust toolchain (≥1.85) and libudev:
+The daemon needs only a Rust toolchain (≥1.87) and libudev:
 
 ```sh
 cargo build --workspace --bins
@@ -91,6 +96,10 @@ sudo udevadm control --reload
 rm -rf ~/.config/gglinux ~/.local/share/io.github.ykk.gglinux   # settings, and the UI's web storage
 ```
 
+**Moving to the Arch package** (`packaging/arch/PKGBUILD`)? Don't keep both installs: what
+`install-local.sh` put in your home runs instead of what the package installs. Quit gglinux from
+its tray and run the commands above first, all but the last line, which removes your settings.
+
 **Sonar** (the audio channels, EQ and virtual mic) needs PipeWire ≥ 1.0 with WirePlumber 0.5; it
 drives them with PipeWire's own `pw-dump`, `pw-metadata`, `pw-cli` and `wpctl`, so there is nothing
 extra to build. Three packages are **optional**: two for the mic chain (one of them also for Smart
@@ -104,8 +113,10 @@ Volume), and one for clips:
 
 **Smart Volume** uses the `sc4m` compressor from `swh-plugins`. Without it, the channels stay
 exactly as they were and the Sonar tab asks you to install it. If you remove it while Sonar is on,
-gglinux takes Smart Volume out of the channels at once; if gglinux wasn't running then, the
-channels are missing from the next login until gglinux starts and puts them back without it.
+gglinux takes Smart Volume out of its PipeWire drop-in at once, but the channels PipeWire is already
+running keep it, as last set, until PipeWire next restarts, and the Sonar tab can no longer switch
+it: turn Sonar off and on to take it out of them. If gglinux wasn't running then, the channels are
+missing from the next login until gglinux starts and puts them back without it.
 
 **GameSense** (games and apps driving the keyboard lighting) is off until you turn it on in the
 Games page. Turning it on starts a server on `127.0.0.1` and writes a small `coreProps.json`
@@ -158,7 +169,11 @@ loads the frontend from `devUrl` (`http://localhost:1420`), not from the embedde
 Vite running it comes up as a blank window: no error, no log line, and the tray and daemon socket all
 behave normally. Only a release build embeds the frontend.
 
-It needs `webkit2gtk-4.1` and an appindicator for the tray. On Arch:
+A dev build runs beside an installed gglinux rather than handing over to it, so while Start at login
+has the installed copy in the tray you'll see two tray icons.
+
+It needs a newer Rust toolchain than the daemon (≥1.88), `webkit2gtk-4.1` and an appindicator for
+the tray. On Arch:
 
 ```sh
 sudo pacman -S webkit2gtk-4.1 libayatana-appindicator

@@ -27,9 +27,10 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use gg_device_keyboard::layout::ANSI_TKL;
 use gg_ipc::{
     AppStream, AudioDevice, BandKind, BatteryState, Channel, ChannelEq, ChannelState, DeviceInfo,
-    DeviceKind, DpiStage, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyboardState, Lighting, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
+    DeviceKind, EqBand, Event, HeadphoneEq, HeadsetChange, MicSettings, MicState, HeadsetControls, HeadsetPower, HeadsetState, InterfaceInfo, KeyInfo, KeyboardState, Lighting, MouseDpi, MouseSettings, ReactiveStatus, GameInfo, GameSenseState, ProfilesState, ClipInfo, ClipsState,
     MouseState, Request, RequestFrame, ResponseData, ScreenSettings, ServerMessage, SmartVolume, SmartVolumeState,
     SonarState, StreamMix,
 };
@@ -46,7 +47,7 @@ struct Fake {
     controls: HeadsetControls,
     /// Sonar as last changed by the client.
     sonar: SonarState,
-    /// Keyboard lighting as last set; no layout, since nothing draws it here.
+    /// The keyboard, with lighting as last set.
     keyboard: KeyboardState,
     /// GameSense as the client last set it.
     gamesense: GameSenseState,
@@ -95,7 +96,7 @@ fn main() -> Result<()> {
         screen: ScreenSettings::default(),
         controls: HeadsetControls::default(),
         sonar: fake_sonar(),
-        keyboard: KeyboardState { connected: true, layout: Vec::new(), lighting: Lighting::default(), reactive: ReactiveStatus::Off },
+        keyboard: fake_keyboard(),
         gamesense: GameSenseState::default(),
         profiles: ProfilesState::default(),
         clips: ClipsState {
@@ -167,7 +168,12 @@ fn serve(stream: UnixStream, state: Arc<Mutex<Fake>>) -> Result<()> {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("<< UNPARSEABLE {line}\n   {e}");
-                send(&writer, ServerMessage::response(0, error(format!("invalid request: {e}"))))?;
+                // On the request's own id when it has one, as the daemon answers.
+                let id = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id")?.as_u64())
+                    .unwrap_or(0);
+                send(&writer, ServerMessage::response(id, error(format!("invalid request: {e}"))))?;
                 continue;
             }
         };
@@ -196,19 +202,17 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
         Request::Ping => ResponseData::Pong,
         Request::GetMouseState => ResponseData::Mouse { state: mouse_state(&s) },
         Request::SetMouseDpi { stages, active, save } => {
-            let settings = s.applied.get_or_insert_with(defaults);
-            settings.dpi_stages = stages;
-            settings.active_stage = active;
+            s.applied.get_or_insert_with(MouseSettings::default).dpi = Some(MouseDpi { stages, active });
             note_save(save);
             ResponseData::Success
         }
         Request::SetMousePolling { hz, save } => {
-            s.applied.get_or_insert_with(defaults).polling_hz = hz;
+            s.applied.get_or_insert_with(MouseSettings::default).polling_hz = Some(hz);
             note_save(save);
             ResponseData::Success
         }
         Request::SetMouseButtons { actions, save } => {
-            s.applied.get_or_insert_with(defaults).buttons = actions;
+            s.applied.get_or_insert_with(MouseSettings::default).buttons = Some(actions);
             note_save(save);
             ResponseData::Success
         }
@@ -446,6 +450,19 @@ fn fake_sonar() -> SonarState {
     }
 }
 
+/// The Apex as the daemon reports it, lighting off.
+fn fake_keyboard() -> KeyboardState {
+    KeyboardState {
+        connected: true,
+        layout: ANSI_TKL
+            .iter()
+            .map(|&(code, label, x, y, w)| KeyInfo { code, label: label.to_owned(), x, y, w })
+            .collect(),
+        lighting: Lighting::default(),
+        reactive: ReactiveStatus::Off,
+    }
+}
+
 /// Flat bands shaped like the daemon's: a low shelf, peaks, a high shelf.
 fn fake_bands(n: usize) -> Vec<EqBand> {
     (0..n)
@@ -479,19 +496,6 @@ fn fake_apply(c: &mut HeadsetControls, change: HeadsetChange) {
             c.eq_bands = Some(b);
             c.eq_preset = Some(4);
         }
-    }
-}
-
-/// What the daemon would report before anything has been written to it.
-fn defaults() -> MouseSettings {
-    MouseSettings {
-        dpi_stages: vec![DpiStage { x: 800, y: 800 }, DpiStage { x: 1600, y: 1600 }],
-        active_stage: 0,
-        polling_hz: 1000,
-        buttons: ["button1", "button2", "button3", "button4", "button5", "dpi"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
     }
 }
 
@@ -565,7 +569,11 @@ fn describe(req: &Request) -> String {
             settings.protect, settings.lit_seconds, settings.brightness
         ),
         Request::SetHeadset { change } => format!("set_headset {change:?}"),
-        other => method_name(other).to_string(),
+        // Everything else with its params as they go over the wire.
+        other => match serde_json::to_value(other).ok().and_then(|mut v| v.get_mut("params").map(serde_json::Value::take)) {
+            Some(params) => format!("{} {params}", method_name(other)),
+            None => method_name(other).to_string(),
+        },
     }
 }
 
@@ -633,4 +641,36 @@ fn devices(with_mouse: bool) -> Vec<DeviceInfo> {
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gg_ipc::{Effect, Rgb};
+
+    #[test]
+    fn a_request_with_no_rendering_of_its_own_is_logged_with_its_params() {
+        let volume = Request::SetChannelVolume { channel: Channel::Chat, volume: 0.25 };
+        assert_eq!(describe(&volume), r#"set_channel_volume {"channel":"chat","volume":0.25}"#);
+
+        let lighting = Lighting {
+            enabled: true,
+            effect: Effect::Breathing { color: Rgb { r: 255, g: 0, b: 0 }, period_s: 3.0 },
+            ..Lighting::default()
+        };
+        let shown = describe(&Request::SetLighting { lighting });
+        assert!(shown.starts_with("set_lighting {"), "{shown}");
+        assert!(shown.contains(r#""kind":"breathing""#) && shown.contains(r#""period_s":3.0"#), "{shown}");
+
+        // A request that carries nothing is still just its name.
+        assert_eq!(describe(&Request::SaveClip), "save_clip");
+    }
+
+    #[test]
+    fn the_fake_keyboard_has_every_key_the_daemon_sends_for_drawing() {
+        // The Keyboard panel draws, paints and picks the mic-mute key from this.
+        let layout = fake_keyboard().layout;
+        assert_eq!(layout.len(), ANSI_TKL.len());
+        assert!(layout.iter().any(|k| k.label == "Esc"), "{layout:?}");
+    }
 }

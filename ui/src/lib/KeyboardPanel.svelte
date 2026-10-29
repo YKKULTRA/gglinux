@@ -32,16 +32,17 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
 
-  /** Static colours being edited, by HID code; seeded once from the daemon. */
+  /** Static colours being edited, by HID code. They follow the daemon's, so a
+   *  profile or ggctl changing them shows here, except while there is paint not
+   *  applied yet. */
   let painted = $state<Record<number, Rgb>>({});
-  let seeded = false;
+  let dirty = $state(false);
   const selected = new SvelteSet<number>();
   let brush = $state("#00c8ff");
 
   $effect(() => {
     const l = lighting;
-    if (seeded || !l) return;
-    seeded = true;
+    if (dirty || !l) return;
     painted = Object.fromEntries(l.keys.map((k) => [k.code, k.color]));
   });
 
@@ -62,14 +63,19 @@
   let height = $derived(kb ? Math.max(...kb.layout.map((k) => k.y + 1)) * U : 0);
   let period = $derived(lighting && "period_s" in lighting.effect ? lighting.effect.period_s : 4);
 
-  async function apply(patch: Partial<Lighting>) {
-    if (!lighting) return;
+  /** Whether the change was applied. Each change sends the whole lighting, so the
+   *  controls wait while one is in flight: a second change built from the old
+   *  lighting would undo the first. */
+  async function apply(patch: Partial<Lighting>): Promise<boolean> {
+    if (!lighting) return false;
     busy = true;
     error = null;
     try {
       await daemon.setLighting({ ...lighting, ...patch });
+      return true;
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
+      return false;
     } finally {
       busy = false;
     }
@@ -102,11 +108,12 @@
   function paint(codes: number[]) {
     const c = rgbOf(brush);
     painted = { ...painted, ...Object.fromEntries(codes.map((code) => [code, c])) };
+    dirty = true;
   }
 
-  function applyStatic() {
+  async function applyStatic() {
     const keys: KeyColor[] = Object.entries(painted).map(([code, color]) => ({ code: Number(code), color }));
-    void apply({ effect: { kind: "static" }, keys });
+    if (await apply({ effect: { kind: "static" }, keys })) dirty = false;
   }
 </script>
 
@@ -148,6 +155,7 @@
             <input
               type="color"
               value={hex(lighting.effect.color)}
+              disabled={busy}
               onchange={(e) =>
                 apply({ effect: { kind: "breathing", color: rgbOf(e.currentTarget.value), period_s: period } })}
             />
@@ -162,6 +170,7 @@
               max="20"
               step="0.5"
               value={period}
+              disabled={busy}
               onchange={(e) => setPeriod(e.currentTarget.valueAsNumber)}
             />
             <span class="unit">{period} s</span>
@@ -177,6 +186,7 @@
               max="4"
               step="0.25"
               value={sens}
+              disabled={busy}
               onchange={(e) => apply({ effect: { kind: "visualizer", sensitivity: e.currentTarget.valueAsNumber } })}
             />
             <span class="unit">{sens.toFixed(2)}×</span>
@@ -191,6 +201,7 @@
             max="100"
             step="5"
             value={lighting.brightness}
+            disabled={busy}
             onchange={(e) => apply({ brightness: e.currentTarget.valueAsNumber })}
           />
           <span class="unit">{lighting.brightness}%</span>
@@ -226,6 +237,7 @@
             <input
               type="color"
               value={hex(lighting.reactive.color)}
+              disabled={busy}
               onchange={(e) => setReactive({ color: rgbOf(e.currentTarget.value) })}
             />
           </div>
@@ -237,6 +249,7 @@
               max="3"
               step="0.1"
               value={lighting.reactive.duration_s}
+              disabled={busy}
               onchange={(e) => setReactive({ duration_s: e.currentTarget.valueAsNumber })}
             />
             <span class="unit">{lighting.reactive.duration_s.toFixed(1)} s</span>
@@ -244,7 +257,12 @@
           {#if kb.reactive === "no_access"}
             <div class="notice">
               <p>{ACCESS_WARNING}</p>
-              <p>To allow it: <code>./scripts/install-local.sh --no-build --no-ui --reactive</code></p>
+              <!-- Just the rule: install-local.sh would also put a ~/.local daemon before a packaged one. -->
+              <p>To allow it, add the optional rule, then replug the keyboard:</p>
+              <pre><code>sudo install -m644 /usr/share/gglinux/61-gglinux-reactive.rules \
+  /etc/udev/rules.d/
+sudo udevadm control --reload</code></pre>
+              <p>Built from source? Copy <code>data/udev/61-gglinux-reactive.rules</code> from the checkout instead.</p>
             </div>
           {/if}
         {/if}
@@ -266,6 +284,7 @@
             <span class="label">Key</span>
             <select
               value={lighting.mic_mute.key}
+              disabled={busy}
               onchange={(e) => apply({ mic_mute: { ...lighting!.mic_mute, key: Number(e.currentTarget.value) } })}
             >
               {#each kb.layout.filter((k) => k.label) as k (k.code)}
@@ -275,6 +294,7 @@
             <input
               type="color"
               value={hex(lighting.mic_mute.color)}
+              disabled={busy}
               onchange={(e) => apply({ mic_mute: { ...lighting!.mic_mute, color: rgbOf(e.currentTarget.value) } })}
             />
           </div>
@@ -352,6 +372,7 @@
   .notice p { margin: 0; }
   .notice p + p { margin-top: 0.45rem; }
   .notice code { font-size: 0.78rem; color: var(--text); }
+  .notice pre { margin: 0.45rem 0; padding: 0.45rem 0.6rem; overflow-x: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
   .hint { margin: 0.5rem 0 0; font-size: 0.78rem; color: var(--text-dim); }
   .error { margin: 0.8rem 0 0; padding: 0.5rem 0.7rem; font-size: 0.8rem; color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-radius: 8px; }
 </style>

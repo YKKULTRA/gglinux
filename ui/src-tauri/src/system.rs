@@ -92,6 +92,15 @@ pub fn set_autostart(
         .map_err(|e| format!("the tray part is done, but the daemon's service: {e}"))
 }
 
+/// Restart the daemon's service so it loads restored settings; true when it did.
+/// `try-restart` also succeeds on a stopped service, leaving it stopped (and a
+/// daemon started by hand running on its old settings), so the answer is
+/// whether the service is running once it's done.
+pub fn restart_daemon(run: &dyn Fn(&[&str]) -> Result<(), String>) -> bool {
+    run(&["systemctl", "--user", "try-restart", SERVICE]).is_ok()
+        && run(&["systemctl", "--user", "is-active", SERVICE]).is_ok()
+}
+
 /// Every known settings file that exists and parses.
 pub fn export(config: &Path, created: u64) -> Value {
     let files: BTreeMap<&str, Value> = BACKUP_FILES
@@ -233,6 +242,32 @@ mod tests {
         assert!(err.contains("Unit not found"));
         assert!(autostart_on(&d), "the tray part still happened");
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_restart_counts_only_when_the_service_is_running_after_it() {
+        // `try-restart` succeeds on a stopped service without starting it, which
+        // is also how it looks when gglinuxd was started by hand.
+        let calls = RefCell::new(Vec::new());
+        let stopped = |argv: &[&str]| {
+            calls.borrow_mut().push(argv.join(" "));
+            match argv[2] {
+                "is-active" => Err("systemctl exit status: 3".into()),
+                _ => Ok(()),
+            }
+        };
+        assert!(!restart_daemon(&stopped));
+        assert_eq!(
+            *calls.borrow(),
+            [
+                "systemctl --user try-restart gglinuxd.service",
+                "systemctl --user is-active gglinuxd.service",
+            ]
+        );
+        assert!(restart_daemon(&|_: &[&str]| Ok(())));
+        assert!(!restart_daemon(&|_: &[&str]| {
+            Err("Unit gglinuxd.service not found.".into())
+        }));
     }
 
     #[test]

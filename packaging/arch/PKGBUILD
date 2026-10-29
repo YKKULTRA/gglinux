@@ -6,11 +6,13 @@ pkgdesc="Open-source SteelSeries GG for Linux: lighting, headset, Sonar-style au
 arch=('x86_64')
 url="https://github.com/ykk/gglinux"
 license=('GPL-3.0-or-later')
-depends=('systemd-libs' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'pipewire' 'wireplumber')
+depends=('systemd-libs' 'webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'pipewire' 'wireplumber'
+         'xdg-utils')
 makedepends=('git' 'cargo' 'nodejs' 'npm')
 optdepends=('noise-suppression-for-voice: noise suppression for the Sonar microphone'
             'swh-plugins: compressor for the Sonar microphone and Smart Volume'
-            'gpu-screen-recorder: instant-replay clips')
+            'gpu-screen-recorder: instant-replay clips'
+            'xdg-desktop-portal: clip hotkey and screen capture, with a backend like xdg-desktop-portal-kde')
 provides=('gglinux')
 conflicts=('gglinux')
 install=gglinux.install
@@ -24,16 +26,18 @@ pkgver() {
 
 build() {
   cd gglinux
-  # The daemon and ggctl; the UI is its own cargo project, built by the Tauri CLI.
-  cargo build --release --locked -p gglinuxd --bins
+  # The daemon and ggctl; the UI is its own cargo project, built by the Tauri CLI. Each builds
+  # into its own target/, where package() looks, even if CARGO_TARGET_DIR or a cargo config
+  # names another target dir.
+  CARGO_TARGET_DIR="$PWD/target" cargo build --release --locked -p gglinuxd --bins
   cd ui
   npm ci
-  npm run tauri build -- --no-bundle
+  CARGO_TARGET_DIR="$PWD/src-tauri/target" npm run tauri build -- --no-bundle
 }
 
 check() {
   cd gglinux
-  cargo test --release --locked --workspace
+  CARGO_TARGET_DIR="$PWD/target" cargo test --release --locked --workspace
 }
 
 package() {

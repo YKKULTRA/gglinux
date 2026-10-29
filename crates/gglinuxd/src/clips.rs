@@ -22,6 +22,9 @@ const SAVE_SETTLE: Duration = Duration::from_millis(1500);
 /// How long games-only clips keep recording after the game has gone: time to
 /// save its last moments, and to bridge a launcher handing over to the game.
 const GAME_GRACE: Duration = Duration::from_secs(15);
+/// How often clips that are on look for a missing `gpu-screen-recorder`, so
+/// they start once it's installed.
+const INSTALL_POLL: Duration = Duration::from_secs(5);
 
 pub enum Command {
     GetState(Reply<ClipsState>),
@@ -82,7 +85,7 @@ impl Running {
 pub struct Controller {
     settings: ClipsSettings,
     path: PathBuf,
-    /// Set in tests; `None` searches `PATH`.
+    /// Set in tests, installed once the file is there; `None` searches `PATH`.
     program: Option<PathBuf>,
     event_tx: broadcast::Sender<Event>,
     internal_tx: mpsc::UnboundedSender<Internal>,
@@ -94,8 +97,14 @@ pub struct Controller {
     game: Option<String>,
     /// Games-only, the game gone: when to stop.
     linger_until: Option<Instant>,
+    /// Where everything playing mixes, from Sonar while it's on: desktop
+    /// audio records its monitor. `None` is the default output.
+    mixed: Option<String>,
     error: Option<String>,
     hotkey: Option<String>,
+    /// Why there's no hotkey. Apart from `error`, which every start clears:
+    /// the hotkey is bound once, not with each recorder.
+    hotkey_error: Option<String>,
     hotkey_task: Option<tokio::task::JoinHandle<()>>,
     /// Only the daemon binds the portal hotkey; tests never touch the desktop.
     hotkey_allowed: bool,
@@ -119,14 +128,17 @@ impl Controller {
         let c = Controller {
             settings, path, program, event_tx, internal_tx,
             running: None, generation: 0, delay: Duration::ZERO, retry_at: None,
-            game: None, linger_until: None,
-            error: None, hotkey: None, hotkey_task: None, hotkey_allowed: false, published: None,
+            game: None, linger_until: None, mixed: None,
+            error: None, hotkey: None, hotkey_error: None, hotkey_task: None, hotkey_allowed: false, published: None,
         };
         (c, internal_rx)
     }
 
     fn program(&self) -> Option<PathBuf> {
-        self.program.clone().or_else(|| recorder::find_program(std::env::var_os("PATH").as_deref()))
+        match &self.program {
+            Some(p) => p.is_file().then(|| p.clone()),
+            None => recorder::find_program(std::env::var_os("PATH").as_deref()),
+        }
     }
 
     fn dir(&self) -> PathBuf {
@@ -143,21 +155,18 @@ impl Controller {
             return;
         }
         let Some(program) = self.program() else {
+            self.retry_at = Some(Instant::now() + INSTALL_POLL);
             self.error = Some("gpu-screen-recorder is not installed".into());
             return self.publish();
         };
         let dir = self.dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.error = Some(format!("cannot create {}: {e}", dir.display()));
-            return self.publish();
+            return self.retry_later(format!("cannot create {}: {e}", dir.display()));
         }
-        let argv = recorder::argv(&self.settings, &dir);
+        let argv = recorder::argv(&self.settings, &dir, self.mixed.as_deref());
         let mut child = match Process::new(&program).args(&argv[1..]).kill_on_drop(false).spawn() {
             Ok(c) => c,
-            Err(e) => {
-                self.error = Some(format!("could not start gpu-screen-recorder: {e}"));
-                return self.publish();
-            }
+            Err(e) => return self.retry_later(format!("could not start gpu-screen-recorder: {e}")),
         };
         let pid = child.id().map_or(0, |p| p as i32);
         self.generation += 1;
@@ -177,6 +186,16 @@ impl Controller {
         self.publish();
     }
 
+    /// Starting failed (a folder on a drive not mounted yet, a binary being
+    /// replaced): say why, and try again after the backoff, as after a crash.
+    fn retry_later(&mut self, why: String) {
+        self.delay = recorder::next_delay(Duration::ZERO, self.delay);
+        self.retry_at = Some(Instant::now() + self.delay);
+        warn!(error = %why, delay_s = self.delay.as_secs(), "could not start gpu-screen-recorder");
+        self.error = Some(format!("{why}; retrying in {} s", self.delay.as_secs()));
+        self.publish();
+    }
+
     pub async fn stop(&mut self) {
         if let Some(mut r) = self.running.take() {
             if r.signal(libc::SIGINT) && tokio::time::timeout(STOP_GRACE, &mut r.exited).await.is_err() {
@@ -187,7 +206,9 @@ impl Controller {
             }
             info!("replay buffer stopped");
         }
+        // Nothing is being started now, so a failure to start is over.
         self.retry_at = None;
+        self.error = None;
         self.linger_until = None;
         self.publish();
     }
@@ -219,6 +240,7 @@ impl Controller {
             } else if let Some(t) = self.hotkey_task.take() {
                 t.abort();
                 self.hotkey = None;
+                self.hotkey_error = None;
             }
         }
         Ok(())
@@ -233,8 +255,25 @@ impl Controller {
             self.start().await;
         } else if self.settings.games_only && self.running.is_some() && self.linger_until.is_none() {
             self.linger_until = Some(Instant::now() + GAME_GRACE);
+        } else if self.running.is_none() && !self.wanted() {
+            // A restart pending for the game that's gone won't happen.
+            self.stop().await;
         }
         self.publish();
+    }
+
+    /// Sonar was turned on or off, or moved its channels to another output.
+    /// Desktop audio follows, so a recorder taking it starts again there.
+    pub async fn set_mixed(&mut self, mixed: Option<String>) {
+        if mixed == self.mixed {
+            return;
+        }
+        self.mixed = mixed;
+        if self.settings.desktop_audio && self.running.is_some() {
+            info!(output = ?self.mixed, "desktop audio moved; restarting the replay buffer");
+            self.stop().await;
+            self.start().await;
+        }
     }
 
     /// The grace after a game is over: stop, unless the game came back.
@@ -263,10 +302,13 @@ impl Controller {
             }
             Internal::Refresh => {}
             Internal::Hotkey(result) => match result {
-                Ok(trigger) => self.hotkey = Some(trigger),
+                Ok(trigger) => {
+                    self.hotkey = Some(trigger);
+                    self.hotkey_error = None;
+                }
                 Err(e) => {
                     self.hotkey = None;
-                    self.error = Some(format!("no hotkey ({e}); use the button or `ggctl clip save`"));
+                    self.hotkey_error = Some(format!("no hotkey ({e}); use the button or `ggctl clip save`"));
                 }
             },
             Internal::SaveFromHotkey => {
@@ -297,6 +339,7 @@ impl Controller {
             clips: recorder::list(&dir),
             error: self.error.clone(),
             hotkey: self.hotkey.clone(),
+            hotkey_error: self.hotkey_error.clone(),
             game: self.game.clone(),
             waiting: self.settings.enabled && self.settings.games_only && self.running.is_none() && self.game.is_none(),
         }
@@ -335,13 +378,18 @@ impl Controller {
     }
 }
 
-pub fn spawn(event_tx: broadcast::Sender<Event>, mut games: watch::Receiver<Option<String>>) -> Handle {
+pub fn spawn(
+    event_tx: broadcast::Sender<Event>,
+    mut games: watch::Receiver<Option<String>>,
+    mut mixed: watch::Receiver<Option<String>>,
+) -> Handle {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let path = gg_ipc::config_dir().join("clips.json");
     let (mut c, mut internal) = Controller::new(recorder::load(&path), path, None, event_tx);
     c.hotkey_allowed = true;
     tokio::spawn(async move {
         c.game = games.borrow_and_update().clone();
+        c.mixed = mixed.borrow_and_update().clone();
         c.start().await;
         loop {
             let retry = c.retry_at;
@@ -355,6 +403,10 @@ pub fn spawn(event_tx: broadcast::Sender<Event>, mut games: watch::Receiver<Opti
                 Ok(()) = games.changed() => {
                     let game = games.borrow_and_update().clone();
                     c.set_game(game).await;
+                }
+                Ok(()) = mixed.changed() => {
+                    let output = mixed.borrow_and_update().clone();
+                    c.set_mixed(output).await;
                 }
                 _ = async { tokio::time::sleep_until(retry.expect("guarded").into()).await }, if retry.is_some() => {
                     c.retry_at = None;
@@ -390,11 +442,26 @@ mod tests {
         script
     }
 
+    /// A new folder for one test, made here with a name nobody can guess and
+    /// private: never one another account made first, since the stand-in in it
+    /// gets run.
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("gglinux-clipctl-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        use std::hash::BuildHasher;
+        use std::os::unix::fs::DirBuilderExt;
+        let random = std::collections::hash_map::RandomState::new().hash_one(tag);
+        let d = std::env::temp_dir().join(format!("gglinux-clipctl-{}-{tag}-{random:016x}", std::process::id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn scratch_folders_are_new_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (a, b) = (scratch("probe"), scratch("probe"));
+        assert_ne!(a, b, "a name nobody can guess, so nobody can make it first");
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::remove_dir_all(a).unwrap();
+        std::fs::remove_dir_all(b).unwrap();
     }
 
     fn controller(dir: &Path, program: PathBuf) -> (Controller, mpsc::UnboundedReceiver<Internal>) {
@@ -409,16 +476,23 @@ mod tests {
         let busy = format!("(os error {})", libc::ETXTBSY);
         for _ in 0..50 {
             c.start().await;
-            if !c.error.as_deref().is_some_and(|e| e.ends_with(&busy)) {
+            if !c.error.as_deref().is_some_and(|e| e.contains(&busy)) {
                 return;
             }
+            // The test's doing, not the recorder's: no backoff from it.
+            c.delay = Duration::ZERO;
+            c.retry_at = None;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
     async fn log_has(dir: &Path, line: &str) -> bool {
+        log_has_line(dir, |l| l.starts_with(line)).await
+    }
+
+    async fn log_has_line(dir: &Path, wanted: impl Fn(&str) -> bool) -> bool {
         for _ in 0..40 {
-            if std::fs::read_to_string(dir.join("log")).unwrap_or_default().lines().any(|l| l.starts_with(line)) {
+            if std::fs::read_to_string(dir.join("log")).unwrap_or_default().lines().any(&wanted) {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -474,6 +548,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn desktop_audio_follows_sonar() {
+        let d = scratch("sonar");
+        let (mut c, _internal) = controller(&d, stand_in(&d, false));
+        start(&mut c).await;
+        assert!(log_has_line(&d, |l| l.starts_with("start") && l.ends_with("-a default_output")).await);
+        // Sonar on: the default output is now the Game channel alone.
+        c.set_mixed(Some("alsa_output.usb-SteelSeries".into())).await;
+        start(&mut c).await; // retried if the stand-in was busy
+        assert!(log_has(&d, "int").await, "the recorder hearing the default output is stopped");
+        let monitor = "-a device:alsa_output.usb-SteelSeries.monitor";
+        assert!(log_has_line(&d, |l| l.starts_with("start") && l.ends_with(monitor)).await, "and started again on every channel");
+        c.set_mixed(Some("alsa_output.usb-SteelSeries".into())).await;
+        let log = std::fs::read_to_string(d.join("log")).unwrap();
+        assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 2, "the same output changes nothing:\n{log}");
+        c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_cannot_be_made_yet_is_tried_again() {
+        let d = scratch("no-folder");
+        let (mut c, _internal) = controller(&d, stand_in(&d, false));
+        // Something in the way, like a drive that's mounted only later.
+        std::fs::write(d.join("clips"), b"").unwrap();
+        c.start().await;
+        assert!(c.error.as_deref().is_some_and(|e| e.starts_with("cannot create")), "{:?}", c.error);
+        assert!(c.retry_at.is_some(), "tried again after the backoff");
+        assert_eq!(c.delay, Duration::from_secs(5));
+        std::fs::remove_file(d.join("clips")).unwrap();
+        c.retry_at = None; // the backoff is over, as in spawn()
+        start(&mut c).await;
+        let s = c.state();
+        assert!(s.recording && s.error.is_none(), "{:?}", s.error);
+        c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_recorder_that_cannot_be_run_yet_is_tried_again() {
+        let d = scratch("no-exec");
+        let program = d.join("gpu-screen-recorder");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap(); // not executable
+        let (mut c, _internal) = controller(&d, program);
+        c.start().await;
+        assert!(c.error.as_deref().is_some_and(|e| e.starts_with("could not start")), "{:?}", c.error);
+        assert!(c.retry_at.is_some(), "tried again after the backoff");
+        assert!(!c.state().recording);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn clips_start_once_the_recorder_is_installed() {
+        let d = scratch("install");
+        let (mut c, _internal) = controller(&d, d.join("gpu-screen-recorder"));
+        c.start().await;
+        let s = c.state();
+        assert!(!s.available && !s.recording);
+        assert!(c.retry_at.is_some(), "it looks again later");
+        stand_in(&d, false); // installed
+        assert!(c.state().available);
+        c.retry_at = None; // the wait is over, as in spawn()
+        start(&mut c).await;
+        let s = c.state();
+        assert!(s.recording && s.error.is_none(), "{:?}", s.error);
+        c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
     async fn saving_while_off_is_an_error() {
         let d = scratch("save-off");
         let (mut c, _internal) = controller(&d, stand_in(&d, false));
@@ -512,6 +655,19 @@ mod tests {
         let _exited = next_exit(&mut internal).await;
         tokio::time::timeout(Duration::from_secs(1), c.stop()).await.unwrap();
         assert!(!c.state().recording);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn turning_clips_off_ends_a_pending_retry_and_its_message() {
+        let d = scratch("retry-off");
+        let (mut c, mut internal) = controller(&d, stand_in(&d, true));
+        start(&mut c).await;
+        let exited = next_exit(&mut internal).await;
+        c.on_internal(exited).await;
+        assert!(c.state().error.is_some_and(|e| e.contains("retrying")));
+        c.set_settings(ClipsSettings { enabled: false, ..c.settings.clone() }).await.unwrap();
+        assert_eq!((c.state().error, c.retry_at), (None, None), "nothing will be retried");
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -560,6 +716,43 @@ mod tests {
         let log = std::fs::read_to_string(d.join("log")).unwrap();
         assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 1, "one recorder throughout:\n{log}");
         assert!(!log.lines().any(|l| l == "int"), "{log}");
+        c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_retry_ends_with_the_game() {
+        let d = scratch("retry-game");
+        let (mut c, mut internal) = games_only(&d, stand_in(&d, true));
+        c.set_game(Some("game-a".into())).await;
+        start(&mut c).await;
+        let exited = next_exit(&mut internal).await;
+        c.on_internal(exited).await;
+        assert!(c.retry_at.is_some());
+        c.set_game(None).await;
+        let s = c.state();
+        assert!(s.waiting);
+        assert_eq!((s.error, c.retry_at), (None, None), "no game, nothing to retry");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_hotkey_is_still_reported_when_the_next_game_starts() {
+        let d = scratch("hotkey");
+        let (mut c, _internal) = games_only(&d, stand_in(&d, false));
+        c.set_game(Some("game-a".into())).await;
+        start(&mut c).await;
+        c.on_internal(Internal::Hotkey(Err("the portal refused".into()))).await;
+        let note = c.state().hotkey_error;
+        assert!(note.as_deref().is_some_and(|n| n.contains("the portal refused")), "{note:?}");
+        // The game ends and another starts: a new recorder, and no new binding.
+        c.set_game(None).await;
+        c.linger_over().await;
+        c.set_game(Some("game-b".into())).await;
+        start(&mut c).await;
+        let s = c.state();
+        assert!(s.recording);
+        assert_eq!((s.hotkey, s.hotkey_error), (None, note));
         c.stop().await;
         std::fs::remove_dir_all(d).unwrap();
     }

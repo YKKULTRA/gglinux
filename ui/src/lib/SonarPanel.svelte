@@ -4,7 +4,7 @@
 
   import EqEditor from "./EqEditor.svelte";
   import { daemon } from "./daemon.svelte";
-  import type { Channel, EqBand, MicSettings, SmartLevel } from "./types";
+  import type { Channel, EqBand, HeadphoneEq, MicSettings, SmartLevel, SmartVolume } from "./types";
 
   const CHANNELS: { value: Channel; label: string }[] = [
     { value: "game", label: "Game" },
@@ -59,25 +59,49 @@
     }
   }
 
+  // The mic settings, the headphone EQ and each channel's Smart Volume go out
+  // whole, from controls that skip `busy`. A change made before the last one's
+  // reply builds on what that one sent: built from the state, which doesn't have
+  // that change yet, it would undo it.
+  const inFlight = new Map<string, object>();
+  function sendWhole<T extends object>(
+    key: string,
+    current: T,
+    patch: Partial<T>,
+    send: (whole: T) => Promise<void>,
+  ) {
+    const whole = { ...((inFlight.get(key) as T | undefined) ?? current), ...patch };
+    inFlight.set(key, whole);
+    void quietly(() => send(whole)).finally(() => {
+      if (inFlight.get(key) === whole) inFlight.delete(key);
+    });
+  }
+
   const flatten = (bands: EqBand[]) => bands.map((b) => ({ ...b, gain: 0 }));
   let tabBands = $derived(
     !sonar ? [] : eqTab === "headphone" ? sonar.headphone.bands : (sonar.eq.find((c) => c.channel === eqTab)?.bands ?? []),
   );
 
   function setBands(bands: EqBand[]) {
+    const tab = eqTab;
+    if (tab === "headphone") headphone({ bands });
+    else void quietly(() => daemon.setChannelEq(tab, bands));
+  }
+
+  function headphone(patch: Partial<HeadphoneEq>) {
     const s = sonar;
     if (!s) return;
-    void quietly(() =>
-      eqTab === "headphone"
-        ? daemon.setHeadphoneEq({ ...s.headphone, bands })
-        : daemon.setChannelEq(eqTab, bands),
-    );
+    sendWhole("headphone", s.headphone, patch, (eq) => daemon.setHeadphoneEq(eq));
   }
 
   function micSettings(patch: Partial<MicSettings>) {
     const s = sonar;
     if (!s) return;
-    void quietly(() => daemon.setMicSettings({ ...s.mic.settings, ...patch }));
+    sendWhole("mic", s.mic.settings, patch, (m) => daemon.setMicSettings(m));
+  }
+
+  function smartVolume(channel: Channel, current: SmartVolume, patch: Partial<SmartVolume>) {
+    sendWhole(`smart-${channel}`, current, patch, (sv) => daemon.setSmartVolume(channel, sv));
   }
 
   function importAutoEq() {
@@ -164,18 +188,14 @@
                 <input
                   type="checkbox"
                   checked={sv.enabled}
-                  onchange={(e) =>
-                    quietly(() => daemon.setSmartVolume(c.channel, { ...sv, enabled: e.currentTarget.checked }))}
+                  onchange={(e) => smartVolume(c.channel, sv, { enabled: e.currentTarget.checked })}
                 />
                 On
               </label>
               <select
                 value={sv.level}
                 disabled={!sv.enabled}
-                onchange={(e) =>
-                  quietly(() =>
-                    daemon.setSmartVolume(c.channel, { ...sv, level: e.currentTarget.value as SmartLevel }),
-                  )}
+                onchange={(e) => smartVolume(c.channel, sv, { level: e.currentTarget.value as SmartLevel })}
               >
                 {#each LEVELS as l (l.value)}<option value={l.value}>{l.label}</option>{/each}
               </select>
@@ -401,10 +421,7 @@
               max="20"
               step="0.5"
               value={sonar.headphone.preamp}
-              onchange={(e) =>
-                quietly(() =>
-                  daemon.setHeadphoneEq({ ...sonar!.headphone, preamp: e.currentTarget.valueAsNumber }),
-                )}
+              onchange={(e) => headphone({ preamp: e.currentTarget.valueAsNumber })}
             />
             <span class="unit">{sonar.headphone.preamp} dB</span>
           </div>

@@ -9,6 +9,9 @@ use crate::config;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub id: u32,
+    /// `object.serial`: unlike the id, which PipeWire hands out again as soon
+    /// as a node goes, never reused.
+    pub serial: Option<u64>,
     pub name: String,
     pub description: Option<String>,
     pub media_class: String,
@@ -39,6 +42,14 @@ pub struct Graph {
     pub default_sink: Option<String>,
     /// `node.name` of the configured default source.
     pub default_source: Option<String>,
+    /// `node.name` of the sink WirePlumber uses as the default now: the
+    /// configured one, or a stand-in while that one is away.
+    pub current_sink: Option<String>,
+    /// The same for the default source.
+    pub current_source: Option<String>,
+    /// The PipeWire daemon's `info.cookie`, random each time it starts: a new
+    /// one means PipeWire restarted, however quickly.
+    pub cookie: Option<u64>,
 }
 
 const SINK: &str = "Audio/Sink";
@@ -51,12 +62,15 @@ impl Graph {
         let mut graph = Graph::default();
         for object in &objects {
             match object["type"].as_str() {
+                Some("PipeWire:Interface:Core") => graph.cookie = object["info"]["cookie"].as_u64(),
                 Some("PipeWire:Interface:Node") => graph.nodes.extend(parse_node(object)),
                 Some("PipeWire:Interface:Metadata")
                     if object["props"]["metadata.name"] == "default" =>
                 {
                     graph.default_sink = default_node(object, "sink");
                     graph.default_source = default_node(object, "source");
+                    graph.current_sink = metadata_node(object, "default.audio.sink");
+                    graph.current_source = metadata_node(object, "default.audio.source");
                 }
                 _ => {}
             }
@@ -89,6 +103,7 @@ fn parse_node(object: &Value) -> Option<Node> {
     let text = |key: &str| props[key].as_str().map(str::to_owned);
     Some(Node {
         id: u32::try_from(object["id"].as_u64()?).ok()?,
+        serial: props["object.serial"].as_u64(),
         name: text("node.name")?,
         description: text("node.description"),
         media_class: text("media.class").unwrap_or_default(),
@@ -108,14 +123,17 @@ fn volume(props: &Value) -> Option<f32> {
 
 /// The configured default `kind` ("sink" or "source"), else the current one.
 fn default_node(object: &Value, kind: &str) -> Option<String> {
-    let entries = object["metadata"].as_array()?;
-    let lookup = |key: String| {
-        entries
-            .iter()
-            .find(|e| e["subject"] == 0 && e["key"] == key.as_str())
-            .and_then(|e| node_name_of(&e["value"]))
-    };
-    lookup(format!("default.configured.audio.{kind}")).or_else(|| lookup(format!("default.audio.{kind}")))
+    metadata_node(object, &format!("default.configured.audio.{kind}"))
+        .or_else(|| metadata_node(object, &format!("default.audio.{kind}")))
+}
+
+/// The node a `default` metadata key names.
+fn metadata_node(object: &Value, key: &str) -> Option<String> {
+    object["metadata"]
+        .as_array()?
+        .iter()
+        .find(|e| e["subject"] == 0 && e["key"] == key)
+        .and_then(|e| node_name_of(&e["value"]))
 }
 
 /// The value is `{"name": …}`, sometimes serialised as a JSON string.
@@ -180,6 +198,26 @@ mod tests {
         assert_eq!(elisa.route_key().as_deref(), Some("elisa"));
         let firefox = g.app_streams().find(|s| s.app_binary.as_deref() == Some("firefox")).unwrap();
         assert_eq!(firefox.route_key().as_deref(), Some("firefox"));
+    }
+
+    #[test]
+    fn the_cookie_tells_pipewire_starts_apart() {
+        let json = r#"[{"id":0,"type":"PipeWire:Interface:Core","info":{"cookie":3377742783,"name":"pipewire-0"}}]"#;
+        assert_eq!(Graph::parse(json).unwrap().cookie, Some(3377742783));
+        assert_eq!(Graph::parse(CAPTURE).unwrap().cookie, None, "a dump without the core has none");
+    }
+
+    #[test]
+    fn the_default_in_use_is_read_beside_the_configured_one() {
+        let json = r#"[{"id":39,"type":"PipeWire:Interface:Metadata","props":{"metadata.name":"default"},
+            "metadata":[{"subject":0,"key":"default.configured.audio.sink","value":{"name":"bluez_output.away"}},
+                        {"subject":0,"key":"default.audio.sink","value":{"name":"alsa_output.y"}},
+                        {"subject":0,"key":"default.audio.source","value":{"name":"alsa_input.y"}}]}]"#;
+        let g = Graph::parse(json).unwrap();
+        assert_eq!(g.default_sink.as_deref(), Some("bluez_output.away"), "the user's choice");
+        assert_eq!(g.current_sink.as_deref(), Some("alsa_output.y"), "what plays meanwhile");
+        assert_eq!(g.default_source.as_deref(), Some("alsa_input.y"), "nothing configured: the one in use");
+        assert_eq!(g.current_source.as_deref(), Some("alsa_input.y"));
     }
 
     #[test]

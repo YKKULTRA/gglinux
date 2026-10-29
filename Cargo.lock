@@ -408,6 +408,7 @@ dependencies = [
  "gg-ipc",
  "hidapi",
  "http-body-util",
+ "hyper-util",
  "libc",
  "rustfft",
  "serde",

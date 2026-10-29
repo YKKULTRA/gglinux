@@ -61,11 +61,13 @@ pub struct Settings {
     pub games: Vec<SavedGame>,
 }
 
-/// Saved settings; a missing or unreadable file means GameSense off.
+/// Saved settings; a missing or unreadable file means GameSense off. An
+/// unreadable one is moved aside first.
 pub fn load_settings(path: &Path) -> Settings {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            warn!(path = %path.display(), error = %e, "ignoring unreadable GameSense settings");
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            let moved_to = gg_ipc::set_aside(path);
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable GameSense settings");
             Settings::default()
         }),
         Err(_) => Settings::default(),
@@ -139,9 +141,11 @@ pub fn newly_failed(seen: &mut HashSet<PathBuf>, failed: &[PathBuf]) -> Vec<Path
     new
 }
 
-/// 100 → 0 → 100, one value per step.
+/// 100 → 0 → 100, one value per step. From 20 down it moves in fives, each
+/// held for five steps: a new value restarts the flash, and one every step
+/// would never reach the dark half of the 4 Hz flash.
 pub fn test_values() -> Vec<i64> {
-    (0..=100).rev().chain(1..=100).collect()
+    (0..=100).rev().chain(1..=100).map(|v| if v <= 20 { (v + 4) / 5 * 5 } else { v }).collect()
 }
 
 fn define_test_game(r: &mut Registry) -> Result<(), String> {
@@ -229,6 +233,10 @@ async fn run(mut c: Controller, mut rx: mpsc::UnboundedReceiver<Command>, mut ch
         if let Err(e) = c.start().await {
             warn!(error = %e, "could not start the GameSense server");
         }
+    } else {
+        // Off, yet our files can still be there: a restored backup with
+        // GameSense off, an unreadable settings file, or a stop cut short.
+        c.clear_prefixes().await;
     }
     let mut tick = tokio::time::interval(SCAN_EVERY);
     loop {
@@ -313,14 +321,9 @@ impl Controller {
             }),
         };
         let (shutdown, stop) = oneshot::channel::<()>();
-        let task = tokio::spawn(async move {
-            let serve = axum::serve(listener, server::router(shared)).with_graceful_shutdown(async {
-                let _ = stop.await;
-            });
-            if let Err(e) = serve.await {
-                warn!(error = %e, "GameSense server stopped");
-            }
-        });
+        let task = tokio::spawn(server::serve(listener, server::router(shared), server::LIMITS, async {
+            let _ = stop.await;
+        }));
         info!(port, "GameSense server listening on 127.0.0.1");
         self.running = Some(Running { port, shutdown, task });
         self.engine.settings.enabled = true;
@@ -340,6 +343,12 @@ impl Controller {
         }
         self.engine.settings.enabled = false;
         self.save();
+        self.clear_prefixes().await;
+        Ok(())
+    }
+
+    /// Take gglinux's files out of every prefix; other files are left alone.
+    async fn clear_prefixes(&mut self) {
         let libraries = self.libraries_or_read();
         let removed = tokio::task::spawn_blocking(move || {
             prefixes::program_data_dirs(&libraries)
@@ -351,7 +360,6 @@ impl Controller {
         .unwrap_or(0);
         debug!(removed, "removed coreProps.json from Proton prefixes");
         self.holding = 0;
-        Ok(())
     }
 
     fn libraries_or_read(&mut self) -> Vec<PathBuf> {
@@ -486,6 +494,7 @@ mod tests {
         assert_eq!(load_settings(&path), Settings::default(), "missing file");
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(load_settings(&path), Settings::default(), "corrupted file");
+        assert!(!path.exists(), "moved aside, so a save can't destroy it");
         assert!(!Settings::default().enabled, "GameSense is off until asked");
         let s = Settings { enabled: true, port: Some(5000), games: Vec::new() };
         save_settings(&path, &s);
@@ -513,6 +522,26 @@ mod tests {
         assert_eq!(low[&0x45], gg_device_keyboard::Rgb::default(), "F12 dark at 10%");
         assert_ne!(low[&0x3A], gg_device_keyboard::Rgb::default(), "F1 lit (first half of a flash)");
         assert_eq!(r.paint(1.2).unwrap()[&0x3A], gg_device_keyboard::Rgb::default(), "…and dark in the second half at 4 Hz");
+    }
+
+    #[test]
+    fn the_test_game_flashes_as_it_sweeps_through_the_low_values() {
+        let mut r = Registry::default();
+        define_test_game(&mut r).unwrap();
+        let step = TEST_STEP.as_secs_f64();
+        let mut dark = Vec::new();
+        for (i, value) in test_values().into_iter().enumerate() {
+            let t = i as f64 * step;
+            send_test_value(&mut r, value, t).unwrap();
+            for frame in 0..3 { // the keyboard draws every 33 ms
+                let f1 = r.paint(t + f64::from(frame) / 30.0).unwrap()[&0x3A];
+                if value > 0 && f1 == gg_device_keyboard::Rgb::default() {
+                    dark.push(value);
+                }
+            }
+        }
+        assert!(!dark.is_empty(), "F1 never went dark: every step restarted the flash");
+        assert!(dark.iter().all(|&v| v <= 20), "only low values flash: {dark:?}");
     }
 
     #[test]

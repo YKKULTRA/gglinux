@@ -24,8 +24,11 @@ Out of scope:
   `active` is the rule currently applied. `running` is filled only in answers to
   `get_profiles`, not in events, because it changes all the time.
 
-**Persistence:** `~/.config/gglinux/profiles.json` = `{ profiles: [Profile], rules: [GameRule] }`,
-written atomically. Unreadable → empty, with a warning.
+**Persistence:** `~/.config/gglinux/profiles.json` = `{ profiles: [Profile], rules: [GameRule], before: Lighting | null }`,
+written atomically. Unreadable → empty, with a warning, the file moved aside to
+`profiles.json.unreadable-<unix seconds>` so saving can't destroy it. `before` is saved because
+`SetLighting` saves a game's profile as the lighting, so a restart mid-game would otherwise lose the
+owner's.
 
 **Requests:**
 - `get_profiles`;
@@ -43,7 +46,9 @@ written atomically. Unreadable → empty, with a warning.
 **Watcher** (daemon `profiles.rs`, a tokio task, every 2 s):
 - Scans `/proc/<pid>` entries owned by the owner's uid.
 - A process's names are its `comm` and the basename of `argv[0]`, splitting on both `/` and `\`,
-  so Proton's `Z:\…\RDR2.exe` gives `RDR2.exe`.
+  so Proton's `Z:\…\RDR2.exe` gives `RDR2.exe`. A title rewritten as the whole command line in
+  one string (Chromium, Electron, node) is cut before its first option, so a renderer is `chrome`;
+  a dash word with a path separator before any `=` (`Odd -Name\odd.exe`) carries on the path.
 - Matching is case-insensitive. The first rule, in list order, whose process is running is
   *picked*.
 
@@ -51,6 +56,8 @@ written atomically. Unreadable → empty, with a warning.
 - nothing active → picked: save the current lighting as `before`, then apply the picked profile;
 - active A → picked B (another rule): apply B, keeping the original `before`;
 - active → nothing picked: restore `before`;
+- after a restart mid-game, a saved `before` is kept if a rule is picked, and restored at once if
+  none is;
 - a rule naming a missing profile is skipped;
 - a manual `apply_profile` while a rule is active changes the lighting now, and the rule's exit
   still restores `before`.

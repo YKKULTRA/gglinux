@@ -94,11 +94,12 @@ pub fn path() -> PathBuf {
 }
 
 /// Read settings. A missing file means the defaults; an unreadable one is
-/// logged and ignored, never fatal.
+/// logged and moved aside, never fatal.
 pub fn load(path: &Path) -> Settings {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            warn!(path = %path.display(), error = %e, "ignoring unreadable Sonar settings");
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            let moved_to = gg_ipc::set_aside(path);
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable Sonar settings");
             Settings::default()
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
@@ -128,7 +129,8 @@ mod tests {
 
     #[test]
     fn settings_round_trip() {
-        let path = scratch("settings-rt").join("gglinux").join("sonar.json");
+        let dir = scratch("settings-rt");
+        let path = dir.join("gglinux").join("sonar.json");
         let mut rules = Rules::default();
         rules.set("firefox", Channel::Aux);
         let s = Settings {
@@ -150,14 +152,20 @@ mod tests {
 
     #[test]
     fn corrupt_settings_fall_back_to_defaults() {
-        let path = scratch("settings-corrupt").join("sonar.json");
+        let dir = scratch("settings-corrupt");
+        let path = dir.join("sonar.json");
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(load(&path), Settings::default());
+        assert!(!path.exists(), "moved aside, so a save can't destroy it");
+        std::fs::write(&path, b"{\xff}").unwrap();
+        assert_eq!(load(&path), Settings::default());
+        assert!(!path.exists(), "not UTF-8: moved aside too, not only logged");
     }
 
     #[test]
     fn settings_from_before_smart_volume_still_load() {
-        let path = scratch("settings-old").join("sonar.json");
+        let dir = scratch("settings-old");
+        let path = dir.join("sonar.json");
         std::fs::write(&path, r#"{"enabled":true,"output":"alsa_output.x","chatmix":0.5}"#).unwrap();
         let s = load(&path);
         assert!(s.enabled && s.smart_volume.is_empty());

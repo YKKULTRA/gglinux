@@ -57,9 +57,15 @@
     }
   }
 
-  function setLitSeconds(raw: number) {
-    if (!Number.isFinite(raw)) return;
-    void update({ lit_seconds: Math.min(LIT_MAX, Math.max(LIT_MIN, Math.round(raw))) });
+  // Read back whatever happened: Svelte rewrites the box only when the stored
+  // value changes, so an entry clamped to it, refused, or not a number would keep
+  // showing what was typed.
+  async function setLitSeconds(box: HTMLInputElement) {
+    const raw = box.valueAsNumber;
+    if (Number.isFinite(raw)) {
+      await update({ lit_seconds: Math.min(LIT_MAX, Math.max(LIT_MIN, Math.round(raw))) });
+    }
+    if (screen) box.value = String(screen.lit_seconds);
   }
 
   // --- headset settings ------------------------------------------------------
@@ -176,7 +182,7 @@
           max={LIT_MAX}
           value={screen.lit_seconds}
           disabled={busy || !screen.protect}
-          onchange={(e) => setLitSeconds(e.currentTarget.valueAsNumber)}
+          onchange={(e) => setLitSeconds(e.currentTarget)}
         />
         <span class="unit">seconds</span>
       </div>

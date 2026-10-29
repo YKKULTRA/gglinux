@@ -1,5 +1,12 @@
 post_install() {
   cat <<'EOF'
+==> gglinux: if you installed it with scripts/install-local.sh before, remove that copy, or
+    its daemon, app-menu entry and ggctl in your home run instead of this package's.
+    Quit gglinux from its tray, then:
+      systemctl --user disable --now gglinuxd
+      rm -f ~/.local/bin/{gglinuxd,gglinux,ggctl} ~/.config/systemd/user/gglinuxd.service
+      rm -f ~/.local/share/applications/gglinux.desktop ~/.config/autostart/gglinux.desktop
+      systemctl --user daemon-reload
 ==> gglinux: start the daemon for your user with
       systemctl --user enable --now gglinuxd
     then open gglinux from the app menu (Settings -> Start at login keeps both running).

@@ -15,6 +15,10 @@ pub struct Store {
     pub profiles: Vec<Profile>,
     #[serde(default)]
     pub rules: Vec<GameRule>,
+    /// The owner's own lighting while a game rule's profile is on, put back when
+    /// the game ends. Saved, since the profile is saved as the lighting.
+    #[serde(default)]
+    pub before: Option<Lighting>,
 }
 
 fn clean(name: &str, what: &str) -> Result<String, String> {
@@ -67,10 +71,13 @@ impl Store {
     }
 }
 
+/// Saved profiles; a missing or unreadable file means none. Read as bytes, so a
+/// file that isn't UTF-8 is unreadable too and moved aside, not saved over.
 pub fn load(path: &Path) -> Store {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
-            warn!(path = %path.display(), error = %e, "ignoring unreadable profiles");
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            let moved_to = gg_ipc::set_aside(path);
+            warn!(path = %path.display(), error = %e, %moved_to, "ignoring unreadable profiles");
             Store::default()
         }),
         Err(_) => Store::default(),
@@ -194,6 +201,32 @@ mod tests {
         assert_eq!(load(&path), s);
         std::fs::write(&path, "{ nope").unwrap();
         assert_eq!(load(&path), Store::default());
+        save(&path, &Store::default()); // the next change
+        let aside: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten()
+            .filter(|e| e.file_name() != "profiles.json")
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect();
+        assert_eq!(aside, ["{ nope"], "kept, not saved over");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_utf8_is_garbage_too() {
+        let dir = std::env::temp_dir().join(format!("gglinux-profiles-latin1-{}", std::process::id()));
+        let path = dir.join("profiles.json");
+        let mut s = Store::default();
+        s.save_profile("Café", Lighting::default()).unwrap();
+        save(&path, &s);
+        // The same file hand-edited and saved as Latin-1, where é is one byte that isn't UTF-8.
+        let latin1: Vec<u8> = std::fs::read_to_string(&path).unwrap().chars().map(|c| c as u8).collect();
+        std::fs::write(&path, &latin1).unwrap();
+        assert_eq!(load(&path), Store::default());
+        save(&path, &Store::default()); // the next change
+        let aside: Vec<Vec<u8>> = std::fs::read_dir(&dir).unwrap().flatten()
+            .filter(|e| e.file_name() != "profiles.json")
+            .map(|e| std::fs::read(e.path()).unwrap())
+            .collect();
+        assert_eq!(aside, [latin1], "kept, not saved over");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

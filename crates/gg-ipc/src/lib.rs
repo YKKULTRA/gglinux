@@ -55,15 +55,24 @@ pub struct BatteryState {
     pub charging: bool,
 }
 
-/// Mouse settings, as written by gglinux.
+/// The DPI stages written to the mouse, and which one is active.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MouseDpi {
+    pub stages: Vec<DpiStage>,
+    /// 0-based index into `stages`.
+    pub active: usize,
+}
+
+/// Mouse settings, as written by gglinux.
+///
+/// Each part is `None` until it has been written. The mouse cannot be read back,
+/// so a part never written is unknown, not its factory default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseSettings {
-    pub dpi_stages: Vec<DpiStage>,
-    /// 0-based index into `dpi_stages`.
-    pub active_stage: usize,
-    pub polling_hz: u16,
+    pub dpi: Option<MouseDpi>,
+    pub polling_hz: Option<u16>,
     /// One action name per physical button, in button order.
-    pub buttons: Vec<String>,
+    pub buttons: Option<Vec<String>>,
 }
 
 /// What the daemon knows about the mouse.
@@ -710,6 +719,8 @@ pub struct ClipsState {
     pub error: Option<String>,
     /// The hotkey KDE bound, if any.
     pub hotkey: Option<String>,
+    /// Why there's no hotkey, once binding it has failed.
+    pub hotkey_error: Option<String>,
     /// The game from the rules that's running now, if any.
     pub game: Option<String>,
     /// On and games-only, with no game from the rules running: the recorder waits.
@@ -904,6 +915,21 @@ pub fn config_dir() -> std::path::PathBuf {
     base.join("gglinux")
 }
 
+/// Move a settings file that doesn't parse out of the way, to
+/// `<name>.unreadable-<unix seconds>` beside it, so the defaults saved in its
+/// place later don't destroy the only copy. Says where it went, for the log;
+/// call it before the log macro, whose arguments only run when it's enabled.
+pub fn set_aside(path: &std::path::Path) -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".unreadable-{secs}"));
+    let aside = path.with_file_name(name);
+    match std::fs::rename(path, &aside) {
+        Ok(()) => aside.display().to_string(),
+        Err(e) => format!("nowhere ({e})"),
+    }
+}
+
 // Avoid a libc dependency in this leaf crate just for one call.
 extern "C" {
     fn geteuid() -> u32;
@@ -966,6 +992,13 @@ mod tests {
         let json = serde_json::to_string(&ResponseData::Mouse { state }).unwrap();
         assert!(json.contains(r#""applied":null"#), "{json}");
         assert!(json.contains(r#""level":12"#), "{json}");
+    }
+
+    #[test]
+    fn mouse_settings_report_each_unwritten_part_as_null() {
+        let applied = MouseSettings { polling_hz: Some(500), ..Default::default() };
+        let json = serde_json::to_string(&applied).unwrap();
+        assert_eq!(json, r#"{"dpi":null,"polling_hz":500,"buttons":null}"#);
     }
 
     #[test]
@@ -1300,5 +1333,19 @@ mod tests {
         assert!(on.games_only);
         let s = serde_json::to_value(ClipsState::default()).unwrap();
         assert_eq!((s["waiting"].as_bool(), s["game"].is_null()), (Some(false), true));
+    }
+
+    #[test]
+    fn an_unreadable_settings_file_is_set_aside_beside_itself() {
+        let dir = std::env::temp_dir().join(format!("gglinux-aside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.json");
+        std::fs::write(&path, "{ nope").unwrap();
+        let moved = set_aside(&path);
+        assert!(moved.starts_with(&*dir.join("x.json.unreadable-").to_string_lossy()), "{moved}");
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "{ nope");
+        assert!(!path.exists());
+        assert!(set_aside(&path).starts_with("nowhere"), "nothing to move");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

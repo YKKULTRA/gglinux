@@ -34,13 +34,19 @@ export interface BatteryState {
   charging: boolean;
 }
 
+export interface MouseDpi {
+  stages: DpiStage[];
+  /** 0-based index into `stages`. */
+  active: number;
+}
+
+/** Each part is `null` until this daemon has written it: the mouse can't be read
+ *  back, so a part never written is unknown, not its factory default. */
 export interface MouseSettings {
-  dpi_stages: DpiStage[];
-  /** 0-based index into `dpi_stages`. */
-  active_stage: number;
-  polling_hz: number;
+  dpi: MouseDpi | null;
+  polling_hz: number | null;
   /** One action name per physical button, in button order. */
-  buttons: string[];
+  buttons: string[] | null;
 }
 
 export interface MouseState {
@@ -343,6 +349,8 @@ export interface ClipsState {
   error: string | null;
   /** The hotkey KDE bound, if any. */
   hotkey: string | null;
+  /** Why there's no hotkey, once binding it has failed. */
+  hotkey_error: string | null;
   /** The game from the rules that's running now. */
   game: string | null;
   /** On and games-only, with no game from the rules running. */

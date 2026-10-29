@@ -6,9 +6,12 @@
 //! Gen 3's lighting, run Sonar-style audio channels on PipeWire, and serve all
 //! of it over a newline-delimited JSON unix socket. PipeWire audio and the GameSense server land in later milestones.
 
+use std::future::Future;
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use gg_ipc::{DeviceInfo, Event, Request, RequestFrame, ResponseData, ServerMessage};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -66,12 +69,7 @@ async fn main() -> Result<()> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating socket dir {}", dir.display()))?;
     }
-    // Clear a stale socket from an unclean shutdown.
-    if path.exists() {
-        let _ = std::fs::remove_file(&path);
-    }
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("binding unix socket {}", path.display()))?;
+    let listener = claim_socket(&path)?;
     info!(socket = %path.display(), "gglinuxd listening");
 
     // Shared device state: `snapshot` holds the current list; `events` fans out diffs.
@@ -84,14 +82,17 @@ async fn main() -> Result<()> {
     let keyboard = keyboard::spawn(event_tx.clone(), vec![engine.overlay()]);
     // The game from the profiles' rules that's running now; games-only clips follow it.
     let (game_tx, game_rx) = watch::channel::<Option<String>>(None);
+    // Where everything playing mixes, from Sonar; clips' desktop audio follows it.
+    let (mixed_tx, mixed_rx) = watch::channel::<Option<String>>(None);
     let workers = Workers {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
         gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
         profiles: profiles::spawn(event_tx.clone(), keyboard.clone(), game_tx),
-        clips: clips::spawn(event_tx.clone(), game_rx),
+        clips: clips::spawn(event_tx.clone(), game_rx, mixed_rx),
+        // Sonar tells the keyboard's visualizer and clips where everything playing mixes.
+        sonar: sonar::spawn(event_tx.clone(), keyboard.clone(), mixed_tx),
         keyboard,
-        sonar: sonar::spawn(event_tx.clone()),
     };
 
     let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
@@ -106,23 +107,54 @@ async fn main() -> Result<()> {
     result
 }
 
+/// Bind the daemon's socket at `path`, unless another gglinuxd answers there:
+/// two would both drive the devices, and the first to exit would take the
+/// other's socket with it.
+fn claim_socket(path: &Path) -> Result<UnixListener> {
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => bail!("gglinuxd is already running on {}", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // Nobody listens: a stale socket from an unclean shutdown.
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            let _ = std::fs::remove_file(path);
+        }
+        Err(e) => return Err(e).with_context(|| format!("checking {} for a running gglinuxd", path.display())),
+    }
+    UnixListener::bind(path).with_context(|| format!("binding unix socket {}", path.display()))
+}
+
 /// Bridge the blocking gg-hid monitor thread into the async world via watch/broadcast.
 fn spawn_hid_monitor(snapshot_tx: watch::Sender<Vec<DeviceInfo>>, event_tx: broadcast::Sender<Event>) {
     std::thread::Builder::new()
         .name("gg-hid".into())
         .spawn(move || {
-            let res = gg_hid::run_monitor(|snapshot, events| {
-                // `send` here is synchronous — safe to call from this OS thread.
-                let _ = snapshot_tx.send(snapshot);
-                for ev in events {
-                    let _ = event_tx.send(ev);
-                }
-            });
+            let res = gg_hid::run_monitor(|snapshot, events| publish(&snapshot_tx, &event_tx, snapshot, events));
             if let Err(e) = res {
                 error!(error = %e, "HID monitor stopped");
             }
         })
         .expect("spawn gg-hid thread");
+}
+
+/// Pass on what the HID monitor saw: the device list, for clients that connect
+/// from now on, and what changed, for those already connected.
+fn publish(
+    snapshot_tx: &watch::Sender<Vec<DeviceInfo>>,
+    event_tx: &broadcast::Sender<Event>,
+    snapshot: Vec<DeviceInfo>,
+    events: Vec<Event>,
+) {
+    // A change with no add or remove to tell it by goes out as the whole list:
+    // above all the first scan, which a client that connected before it was
+    // sent as empty.
+    let whole = events.is_empty().then(|| Event::DevicesChanged { devices: snapshot.clone() });
+    // `send` here is synchronous — safe to call from this OS thread. The list
+    // is updated first: a client subscribes before it reads the list, so one
+    // connecting meanwhile gets the new list or the event, never neither.
+    let _ = snapshot_tx.send(snapshot);
+    for ev in events.into_iter().chain(whole) {
+        let _ = event_tx.send(ev);
+    }
 }
 
 /// Accept connections until SIGINT/SIGTERM.
@@ -161,9 +193,31 @@ async fn handle_client(
     event_tx: broadcast::Sender<Event>,
     workers: Workers,
 ) -> Result<()> {
+    let (snapshot, workers) = (&snapshot_rx, &workers);
+    serve(stream, snapshot, &event_tx, move |line| async move {
+        dispatch(&line, snapshot, workers).await
+    })
+    .await
+}
+
+/// [`handle_client`]'s connection, with each request line answered by `answer`.
+///
+/// Replies go out as they are ready, not in the order asked: the UI sends every
+/// panel's requests down one connection, each on its own timer, and a slow one
+/// (Sonar waiting out a PipeWire restart, the recorder stopping) must not run
+/// out the others'. Each request still starts, and so reaches its worker, in
+/// the order it was sent: `FuturesUnordered` first polls what it holds in the
+/// order it was pushed.
+async fn serve<Fut: Future<Output = ServerMessage>>(
+    stream: UnixStream,
+    snapshot_rx: &watch::Receiver<Vec<DeviceInfo>>,
+    event_tx: &broadcast::Sender<Event>,
+    answer: impl Fn(String) -> Fut,
+) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
     let mut events = event_tx.subscribe();
+    let mut pending = FuturesUnordered::new();
 
     // Send the current state immediately so a fresh UI populates without asking.
     let initial = snapshot_rx.borrow().clone();
@@ -177,14 +231,12 @@ async fn handle_client(
         tokio::select! {
             line = lines.next_line() => {
                 match line? {
-                    Some(line) if !line.trim().is_empty() => {
-                        let reply = dispatch(&line, &snapshot_rx, &workers).await;
-                        write_message(&mut write_half, &reply).await?;
-                    }
+                    Some(line) if !line.trim().is_empty() => pending.push(answer(line)),
                     Some(_) => {} // blank keepalive line
                     None => break, // client closed
                 }
             }
+            Some(reply) = pending.next() => write_message(&mut write_half, &reply).await?,
             ev = events.recv() => {
                 match ev {
                     Ok(event) => write_message(&mut write_half, &ServerMessage::notify(event)).await?,
@@ -202,6 +254,10 @@ async fn handle_client(
             }
         }
     }
+    // A request sent just before the client hung up is still answered.
+    while let Some(reply) = pending.next().await {
+        write_message(&mut write_half, &reply).await?;
+    }
     Ok(())
 }
 
@@ -214,12 +270,11 @@ async fn dispatch(
     snapshot_rx: &watch::Receiver<Vec<DeviceInfo>>,
     workers: &Workers,
 ) -> ServerMessage {
-    let frame = match serde_json::from_str::<RequestFrame>(line) {
+    let frame = match parse_request(line) {
         Ok(frame) => frame,
-        // No id to correlate against, so reply on id 0 and let the client log it.
-        Err(e) => {
+        Err((id, e)) => {
             return ServerMessage::response(
-                0,
+                id,
                 ResponseData::Error {
                     message: format!("invalid request: {e}"),
                 },
@@ -416,6 +471,20 @@ async fn dispatch(
     ServerMessage::response(frame.id, result)
 }
 
+/// A request line as a frame, or why not and the id to answer that on.
+fn parse_request(line: &str) -> Result<RequestFrame, (u64, serde_json::Error)> {
+    serde_json::from_str::<RequestFrame>(line).map_err(|e| {
+        // The request's own id when it has one, so the client sees why instead
+        // of waiting out its timer (a method this daemon is too old for, say);
+        // else id 0, for the client to log.
+        let id = serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v.get("id")?.as_u64())
+            .unwrap_or(0);
+        (id, e)
+    })
+}
+
 /// Collapse a command result into `Success` or `Error`.
 fn outcome(result: Result<(), String>) -> ResponseData {
     match result {
@@ -455,4 +524,215 @@ async fn write_message(write_half: &mut (impl AsyncWriteExt + Unpin), msg: &Serv
     let line = msg.to_line()?;
     write_half.write_all(line.as_bytes()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// A new private folder for one test's socket, removed when the test ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            use std::hash::BuildHasher;
+            use std::os::unix::fs::DirBuilderExt;
+            let random = std::collections::hash_map::RandomState::new().hash_one(tag);
+            let d = std::env::temp_dir().join(format!("gglinuxd-{}-{tag}-{random:016x}", std::process::id()));
+            std::fs::DirBuilder::new().mode(0o700).create(&d).unwrap();
+            Scratch(d)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_daemon_leaves_the_running_ones_socket_alone() {
+        let d = Scratch::new("second");
+        let path = d.0.join("gglinuxd.sock");
+        let running = claim_socket(&path).unwrap();
+
+        let second = claim_socket(&path);
+        assert!(second.is_err(), "a second daemon must not start while one listens");
+        assert!(format!("{:#}", second.err().unwrap()).contains("already running"));
+
+        // Clients still reach the first one.
+        let client = UnixStream::connect(&path).await.expect("the running daemon's socket is still there");
+        tokio::time::timeout(Duration::from_secs(1), running.accept())
+            .await
+            .expect("the running daemon hears the client")
+            .unwrap();
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_from_an_unclean_shutdown_is_cleared() {
+        let d = Scratch::new("stale");
+        let path = d.0.join("gglinuxd.sock");
+        // Bound and then gone without removing its file, as after a crash.
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+
+        let listener = claim_socket(&path).expect("nobody listens there, so it can go");
+        let _client = UnixStream::connect(&path).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), listener.accept()).await.unwrap().unwrap();
+    }
+
+    /// Run [`serve`] with `answer` while `client` talks to it over a socket
+    /// pair. The connection has no devices and no events.
+    async fn talk<Fut, C>(answer: impl Fn(String) -> Fut, client: impl FnOnce(UnixStream) -> C)
+    where
+        Fut: Future<Output = ServerMessage>,
+        C: Future<Output = ()>,
+    {
+        let (daemon_end, client_end) = UnixStream::pair().unwrap();
+        let (_snapshot_tx, snapshot_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(8);
+        let both = async { tokio::join!(serve(daemon_end, &snapshot_rx, &event_tx, answer), client(client_end)) };
+        let (served, ()) = tokio::time::timeout(Duration::from_secs(5), both).await.expect("the connection finishes");
+        served.unwrap();
+    }
+
+    /// The id of the next response, past any notifications.
+    async fn next_response(lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>) -> u64 {
+        loop {
+            let line = lines.next_line().await.unwrap().expect("the daemon hung up");
+            if let ServerMessage::Response { id, .. } = serde_json::from_str(&line).unwrap() {
+                return id;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_request_holds_up_no_other_on_the_same_connection() {
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        // "slow" waits until the client has had its other answer, as a Sonar
+        // restart keeps its reply; anything else is answered at once.
+        let answer = |line: String| {
+            let release = std::sync::Arc::clone(&release);
+            async move {
+                let id = if line == "slow" {
+                    release.notified().await;
+                    1
+                } else {
+                    2
+                };
+                ServerMessage::response(id, ResponseData::Pong)
+            }
+        };
+        let notify = std::sync::Arc::clone(&release);
+        talk(answer, |stream| async move {
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            write.write_all(b"slow\nfast\n").await.unwrap();
+            let first = tokio::time::timeout(Duration::from_secs(1), next_response(&mut lines)).await;
+            assert_eq!(first.ok(), Some(2), "the fast request is answered while the slow one waits");
+            notify.notify_one();
+            assert_eq!(next_response(&mut lines).await, 1);
+        })
+        .await;
+    }
+
+    /// A request is handed to its worker on its first poll, so that is the
+    /// order a worker sees them in: a slider's last value must arrive last.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requests_start_in_the_order_they_were_sent() {
+        let started = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let answer = |line: String| {
+            let started = std::sync::Arc::clone(&started);
+            async move {
+                let n: u64 = line.parse().unwrap();
+                started.lock().unwrap().push(n);
+                // Some take a while, as a worker's reply can.
+                if n.is_multiple_of(3) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                ServerMessage::response(n, ResponseData::Pong)
+            }
+        };
+        talk(answer, |stream| async move {
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let sent: String = (1..=50).map(|n| format!("{n}\n")).collect();
+            write.write_all(sent.as_bytes()).await.unwrap();
+            for _ in 1..=50 {
+                next_response(&mut lines).await;
+            }
+        })
+        .await;
+        assert_eq!(*started.lock().unwrap(), (1..=50).collect::<Vec<u64>>());
+    }
+
+    fn mouse() -> DeviceInfo {
+        DeviceInfo {
+            id: "1038:1872".into(),
+            kind: gg_ipc::DeviceKind::Mouse,
+            vendor_id: 0x1038,
+            product_id: 0x1872,
+            name: "Rival 3 Wireless Gen 2".into(),
+            serial: None,
+            connected: true,
+            interfaces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_client_connected_before_the_first_scan_hears_the_devices() {
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(8);
+        // It connected while the list was still empty, so it was sent [] and
+        // is waiting on events.
+        let mut client = event_tx.subscribe();
+        // The first scan comes with no events, only the list.
+        publish(&snapshot_tx, &event_tx, vec![mouse()], Vec::new());
+        match client.try_recv() {
+            Ok(Event::DevicesChanged { devices }) => assert_eq!(devices, vec![mouse()]),
+            other => panic!("the client heard {other:?}"),
+        }
+
+        // An unplug after that goes out as itself, not the whole list again.
+        publish(&snapshot_tx, &event_tx, Vec::new(), vec![Event::DeviceRemoved { id: mouse().id }]);
+        assert!(matches!(client.try_recv(), Ok(Event::DeviceRemoved { .. })));
+        assert!(client.try_recv().is_err(), "nothing more");
+    }
+
+    #[test]
+    fn a_request_the_daemon_cannot_read_is_refused_on_its_own_id() {
+        // A method from a newer UI than this daemon, which the UI is waiting on.
+        match parse_request(r#"{"id":7,"req":{"method":"set_something_new","params":{}}}"#) {
+            Err((id, e)) => {
+                assert_eq!(id, 7, "on the request's own id, so the client sees why");
+                assert!(e.to_string().contains("set_something_new"), "{e}");
+            }
+            Ok(frame) => panic!("parsed as {frame:?}"),
+        }
+        // With no id to be found there is nothing else to answer on.
+        for line in ["not json", r#"{"req":{"method":"ping"}}"#, r#"{"id":"7","req":{"method":"nope"}}"#] {
+            match parse_request(line) {
+                Err((0, _)) => {}
+                other => panic!("{line} answered as {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_sent_just_before_hanging_up_is_still_answered() {
+        let answer = |_line: String| async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            ServerMessage::response(1, ResponseData::Pong)
+        };
+        talk(answer, |stream| async move {
+            let (read, mut write) = stream.into_split();
+            write.write_all(b"ping\n").await.unwrap();
+            write.shutdown().await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            assert_eq!(next_response(&mut lines).await, 1);
+        })
+        .await;
+    }
 }

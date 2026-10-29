@@ -96,7 +96,13 @@
       </div>
       <div class="row">
         <button class="primary" disabled={busy || !st.recording} onclick={() => run(() => daemon.saveClip())}>Save clip</button>
-        <span class="meta">{st.hotkey ? `Hotkey: ${st.hotkey}` : "No hotkey yet: KDE asks to confirm Alt+S when clips start."}</span>
+        {#if st.hotkey}
+          <span class="meta">Hotkey: {st.hotkey}</span>
+        {:else if st.hotkey_error}
+          <span class="meta warn">{st.hotkey_error}</span>
+        {:else}
+          <span class="meta">No hotkey yet: KDE asks to confirm Alt+S when clips start.</span>
+        {/if}
       </div>
       {#if st.error}<p class="meta warn">{st.error}</p>{/if}
     </section>
@@ -104,7 +110,10 @@
     <section>
       <div class="head">
         <h4>Clips</h4>
-        <button class="ghost" onclick={() => run(() => openFolder(st!.dir))}>Open folder</button>
+        <!-- The folder is made when recording starts, so before the first clip it may not exist. -->
+        {#if st.clips.length > 0}
+          <button class="ghost" onclick={() => run(() => openFolder(st!.dir))}>Open folder</button>
+        {/if}
       </div>
       {#if st.clips.length === 0}
         <p class="meta">No clips yet in <code>{st.dir}</code>.</p>

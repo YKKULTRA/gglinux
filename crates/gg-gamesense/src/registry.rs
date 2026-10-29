@@ -5,10 +5,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::paint::{paint, Reading};
-use crate::proto::{valid_name, BindEvent, GameEvent, GameMetadata, Handler, MultipleEvents, RegisterEvent, Rgb};
+use crate::proto::{parse_rgb, valid_name, BindEvent, GameEvent, GameMetadata, Handler, MultipleEvents, RegisterEvent, Rgb};
 
 /// Colours by HID code: what a game paints over the lighting.
 pub type Layer = HashMap<u8, Rgb>;
@@ -16,6 +16,10 @@ pub type Layer = HashMap<u8, Rgb>;
 pub const MAX_GAMES: usize = 64;
 pub const MAX_EVENTS: usize = 128;
 pub const MAX_HANDLERS: usize = 32;
+/// Most handler JSON kept across every game, in bytes as `gamesense.json` holds
+/// it (pretty-printed). Handlers for other devices are kept as sent, so without
+/// this a game could fill memory and the disk.
+pub const MAX_HANDLER_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_TIMER_MS: u32 = 15_000;
 const TIMER_MS: std::ops::RangeInclusive<u32> = 1_000..=60_000;
 
@@ -55,6 +59,8 @@ pub struct GameSummary {
 struct Event {
     saved: SavedEvent,
     handlers: Vec<Handler>,
+    /// The size of `saved.handlers`, counted against [`MAX_HANDLER_BYTES`].
+    bytes: usize,
     value: Option<i64>,
     frame: Option<Map<String, Value>>,
     received: bool,
@@ -101,7 +107,12 @@ impl Registry {
             return Err(format!("at most {MAX_HANDLERS} handlers per event"));
         }
         let parsed = b.handlers.iter().map(Handler::parse).collect::<Result<Vec<_>, _>>()?;
-        self.define(&b.game, &b.event, b.min_value, b.max_value, b.icon_id, b.value_optional, Some((b.handlers, parsed)))
+        let bytes = json_bytes(&b.handlers);
+        let replaced = self.games.get(&b.game).and_then(|g| g.events.get(&b.event)).map_or(0, |e| e.bytes);
+        if self.handler_bytes() - replaced + bytes > MAX_HANDLER_BYTES {
+            return Err(format!("at most {} KiB of handlers in all; remove a game to make room", MAX_HANDLER_BYTES / 1024));
+        }
+        self.define(&b.game, &b.event, b.min_value, b.max_value, b.icon_id, b.value_optional, Some((b.handlers, parsed, bytes)))
     }
 
     pub fn game_event(&mut self, e: GameEvent, now: f64) -> Result<(), String> {
@@ -162,7 +173,8 @@ impl Registry {
                 min: e.saved.min_value,
                 max: e.saved.max_value,
                 frame: e.frame.as_ref(),
-                age: now - e.changed_at,
+                // A value can arrive after the caller read `now`: count it as just arrived.
+                age: (now - e.changed_at).max(0.0),
             };
             for h in &e.handlers {
                 layer.extend(paint(h, &reading));
@@ -214,7 +226,8 @@ impl Registry {
                     .take(MAX_EVENTS)
                     .map(|e| {
                         let handlers = e.handlers.iter().filter_map(|h| Handler::parse(h).ok()).collect();
-                        (e.name.clone(), Event { saved: e, handlers, value: None, frame: None, received: false, changed_at: 0.0 })
+                        let bytes = json_bytes(&e.handlers);
+                        (e.name.clone(), Event { saved: e, handlers, bytes, value: None, frame: None, received: false, changed_at: 0.0 })
                     })
                     .collect();
                 let game = Game {
@@ -230,6 +243,11 @@ impl Registry {
             })
             .collect();
         Registry { games }
+    }
+
+    /// Handler JSON kept across every game.
+    fn handler_bytes(&self) -> usize {
+        self.games.values().flat_map(|g| g.events.values()).map(|e| e.bytes).sum()
     }
 
     fn game_mut(&mut self, game: &str) -> Result<&mut Game, String> {
@@ -264,7 +282,7 @@ impl Registry {
         max: Option<i64>,
         icon: Option<u32>,
         value_optional: bool,
-        handlers: Option<(Vec<Value>, Vec<Handler>)>,
+        handlers: Option<(Vec<Value>, Vec<Handler>, usize)>,
     ) -> Result<(), String> {
         if !valid_name(event) {
             return Err(format!("bad event name {event:?}: use A-Z, 0-9, - and _"));
@@ -280,6 +298,7 @@ impl Registry {
         let e = g.events.entry(event.to_owned()).or_insert_with(|| Event {
             saved: SavedEvent { name: event.to_owned(), min_value: 0, max_value: 100, icon_id: 0, value_optional: false, handlers: Vec::new() },
             handlers: Vec::new(),
+            bytes: 0,
             value: None,
             frame: None,
             received: false,
@@ -289,9 +308,10 @@ impl Registry {
         e.saved.max_value = max;
         e.saved.icon_id = icon.unwrap_or(0);
         e.saved.value_optional = value_optional;
-        if let Some((raw, parsed)) = handlers {
+        if let Some((raw, parsed, bytes)) = handlers {
             e.saved.handlers = raw;
             e.handlers = parsed;
+            e.bytes = bytes;
         }
         Ok(())
     }
@@ -310,11 +330,29 @@ fn apply(game: &mut Game, event: &str, data: crate::proto::EventData, now: f64) 
     if value.is_some() {
         e.value = value;
     }
-    e.frame = data.frame;
+    e.frame = data.frame.map(|f| colours_read(&e.handlers, &f));
     e.received = true;
     game.last_activity = Some(now);
     game.stopped = false;
     Ok(())
+}
+
+/// The frame entries an event's handlers read, each cut down to its colour: a
+/// frame can be as large as the request, and nothing else in it is painted.
+fn colours_read(handlers: &[Handler], frame: &Map<String, Value>) -> Map<String, Value> {
+    handlers
+        .iter()
+        .filter_map(|h| h.context_frame_key.as_ref())
+        .filter_map(|k| {
+            let c = parse_rgb(frame.get(k)?).ok()?;
+            Some((k.clone(), json!({ "red": c.r, "green": c.g, "blue": c.b })))
+        })
+        .collect()
+}
+
+/// Handlers' size as `gamesense.json` holds them.
+fn json_bytes(handlers: &[Value]) -> usize {
+    serde_json::to_vec_pretty(handlers).map_or(0, |v| v.len())
 }
 
 #[cfg(test)]
@@ -381,6 +419,33 @@ mod tests {
     }
 
     #[test]
+    fn handlers_kept_in_all_have_a_size_limit() {
+        // An unsupported handler is kept as sent, so its size is the game's choice.
+        let big = json!([{ "device-type": "tactile", "pattern": vec![0; 8_000] }]);
+        let mut r = Registry::default();
+        let full = (0..MAX_EVENTS)
+            .find(|i| r.bind_event(bind("G", &format!("E{i}"), big.clone())).is_err())
+            .expect("refused before every event is bound");
+        assert!(full > 1 && r.handler_bytes() <= MAX_HANDLER_BYTES, "{full} fit");
+        r.bind_event(bind("G", "E1", big.clone())).expect("a rebind counts its new handlers, not both");
+        r.remove_event("G", "E0").unwrap();
+        r.bind_event(bind("G", &format!("E{full}"), big)).expect("a removed event makes room");
+    }
+
+    #[test]
+    fn a_frame_keeps_only_the_colours_its_handlers_read() {
+        let mut r = Registry::default();
+        r.bind_event(bind("G", "TINT", json!([{ "device-type": "keyboard", "zone": "w", "mode": "context-color",
+            "context-frame-key": "tint" }]))).unwrap();
+        let event = json!({ "game": "G", "event": "TINT", "data": { "value": 1, "frame": {
+            "tint": { "red": 1, "green": 2, "blue": 3, "padding": vec![0; 16] }, "unread": vec![0; 16] } } });
+        r.game_event(serde_json::from_value(event).unwrap(), 0.0).unwrap();
+        assert_eq!(r.paint(0.0).unwrap()[&0x1A], Rgb { r: 1, g: 2, b: 3 });
+        let kept = r.games["G"].events["TINT"].frame.clone().map(Value::Object);
+        assert_eq!(kept, Some(json!({ "tint": { "red": 1, "green": 2, "blue": 3 } })));
+    }
+
+    #[test]
     fn a_game_goes_quiet_after_its_timer_and_heartbeats_keep_it_up() {
         let mut r = with_bar();
         send(&mut r, "G", "HEALTH", 50.0, 0.0).unwrap();
@@ -438,12 +503,31 @@ mod tests {
     }
 
     #[test]
+    fn a_value_newer_than_the_frame_starts_its_flash_lit() {
+        // The keyboard reads the clock before it takes the lock, so a value can land in between.
+        let mut r = Registry::default();
+        r.bind_event(bind("G", "HEALTH", json!([{ "device-type": "keyboard", "zone": "f1",
+            "color": { "red": 255, "green": 0, "blue": 0 }, "rate": { "frequency": 4 } }]))).unwrap();
+        send(&mut r, "G", "HEALTH", 10.0, 1.0).unwrap();
+        assert_eq!(r.paint(0.999).unwrap()[&0x3A], Rgb { r: 255, g: 0, b: 0 });
+    }
+
+    #[test]
     fn a_game_with_only_unsupported_handlers_is_not_an_overlay() {
         let mut r = Registry::default();
         r.bind_event(bind("G", "SCREEN", json!([{ "device-type": "screened", "zone": "one", "mode": "screen" }]))).unwrap();
         send(&mut r, "G", "SCREEN", 1.0, 0.0).unwrap();
         assert_eq!(r.active_game(0.1), Some("G"));
         assert_eq!(r.paint(0.1), None, "an empty layer would take the keyboard for nothing");
+    }
+
+    #[test]
+    fn a_bitmap_handler_does_not_fail_the_rest_of_its_bind() {
+        let mut r = Registry::default();
+        let handlers = json!([{ "device-type": "rgb-per-key-zones", "mode": "bitmap" }, fkeys_bar()[0].clone()]);
+        r.bind_event(bind("G", "HEALTH", handlers)).unwrap();
+        send(&mut r, "G", "HEALTH", 100.0, 0.0).unwrap();
+        assert_eq!(r.paint(0.5).unwrap().len(), 12, "the F-key bar still paints");
     }
 
     #[test]

@@ -52,20 +52,26 @@ gglinux drives PipeWire with its own tools behind a `PwTools` trait (`pw-dump`; 
 command or parses output is pure and unit-tested; a fake `PwTools` tests the orchestration.
 
 - **Enable:** pick the output (saved choice if present, else the current default sink if it is a
-  physical one, else the first physical sink), remember the current default, write the drop-in,
+  physical one — the one WirePlumber plays into while the configured one is away — else the first
+  physical sink), remember the current default, write the drop-in,
   restart PipeWire, wait up to 5 s for the four sinks, make Game the default, apply saved volumes
-  and ChatMix, route all running streams. If the sinks never appear: remove the drop-in, restart
-  again, report the error.
-- **Disable:** remove the drop-in, restart PipeWire, restore the remembered default.
+  and ChatMix, route all running streams. If the sinks never appear, or a step after writing the
+  drop-in fails: remove the drop-in, restart again, report the error.
+- **Disable:** remove the drop-in, restart PipeWire, restore the remembered default if PipeWire has
+  it (one that's away isn't waited for: WirePlumber remembers it and picks it when it returns).
 - **Startup:** if settings say enabled but the drop-in is gone (the user removed it), become
-  disabled; otherwise resume routing and re-apply volumes/ChatMix.
+  disabled; otherwise resume routing and re-apply volumes/ChatMix. If settings say disabled but the
+  drop-in is there (a backup from while Sonar was off was restored, say), remove it, and restart
+  PipeWire if it runs the channels.
 - **Routing:** while enabled, every 1 s read `pw-dump`; each app stream (`Stream/Output/Audio`,
   not one of our outlets) is sent to its channel with `pw-metadata <id> target.object gglinux_<c>`
   once per stream id (again only if its rule changes). Rules map `application.process.binary`
   (case-insensitive) to a channel; unknown apps → Game. Defaults: discord, vesktop, teamspeak,
   ts3client_linux_amd64, mumble → Chat; firefox, chromium, chrome, brave, spotify, mpv, vlc → Media.
 - **Volume:** channel volume = the sink's volume (`wpctl set-volume <sink> v`, 0–1, the same cubic
-  scale the desktop mixer shows); saved and re-applied on enable/startup.
+  scale the desktop mixer shows); saved and re-applied on enable/startup. A change made elsewhere
+  (the desktop mixer, the volume keys, an app) is saved too, so a restart brings back the level the
+  user last had; the same goes for the virtual mic's volume.
 - **ChatMix:** balance −1 (all Game) … 0 (both full) … +1 (all Chat). The favoured side stays at
   full, the other is turned down linearly; applied to the Game and Chat **outlets**, so it
   multiplies with, and never overwrites, the channel volumes.
@@ -75,8 +81,9 @@ command or parses output is pure and unit-tested; a fake `PwTools` tests the orc
 ### Settings
 
 `$XDG_CONFIG_HOME/gglinux/sonar.json`: `enabled`, `output`, `previous_default`, `chatmix`,
-`volumes` (per channel), `rules`. Missing or unreadable → defaults (logged). Written atomically
-(temp file + rename).
+`volumes` (per channel), `rules`. Missing or unreadable → defaults (logged); an unreadable file is
+moved aside to `sonar.json.unreadable-<unix seconds>` first, so saving can't destroy it. Written
+atomically (temp file + rename).
 
 ### Code layout
 

@@ -11,8 +11,9 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use gg_device_mouse::proto::nearest_dpi;
 use gg_device_mouse::{ButtonAction, Mouse, PollingRate, BUTTON_COUNT};
-use gg_ipc::{BatteryState, DpiStage, Event, MouseSettings, MouseState};
+use gg_ipc::{BatteryState, DpiStage, Event, MouseDpi, MouseSettings, MouseState};
 use hidapi::HidApi;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, warn};
@@ -97,6 +98,7 @@ struct State {
 }
 
 fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
+    let hid = gg_hid::lock();
     let api = match HidApi::new() {
         Ok(api) => api,
         Err(e) => {
@@ -104,6 +106,7 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
             return;
         }
     };
+    drop(hid);
     let mut state = State {
         api,
         applied: None,
@@ -165,9 +168,10 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 Ok(())
             });
             if result.is_ok() {
-                let settings = state.applied.get_or_insert_with(default_settings);
-                settings.dpi_stages = stages;
-                settings.active_stage = active;
+                written(&mut state.applied).dpi = Some(MouseDpi {
+                    stages: as_written(&stages),
+                    active,
+                });
             }
             let _ = reply.send(result);
         }
@@ -185,7 +189,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                     })
                 });
             if result.is_ok() {
-                state.applied.get_or_insert_with(default_settings).polling_hz = hz;
+                written(&mut state.applied).polling_hz = Some(hz);
             }
             let _ = reply.send(result);
         }
@@ -205,7 +209,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 })
             });
             if result.is_ok() {
-                state.applied.get_or_insert_with(default_settings).buttons = actions;
+                written(&mut state.applied).buttons = Some(actions);
             }
             let _ = reply.send(result);
         }
@@ -228,10 +232,12 @@ fn with_mouse<T>(
     f: impl FnOnce(&Mouse) -> anyhow::Result<T>,
 ) -> Result<T, String> {
     // Re-enumerate so a mouse plugged in after startup is found.
+    let hid = gg_hid::lock();
     if let Err(e) = state.api.refresh_devices() {
         return Err(format!("could not refresh HID devices: {e}"));
     }
     let mouse = Mouse::open(&state.api).map_err(|e| format!("{e:#}"))?;
+    drop(hid);
     f(&mouse).map_err(|e| format!("{e:#}"))
 }
 
@@ -247,10 +253,13 @@ fn poll_battery(state: &mut State, event_tx: &broadcast::Sender<Event>) {
     // Stamped even if the read below fails, so a disconnected mouse is retried on
     // the normal schedule rather than on every request.
     state.last_poll = Some(Instant::now());
+    let hid = gg_hid::lock();
     if state.api.refresh_devices().is_err() {
         return;
     }
-    let reading = match Mouse::open(&state.api) {
+    let opened = Mouse::open(&state.api);
+    drop(hid);
+    let reading = match opened {
         Ok(mouse) => match mouse.battery() {
             Ok(battery) => battery,
             Err(e) => {
@@ -287,15 +296,52 @@ fn parse_actions(actions: &[String]) -> Result<[ButtonAction; BUTTON_COUNT], Str
     Ok(parsed)
 }
 
-/// Placeholder used when recording the first setting we apply.
+/// The stages as the mouse runs them, which is what gets recorded: the write
+/// clamps and rounds each DPI to a sensor stage, whatever the client sent.
+fn as_written(stages: &[DpiStage]) -> Vec<DpiStage> {
+    stages
+        .iter()
+        .map(|s| DpiStage { x: nearest_dpi(s.x), y: nearest_dpi(s.y) })
+        .collect()
+}
+
+/// The record of what has been written, started empty by the first write.
 ///
-/// The fields describe the mouse's factory defaults, but only the field actually
-/// written is meaningful until its own setter has run — see [`MouseState::applied`].
-fn default_settings() -> MouseSettings {
-    MouseSettings {
-        dpi_stages: Vec::new(),
-        active_stage: 0,
-        polling_hz: 1000,
-        buttons: Vec::new(),
+/// Each setter fills in only its own part. The rest stay `None` until their own
+/// setter runs, since the mouse cannot say what they are — see [`MouseState::applied`].
+fn written(applied: &mut Option<MouseSettings>) -> &mut MouseSettings {
+    applied.get_or_insert_with(MouseSettings::default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_first_write_reports_only_the_part_it_wrote() {
+        // As SetPolling records it on the first write of a session.
+        let mut applied = None;
+        written(&mut applied).polling_hz = Some(500);
+        let json = serde_json::to_value(&applied).unwrap();
+        assert_eq!(json["polling_hz"], 500, "{json}");
+        let claimed: Vec<&String> = json
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(part, value)| *part != "polling_hz" && !value.is_null())
+            .map(|(part, _)| part)
+            .collect();
+        assert!(claimed.is_empty(), "reported as applied but never written: {claimed:?} in {json}");
+    }
+
+    #[test]
+    fn the_dpi_recorded_is_the_dpi_the_mouse_runs() {
+        use gg_device_mouse::tables::{DPI_MAX, DPI_MIN};
+        // As `ggctl mouse dpi 1550,30000:40` sends it, unrounded and out of range.
+        let asked = [DpiStage { x: 1550, y: 1550 }, DpiStage { x: 30000, y: 40 }];
+        assert_eq!(
+            as_written(&asked),
+            [DpiStage { x: 1600, y: 1600 }, DpiStage { x: DPI_MAX, y: DPI_MIN }]
+        );
     }
 }

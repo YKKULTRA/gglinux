@@ -24,6 +24,10 @@ use crate::{config, eq, mic, mix, smart};
 const APPEAR_TIMEOUT: Duration = Duration::from_secs(5);
 const APPEAR_POLL: Duration = Duration::from_millis(250);
 
+/// How far a volume read back from PipeWire may be from the saved one and
+/// still be the same: it comes back cubed and to six decimals.
+const VOLUME_SLACK: f32 = 0.005;
+
 /// Whether PipeWire has all four channel sinks.
 fn channels_up(g: &Graph) -> bool {
     Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some())
@@ -35,12 +39,14 @@ pub struct Sonar<T: PwTools> {
     settings_path: PathBuf,
     dropin_path: PathBuf,
     graph: Graph,
-    /// Where each app stream (by node id) was last sent, so each is routed once.
-    routed: HashMap<u32, Channel>,
+    /// Where each app stream (by node id and serial, since PipeWire reuses
+    /// ids) was last sent, so each is routed once.
+    routed: HashMap<(u32, Option<u64>), Channel>,
     available: bool,
     /// Whether saved volumes and ChatMix have been pushed to the channels
-    /// PipeWire has now. Cleared when they vanish, so a PipeWire restart gglinux
-    /// did not do — a reboot, say — gets the levels back once they reappear.
+    /// PipeWire has now. Cleared when they vanish or PipeWire's cookie
+    /// changes, so a PipeWire restart gglinux did not do — a reboot, say —
+    /// gets the levels back once they reappear.
     levels_applied: bool,
     /// The same for the stream mix, kept apart so a stream that's late or
     /// missing never holds back the channels' own levels.
@@ -52,13 +58,18 @@ pub struct Sonar<T: PwTools> {
     /// from the drop-in whenever they come up, since PipeWire made them from
     /// it; the drop-in only gains the stage just before a restart.
     stage_loaded: bool,
+    /// The cookie of the PipeWire last read. A restart can be over between
+    /// two ticks, so the channels are never seen missing; a new cookie still
+    /// tells.
+    cookie: Option<u64>,
 }
 
 impl<T: PwTools> Sonar<T> {
     /// Load saved settings and look at PipeWire once. If settings say enabled
     /// but the drop-in is gone, the user removed it by hand: become disabled
-    /// rather than put it back. With Sonar on, it also checks that PipeWire
-    /// took Smart Volume's stage.
+    /// rather than put it back. If they say off but the drop-in is there — a
+    /// backup from while Sonar was off was restored, say — take it out. With
+    /// Sonar on, it also checks that PipeWire took Smart Volume's stage.
     pub fn new(tools: T, settings_path: PathBuf, dropin_path: PathBuf) -> Self {
         let settings = settings::load(&settings_path);
         let compressor_seen = tools.smart_volume_supported();
@@ -74,6 +85,7 @@ impl<T: PwTools> Sonar<T> {
             stream_levels_applied: false,
             compressor_seen,
             stage_loaded: false,
+            cookie: None,
         };
         sonar.refresh();
         if sonar.settings.enabled && !sonar.dropin_path.exists() {
@@ -84,6 +96,8 @@ impl<T: PwTools> Sonar<T> {
             sonar.upgrade_dropin();
             sonar.check_stage();
             sonar.keep_levels();
+        } else if sonar.dropin_path.exists() {
+            sonar.remove_stray_dropin();
         }
         sonar
     }
@@ -97,6 +111,7 @@ impl<T: PwTools> Sonar<T> {
         self.refresh();
         if self.settings.enabled {
             self.follow_compressor();
+            self.follow_volumes();
             self.keep_levels();
             self.route();
         }
@@ -202,7 +217,11 @@ impl<T: PwTools> Sonar<T> {
         std::fs::write(&self.dropin_path, text)
             .with_context(|| format!("writing {}", self.dropin_path.display()))?;
         info!(%output, path = %self.dropin_path.display(), "enabling Sonar; restarting PipeWire");
-        self.tools.run(&tools::restart_pipewire())?;
+        if let Err(e) = self.tools.run(&tools::restart_pipewire()) {
+            warn!("could not restart PipeWire; undoing");
+            self.undo_enable();
+            return Err(e);
+        }
 
         let want_mic = mic_input.is_some();
         let all_up = |g: &Graph| channels_up(g) && (!want_mic || g.node(mic::SOURCE).is_some());
@@ -212,11 +231,7 @@ impl<T: PwTools> Sonar<T> {
                 warn!("the Sonar mic did not load; continuing without it");
             } else if !self.drop_refused_stage(&output, mic_input.as_deref()) {
                 warn!("Sonar channels did not appear; undoing");
-                let _ = std::fs::remove_file(&self.dropin_path);
-                let _ = self.tools.run(&tools::restart_pipewire());
-                // Not the stage's fault: turning Sonar on again tries it again.
-                self.settings.smart_volume_refused = false;
-                self.persist();
+                self.undo_enable();
                 bail!(
                     "PipeWire did not create the Sonar channels within {} s, so the change was undone",
                     APPEAR_TIMEOUT.as_secs()
@@ -225,7 +240,11 @@ impl<T: PwTools> Sonar<T> {
             // Otherwise PipeWire refused Smart Volume's stage: the channels run without it.
         }
         self.stage_loaded = self.staged();
-        self.take_defaults()?;
+        if let Err(e) = self.take_defaults() {
+            warn!("could not make the Sonar channels the defaults; undoing");
+            self.undo_enable();
+            return Err(e);
+        }
 
         self.settings.enabled = true;
         self.settings.output = Some(output);
@@ -258,7 +277,12 @@ impl<T: PwTools> Sonar<T> {
         self.routed.clear();
         self.levels_applied = false;
         self.stream_levels_applied = false;
-        let previous = self.settings.previous_default.take();
+        // Only a device PipeWire had before the restart comes back with it: one
+        // that's away isn't waited for. WirePlumber remembers it was chosen and
+        // makes it the default again when it returns.
+        let here = |name: &String| self.graph.node(name).is_some();
+        let previous = self.settings.previous_default.take().filter(here);
+        let previous_source = self.settings.previous_default_source.take().filter(here);
         self.persist();
         if let Some(name) = previous {
             if self.wait_until(|g| g.node(&name).is_some()) {
@@ -269,8 +293,7 @@ impl<T: PwTools> Sonar<T> {
                 warn!(%name, "the previous default output did not come back");
             }
         }
-        if let Some(name) = self.settings.previous_default_source.take() {
-            self.persist();
+        if let Some(name) = previous_source {
             if self.wait_until(|g| g.node(&name).is_some()) {
                 if let Some(node) = self.graph.node(&name) {
                     self.tools.run(&tools::set_default(node.id))?;
@@ -418,6 +441,11 @@ impl<T: PwTools> Sonar<T> {
         std::fs::write(&self.dropin_path, text)
             .with_context(|| format!("writing {}", self.dropin_path.display()))?;
         info!(enabled, "streamer mode changed; restarting PipeWire");
+        // The channels come back with the drop-in's defaults: push it all again,
+        // even if a step below fails and returns early — the next tick does it then.
+        self.levels_applied = false;
+        self.stream_levels_applied = false;
+        self.routed.clear();
         self.tools.run(&tools::restart_pipewire())?;
         let ready = |g: &Graph| channels_up(g) && (!enabled || g.node(config::STREAM_SINK).is_some());
         if !self.wait_until(ready) {
@@ -428,10 +456,7 @@ impl<T: PwTools> Sonar<T> {
             }
         }
         self.take_defaults()?;
-        self.levels_applied = false;
-        self.stream_levels_applied = false;
         self.keep_levels();
-        self.routed.clear();
         self.route();
         Ok(())
     }
@@ -476,6 +501,33 @@ impl<T: PwTools> Sonar<T> {
 
     // --- internals ------------------------------------------------------------
 
+    /// Take back a half-done `enable`: remove the drop-in and restart PipeWire
+    /// without it, so Sonar is wholly off, as its settings say.
+    fn undo_enable(&mut self) {
+        let _ = std::fs::remove_file(&self.dropin_path);
+        let _ = self.tools.run(&tools::restart_pipewire());
+        // Not the stage's fault: turning Sonar on again tries it again.
+        self.settings.smart_volume_refused = false;
+        self.persist();
+    }
+
+    /// Sonar is off but its drop-in is there: remove it, and restart PipeWire
+    /// if it runs the channels, so Sonar is off for real and not just on paper.
+    fn remove_stray_dropin(&mut self) {
+        info!(path = %self.dropin_path.display(), "Sonar is off but its PipeWire drop-in is there; removing it");
+        if let Err(e) = std::fs::remove_file(&self.dropin_path) {
+            warn!(error = %e, "could not remove Sonar's drop-in");
+            return;
+        }
+        if self.graph.nodes.iter().any(|n| config::is_ours(&n.name)) {
+            info!("restarting PipeWire to take the Sonar channels down");
+            match self.tools.run(&tools::restart_pipewire()) {
+                Ok(()) => self.refresh(),
+                Err(e) => warn!(error = %format!("{e:#}"), "could not restart PipeWire"),
+            }
+        }
+    }
+
     /// Make the Game channel the default output and gglinux Mic the default input.
     fn take_defaults(&self) -> Result<()> {
         if let Some(node) = self.graph.node(&config::sink_name(Channel::Game)) {
@@ -488,7 +540,8 @@ impl<T: PwTools> Sonar<T> {
     }
 
     /// The input the mic should read, if the plugins exist: the saved one if it
-    /// is still there, else the default input if it is a real one, else the first.
+    /// is still there, else the default input if it is a real one — the one in
+    /// use while the configured one is away — else the first.
     fn choose_mic(&self) -> Option<String> {
         if !self.tools.mic_plugins_present() {
             return None;
@@ -499,6 +552,7 @@ impl<T: PwTools> Sonar<T> {
             .clone()
             .filter(physical)
             .or_else(|| self.graph.default_source.clone().filter(physical))
+            .or_else(|| self.graph.current_source.clone().filter(physical))
             .or_else(|| self.graph.physical_sources().next().map(|n| n.name.clone()))
     }
 
@@ -568,10 +622,17 @@ impl<T: PwTools> Sonar<T> {
     /// restart PipeWire once so the channels get the current graph.
     fn upgrade_dropin(&mut self) {
         let Some(output) = self.settings.output.clone() else { return };
-        // Plugins installed since Sonar was turned on: give it a mic now.
+        // Plugins installed since Sonar was turned on: give it a mic now, and,
+        // as turning Sonar on does, make it the default input once it's there.
+        let mut new_mic = false;
         if self.settings.mic_input.is_none() {
             self.settings.mic_input = self.choose_mic();
             if self.settings.mic_input.is_some() {
+                new_mic = true;
+                if self.settings.previous_default_source.is_none() {
+                    self.settings.previous_default_source =
+                        self.graph.default_source.clone().filter(|n| !config::is_ours(n));
+                }
                 self.persist();
             }
         }
@@ -584,8 +645,22 @@ impl<T: PwTools> Sonar<T> {
             .map_err(anyhow::Error::from)
             .and_then(|()| self.tools.run(&tools::restart_pipewire()));
         match result {
+            Ok(()) if new_mic => self.take_mic_default(),
             Ok(()) => self.refresh(),
             Err(e) => warn!(error = %format!("{e:#}"), "could not update Sonar's drop-in"),
+        }
+    }
+
+    /// Make gglinux Mic the default input once PipeWire has it.
+    fn take_mic_default(&mut self) {
+        if !self.wait_until(|g| g.node(mic::SOURCE).is_some()) {
+            warn!("the Sonar mic did not appear; the default input stays as it was");
+            return;
+        }
+        if let Some(node) = self.graph.node(mic::SOURCE) {
+            if let Err(e) = self.tools.run(&tools::set_default(node.id)) {
+                warn!(error = %format!("{e:#}"), "could not make gglinux Mic the default input");
+            }
         }
     }
 
@@ -672,6 +747,14 @@ impl<T: PwTools> Sonar<T> {
     fn refresh(&mut self) {
         match self.tools.dump().and_then(|json| Graph::parse(&json)) {
             Ok(graph) => {
+                if graph.cookie.is_some() && graph.cookie != self.cookie {
+                    // A PipeWire started since the last look: it made the channels
+                    // with the drop-in's defaults and knows none of the routes.
+                    self.levels_applied = false;
+                    self.stream_levels_applied = false;
+                    self.routed.clear();
+                    self.cookie = graph.cookie;
+                }
                 self.graph = graph;
                 self.available = true;
             }
@@ -697,7 +780,8 @@ impl<T: PwTools> Sonar<T> {
     }
 
     /// The saved output if it still exists, else the current default if it is a
-    /// real device, else the first real device.
+    /// real device — the one in use while the configured one is away — else
+    /// the first real device.
     fn choose_output(&self) -> Option<String> {
         let physical = |name: &String| self.graph.physical_sinks().any(|n| &n.name == name);
         self.settings
@@ -705,27 +789,58 @@ impl<T: PwTools> Sonar<T> {
             .clone()
             .filter(physical)
             .or_else(|| self.graph.default_sink.clone().filter(physical))
+            .or_else(|| self.graph.current_sink.clone().filter(physical))
             .or_else(|| self.graph.physical_sinks().next().map(|n| n.name.clone()))
     }
 
     /// Send every app stream whose channel changed (or is new) to its channel.
     fn route(&mut self) {
-        let present: Vec<u32> = self.graph.app_streams().map(|s| s.id).collect();
-        self.routed.retain(|id, _| present.contains(id));
-        let moves: Vec<(u32, Channel)> = self
+        let present: Vec<(u32, Option<u64>)> = self.graph.app_streams().map(|s| (s.id, s.serial)).collect();
+        self.routed.retain(|stream, _| present.contains(stream));
+        let moves: Vec<((u32, Option<u64>), Channel)> = self
             .graph
             .app_streams()
-            .map(|s| (s.id, self.settings.rules.channel_for(s.route_key().as_deref())))
-            .filter(|(id, channel)| self.routed.get(id) != Some(channel))
+            .map(|s| ((s.id, s.serial), self.settings.rules.channel_for(s.route_key().as_deref())))
+            .filter(|(stream, channel)| self.routed.get(stream) != Some(channel))
             .collect();
-        for (id, channel) in moves {
+        for ((id, serial), channel) in moves {
             match self.tools.run(&tools::set_target(id, &config::sink_name(channel))) {
                 Ok(()) => {
                     debug!(id, ?channel, "routed app stream");
-                    self.routed.insert(id, channel);
+                    self.routed.insert((id, serial), channel);
                 }
                 Err(e) => warn!(id, error = %format!("{e:#}"), "could not route app stream"),
             }
+        }
+    }
+
+    /// Save the channel and mic volumes PipeWire has, once the saved ones were
+    /// pushed to these channels: the desktop's mixer, the volume keys or an
+    /// app may have changed them since, and the levels pushed after the next
+    /// PipeWire restart should be the ones the user last had.
+    fn follow_volumes(&mut self) {
+        if !self.levels_applied || !channels_up(&self.graph) {
+            return;
+        }
+        let differs = |saved: Option<f32>, now: f32| saved.is_none_or(|s| (s - now).abs() > VOLUME_SLACK);
+        let mut changed = false;
+        for channel in Channel::ALL {
+            let Some(now) = self.graph.node(&config::sink_name(channel)).and_then(|n| n.volume) else { continue };
+            let now = now.clamp(0.0, 1.0);
+            if differs(self.settings.volumes.get(&channel).copied(), now) {
+                self.settings.volumes.insert(channel, now);
+                changed = true;
+            }
+        }
+        if let Some(now) = self.graph.node(mic::SOURCE).and_then(|n| n.volume) {
+            let now = now.clamp(0.0, 1.0);
+            if differs(self.settings.mic_volume, now) {
+                self.settings.mic_volume = Some(now);
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist();
         }
     }
 
@@ -830,8 +945,9 @@ impl<T: PwTools> Sonar<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{dump_with_source, scratch};
+    use crate::testing::{dump_with_source, scratch, Scratch};
     use gg_ipc::{HeadphoneEq, MicSettings, SmartLevel};
+    use serde_json::{json, Value};
     use std::cell::RefCell;
 
     const HEADSET: &str = "alsa_output.usb-SteelSeries_Arctis";
@@ -854,6 +970,19 @@ mod tests {
         refuses_stage: RefCell<bool>,
         /// Off holds the stream mix back while the channels are up.
         stream_comes_up: RefCell<bool>,
+        /// Commands starting with these words fail, after doing what they do.
+        fails: RefCell<&'static [&'static str]>,
+        /// The running PipeWire's `info.cookie`: new at each start.
+        cookie: RefCell<u64>,
+        /// Volumes set since PipeWire started, by node id; the rest are full.
+        volumes: RefCell<HashMap<u32, f32>>,
+        /// `object.serial` by node id, where it isn't the id.
+        serials: RefCell<HashMap<u32, u64>>,
+        /// The default output the user chose; WirePlumber plays into `BT`
+        /// while it's away.
+        configured_sink: &'static str,
+        /// How many times gglinux waited for PipeWire.
+        pauses: RefCell<usize>,
         runs: RefCell<Vec<Vec<String>>>,
     }
 
@@ -869,6 +998,12 @@ mod tests {
                 smart_volume: RefCell::new(true),
                 refuses_stage: RefCell::new(false),
                 stream_comes_up: RefCell::new(true),
+                fails: RefCell::new(&[]),
+                cookie: RefCell::new(1),
+                volumes: RefCell::new(HashMap::new()),
+                serials: RefCell::new(HashMap::new()),
+                configured_sink: BT,
+                pauses: RefCell::new(0),
                 runs: RefCell::new(Vec::new()),
             }
         }
@@ -924,20 +1059,51 @@ mod tests {
             }
             let streams = self.streams.borrow();
             nodes.extend(streams.iter().map(|&(id, bin)| (id, bin, "Stream/Output/Audio", Some(bin))));
-            Ok(dump_with_source(&nodes, BT, Some(MIC)))
+            let dump = dump_with_source(&nodes, self.configured_sink, Some(MIC));
+            let Value::Array(mut objects) = serde_json::from_str(&dump)? else { unreachable!() };
+            for object in objects.iter_mut().filter(|o| o["type"] == "PipeWire:Interface:Metadata") {
+                let in_use = |kind: &str, name: &str| {
+                    json!({ "subject": 0, "key": format!("default.audio.{kind}"), "type": "Spa:String:JSON", "value": { "name": name } })
+                };
+                let entries = object["metadata"].as_array_mut().unwrap();
+                entries.extend([in_use("sink", BT), in_use("source", MIC)]);
+            }
+            for object in objects.iter_mut().filter(|o| o["type"] == "PipeWire:Interface:Node") {
+                let id = object["id"].as_u64().unwrap() as u32;
+                let serial = self.serials.borrow().get(&id).copied().unwrap_or(u64::from(id));
+                object["info"]["props"]["object.serial"] = json!(serial);
+                if let Some(&v) = self.volumes.borrow().get(&id) {
+                    let linear = f64::from(v).powi(3);
+                    object["info"]["params"]["Props"][0]["channelVolumes"] = json!([linear, linear]);
+                }
+            }
+            let core = json!({ "id": 0, "type": "PipeWire:Interface:Core", "info": { "cookie": *self.cookie.borrow() } });
+            objects.insert(0, core);
+            Ok(Value::Array(objects).to_string())
         }
 
         fn run(&self, argv: &[String]) -> Result<()> {
+            if argv[..2] == ["wpctl", "set-volume"] {
+                self.volumes.borrow_mut().insert(argv[2].parse().unwrap(), argv[3].parse().unwrap());
+            }
             if argv[0] == "systemctl" {
+                *self.cookie.borrow_mut() += 1;
+                self.volumes.borrow_mut().clear();
                 let refused = *self.refuses_stage.borrow()
                     && std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("sv_comp"));
                 *self.up.borrow_mut() = self.channels_come_up && self.dropin.exists() && !refused;
             }
             self.runs.borrow_mut().push(argv.to_vec());
+            let fails = *self.fails.borrow();
+            if !fails.is_empty() && argv.len() >= fails.len() && argv.iter().zip(fails).all(|(a, f)| a == f) {
+                bail!("`{}` failed", argv.join(" "));
+            }
             Ok(())
         }
 
-        fn pause(&self, _: Duration) {}
+        fn pause(&self, _: Duration) {
+            *self.pauses.borrow_mut() += 1;
+        }
 
         fn mic_plugins_present(&self) -> bool {
             self.mic_plugins
@@ -948,16 +1114,18 @@ mod tests {
         }
     }
 
-    fn paths(name: &str) -> (PathBuf, PathBuf) {
+    /// One test's settings and drop-in paths, in a directory removed when the guard goes.
+    fn paths(name: &str) -> (Scratch, PathBuf, PathBuf) {
         let dir = scratch(name);
-        (dir.join("sonar.json"), dir.join("pipewire.conf.d").join(config::FILE_NAME))
+        let (settings, dropin) = (dir.join("sonar.json"), dir.join("pipewire.conf.d").join(config::FILE_NAME));
+        (dir, settings, dropin)
     }
 
     const APPS: &[(u32, &str)] = &[(40, "Discord"), (41, "firefox"), (42, "game.bin")];
 
     #[test]
     fn enable_writes_the_dropin_restarts_and_makes_game_default() {
-        let (settings_path, dropin) = paths("enable");
+        let (_dir, settings_path, dropin) = paths("enable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
@@ -978,7 +1146,7 @@ mod tests {
 
     #[test]
     fn enable_rolls_back_when_the_channels_never_appear() {
-        let (settings_path, dropin) = paths("rollback");
+        let (_dir, settings_path, dropin) = paths("rollback");
         let mut fake = Fake::new(dropin.clone(), APPS);
         fake.channels_come_up = false;
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
@@ -990,8 +1158,25 @@ mod tests {
     }
 
     #[test]
+    fn enable_undoes_itself_when_a_later_step_fails() {
+        let (_dir, settings_path, dropin) = paths("enable-fails");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        *fake.fails.borrow_mut() = &["wpctl", "set-default"];
+        assert!(sonar.enable().is_err());
+        assert!(!dropin.exists(), "the drop-in is removed again");
+        assert!(sonar.state().channels.iter().all(|c| !c.present), "and the channels are gone");
+        // systemctl reports a failure though PipeWire did restart (no pipewire-pulse, say).
+        *fake.fails.borrow_mut() = &["systemctl"];
+        assert!(sonar.enable().is_err());
+        assert!(!dropin.exists());
+        assert!(sonar.state().channels.iter().all(|c| !c.present));
+        assert!(!settings::load(&settings_path).enabled);
+    }
+
+    #[test]
     fn streams_are_routed_once() {
-        let (settings_path, dropin) = paths("once");
+        let (_dir, settings_path, dropin) = paths("once");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1005,8 +1190,24 @@ mod tests {
     }
 
     #[test]
+    fn a_new_stream_under_a_reused_id_is_routed() {
+        let (_dir, settings_path, dropin) = paths("reused-id");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.tick();
+        fake.runs.borrow_mut().clear();
+        // Within one tick Firefox's stream closes and mpv's opens, and PipeWire hands it the same id.
+        fake.streams.borrow_mut().retain(|&(id, _)| id != 41);
+        fake.streams.borrow_mut().push((41, "mpv"));
+        fake.serials.borrow_mut().insert(41, 5152);
+        sonar.tick();
+        assert!(fake.ran(&["pw-metadata", "41", "target.object", "gglinux_media"]));
+    }
+
+    #[test]
     fn outlets_are_never_routed() {
-        let (settings_path, dropin) = paths("outlets");
+        let (_dir, settings_path, dropin) = paths("outlets");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1021,7 +1222,7 @@ mod tests {
 
     #[test]
     fn changing_an_apps_channel_moves_it_now_and_is_remembered() {
-        let (settings_path, dropin) = paths("move");
+        let (_dir, settings_path, dropin) = paths("move");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1032,7 +1233,7 @@ mod tests {
 
     #[test]
     fn chatmix_turns_down_the_other_side() {
-        let (settings_path, dropin) = paths("chatmix");
+        let (_dir, settings_path, dropin) = paths("chatmix");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1043,7 +1244,7 @@ mod tests {
 
     #[test]
     fn volume_is_saved_and_applied_to_the_channel_sink() {
-        let (settings_path, dropin) = paths("volume");
+        let (_dir, settings_path, dropin) = paths("volume");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1054,7 +1255,7 @@ mod tests {
 
     #[test]
     fn output_change_retargets_outlets_without_a_restart() {
-        let (settings_path, dropin) = paths("output");
+        let (_dir, settings_path, dropin) = paths("output");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
@@ -1070,7 +1271,7 @@ mod tests {
 
     #[test]
     fn disable_removes_the_dropin_and_restores_the_default() {
-        let (settings_path, dropin) = paths("disable");
+        let (_dir, settings_path, dropin) = paths("disable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
@@ -1082,8 +1283,24 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_default_output_gives_way_to_the_one_in_use() {
+        let (_dir, settings_path, dropin) = paths("default-away");
+        let mut fake = Fake::new(dropin.clone(), APPS);
+        // The user's default is Bluetooth headphones that are off; WirePlumber plays into BT meanwhile.
+        fake.configured_sink = "bluez_output.away";
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        sonar.enable().unwrap();
+        let saved = settings::load(&settings_path);
+        assert_eq!(saved.output.as_deref(), Some(BT), "the channels play where the user hears audio now");
+        assert_eq!(saved.previous_default.as_deref(), Some("bluez_output.away"), "still the default to give back");
+        let waits = *fake.pauses.borrow();
+        sonar.disable().unwrap();
+        assert_eq!(*fake.pauses.borrow(), waits, "no waiting for a device that isn't there");
+    }
+
+    #[test]
     fn a_removed_dropin_means_sonar_is_off() {
-        let (settings_path, dropin) = paths("removed");
+        let (_dir, settings_path, dropin) = paths("removed");
         let saved = Settings { enabled: true, ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
@@ -1094,8 +1311,25 @@ mod tests {
     }
 
     #[test]
+    fn a_dropin_left_while_sonar_is_off_is_taken_out_on_startup() {
+        let (_dir, settings_path, dropin) = paths("off-with-dropin");
+        // A backup from before Sonar was on was restored over its settings.
+        settings::save(&settings_path, &Settings::default()).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, true).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.up.borrow_mut() = true; // PipeWire runs the drop-in
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        assert!(!sonar.is_enabled());
+        assert!(!dropin.exists());
+        assert_eq!(fake.count("systemctl"), 1, "one restart takes the channels down");
+        assert!(sonar.state().channels.iter().all(|c| !c.present));
+        assert!(!settings::load(&settings_path).enabled);
+    }
+
+    #[test]
     fn levels_are_restored_when_the_channels_come_back() {
-        let (settings_path, dropin) = paths("comeback");
+        let (_dir, settings_path, dropin) = paths("comeback");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1113,8 +1347,53 @@ mod tests {
     }
 
     #[test]
+    fn a_pipewire_restart_between_two_ticks_gets_everything_back() {
+        let (_dir, settings_path, dropin) = paths("restart-unseen");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_chatmix(0.5).unwrap();
+        sonar.tick();
+        fake.runs.borrow_mut().clear();
+        // PipeWire restarted by something else, so quickly that no tick saw the channels gone.
+        *fake.cookie.borrow_mut() += 1;
+        sonar.tick();
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
+        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "the apps routed again");
+        fake.runs.borrow_mut().clear();
+        sonar.tick();
+        assert!(fake.runs.borrow().is_empty(), "and only once");
+    }
+
+    #[test]
+    fn a_volume_changed_elsewhere_is_the_one_brought_back() {
+        let (_dir, settings_path, dropin) = paths("volume-elsewhere");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        sonar.enable().unwrap();
+        sonar.set_volume(Channel::Game, 0.9).unwrap();
+        sonar.set_mic_volume(0.8).unwrap();
+        sonar.tick();
+        assert_eq!(settings::load(&settings_path).volumes.get(&Channel::Game), Some(&0.9), "the slider's level stands");
+        // The volume keys turn Game down, and an app's AGC the mic.
+        fake.volumes.borrow_mut().extend([(20, 0.15), (24, 0.5)]);
+        sonar.tick();
+        // PipeWire restarts: the channels come back at full volume.
+        fake.volumes.borrow_mut().clear();
+        *fake.cookie.borrow_mut() += 1;
+        fake.runs.borrow_mut().clear();
+        sonar.tick();
+        assert!(fake.ran(&["wpctl", "set-volume", "20", "0.150"]), "Game as the user left it");
+        assert!(fake.ran(&["wpctl", "set-volume", "24", "0.500"]), "and the mic");
+        let saved = settings::load(&settings_path);
+        assert!((saved.volumes[&Channel::Game] - 0.15).abs() < 1e-3, "{saved:?}");
+        assert!(saved.mic_volume.is_some_and(|v| (v - 0.5).abs() < 1e-3), "{saved:?}");
+    }
+
+    #[test]
     fn state_lists_outputs_channels_and_apps() {
-        let (settings_path, dropin) = paths("state");
+        let (_dir, settings_path, dropin) = paths("state");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1135,7 +1414,7 @@ mod tests {
 
     #[test]
     fn enable_sets_every_channels_chain() {
-        let (settings_path, dropin) = paths("eq-enable");
+        let (_dir, settings_path, dropin) = paths("eq-enable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1147,7 +1426,7 @@ mod tests {
 
     #[test]
     fn channel_eq_is_validated_saved_and_set_live() {
-        let (settings_path, dropin) = paths("eq-channel");
+        let (_dir, settings_path, dropin) = paths("eq-channel");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1166,7 +1445,7 @@ mod tests {
 
     #[test]
     fn headphone_eq_reaches_every_channel() {
-        let (settings_path, dropin) = paths("eq-headphone");
+        let (_dir, settings_path, dropin) = paths("eq-headphone");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1178,7 +1457,7 @@ mod tests {
 
     #[test]
     fn autoeq_import_names_the_correction() {
-        let (settings_path, dropin) = paths("eq-import");
+        let (_dir, settings_path, dropin) = paths("eq-import");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1193,7 +1472,7 @@ mod tests {
 
     #[test]
     fn an_outdated_dropin_is_rewritten_with_one_restart() {
-        let (settings_path, dropin) = paths("upgrade");
+        let (_dir, settings_path, dropin) = paths("upgrade");
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1207,7 +1486,7 @@ mod tests {
 
     #[test]
     fn a_current_dropin_is_left_alone() {
-        let (settings_path, dropin) = paths("current");
+        let (_dir, settings_path, dropin) = paths("current");
         let saved = Settings {
             enabled: true,
             output: Some(BT.into()),
@@ -1225,7 +1504,7 @@ mod tests {
 
     #[test]
     fn enable_installs_the_mic_and_makes_it_the_default_input() {
-        let (settings_path, dropin) = paths("mic-enable");
+        let (_dir, settings_path, dropin) = paths("mic-enable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
@@ -1242,7 +1521,7 @@ mod tests {
 
     #[test]
     fn without_mic_plugins_the_channels_still_work() {
-        let (settings_path, dropin) = paths("mic-none");
+        let (_dir, settings_path, dropin) = paths("mic-none");
         let mut fake = Fake::new(dropin.clone(), APPS);
         fake.mic_plugins = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
@@ -1255,7 +1534,7 @@ mod tests {
 
     #[test]
     fn channels_up_without_the_mic_keeps_sonar_on() {
-        let (settings_path, dropin) = paths("mic-failed");
+        let (_dir, settings_path, dropin) = paths("mic-failed");
         let mut fake = Fake::new(dropin.clone(), APPS);
         fake.mic_comes_up = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
@@ -1267,7 +1546,7 @@ mod tests {
 
     #[test]
     fn mic_settings_are_validated_saved_and_set_live() {
-        let (settings_path, dropin) = paths("mic-settings");
+        let (_dir, settings_path, dropin) = paths("mic-settings");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1283,7 +1562,7 @@ mod tests {
 
     #[test]
     fn mic_volume_goes_to_the_virtual_source() {
-        let (settings_path, dropin) = paths("mic-volume");
+        let (_dir, settings_path, dropin) = paths("mic-volume");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1293,7 +1572,7 @@ mod tests {
 
     #[test]
     fn disable_restores_the_default_input() {
-        let (settings_path, dropin) = paths("mic-disable");
+        let (_dir, settings_path, dropin) = paths("mic-disable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1303,7 +1582,7 @@ mod tests {
 
     #[test]
     fn plugins_installed_later_add_the_mic_on_startup() {
-        let (settings_path, dropin) = paths("mic-later");
+        let (_dir, settings_path, dropin) = paths("mic-later");
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1316,8 +1595,25 @@ mod tests {
     }
 
     #[test]
+    fn a_mic_added_on_startup_becomes_the_default_input() {
+        let (_dir, settings_path, dropin) = paths("mic-later-default");
+        // Sonar was turned on without the plugins, by a gglinux that had no mic to remember inputs for.
+        let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, None, false, true).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.up.borrow_mut() = true; // PipeWire runs the drop-in without the mic
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        assert!(fake.ran(&["wpctl", "set-default", "24"]), "gglinux Mic becomes the default input");
+        assert_eq!(settings::load(&settings_path).previous_default_source.as_deref(), Some(MIC));
+        sonar.disable().unwrap();
+        assert!(fake.ran(&["wpctl", "set-default", "12"]), "the physical mic is given back with Sonar off");
+    }
+
+    #[test]
     fn streamer_while_sonar_is_off_only_saves() {
-        let (settings_path, dropin) = paths("streamer-off");
+        let (_dir, settings_path, dropin) = paths("streamer-off");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.set_streamer(true).unwrap();
@@ -1329,7 +1625,7 @@ mod tests {
 
     #[test]
     fn streamer_on_with_sonar_on_rewrites_restarts_and_sets_levels() {
-        let (settings_path, dropin) = paths("streamer-on");
+        let (_dir, settings_path, dropin) = paths("streamer-on");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
@@ -1349,7 +1645,7 @@ mod tests {
 
     #[test]
     fn stream_volumes_go_to_the_feed_nodes() {
-        let (settings_path, dropin) = paths("stream-volumes");
+        let (_dir, settings_path, dropin) = paths("stream-volumes");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1363,7 +1659,7 @@ mod tests {
 
     #[test]
     fn routing_ignores_the_stream_feeds() {
-        let (settings_path, dropin) = paths("stream-routing");
+        let (_dir, settings_path, dropin) = paths("stream-routing");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1379,7 +1675,7 @@ mod tests {
 
     #[test]
     fn stream_levels_come_back_after_a_restart() {
-        let (settings_path, dropin) = paths("stream-restart");
+        let (_dir, settings_path, dropin) = paths("stream-restart");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1399,7 +1695,7 @@ mod tests {
 
     #[test]
     fn a_missing_stream_mix_leaves_the_channels_their_levels() {
-        let (settings_path, dropin) = paths("stream-missing");
+        let (_dir, settings_path, dropin) = paths("stream-missing");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin);
         sonar.enable().unwrap();
@@ -1423,8 +1719,26 @@ mod tests {
     }
 
     #[test]
+    fn a_streamer_switch_that_fails_after_the_restart_still_gets_the_levels_back() {
+        let (_dir, settings_path, dropin) = paths("streamer-fails");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin);
+        sonar.enable().unwrap();
+        sonar.set_chatmix(0.5).unwrap();
+        // PipeWire restarts with the new drop-in, then the defaults can't be set.
+        *fake.fails.borrow_mut() = &["wpctl", "set-default"];
+        assert!(sonar.set_streamer(true).is_err());
+        *fake.fails.borrow_mut() = &[];
+        fake.runs.borrow_mut().clear();
+        sonar.tick();
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ");
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "ChatMix");
+        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "the apps routed again");
+    }
+
+    #[test]
     fn enable_sets_every_channels_smart_volume() {
-        let (settings_path, dropin) = paths("smart-enable");
+        let (_dir, settings_path, dropin) = paths("smart-enable");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
@@ -1437,7 +1751,7 @@ mod tests {
 
     #[test]
     fn smart_volume_switches_live_without_a_restart() {
-        let (settings_path, dropin) = paths("smart-live");
+        let (_dir, settings_path, dropin) = paths("smart-live");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
         sonar.enable().unwrap();
@@ -1457,7 +1771,7 @@ mod tests {
 
     #[test]
     fn without_the_compressor_the_channels_are_as_before() {
-        let (settings_path, dropin) = paths("smart-none");
+        let (_dir, settings_path, dropin) = paths("smart-none");
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.smart_volume.borrow_mut() = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
@@ -1476,7 +1790,7 @@ mod tests {
 
     #[test]
     fn a_compressor_that_disappears_takes_the_stage_out_on_startup() {
-        let (settings_path, dropin) = paths("smart-gone");
+        let (_dir, settings_path, dropin) = paths("smart-gone");
         let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1490,7 +1804,7 @@ mod tests {
 
     #[test]
     fn a_compressor_that_appears_adds_the_stage_on_startup() {
-        let (settings_path, dropin) = paths("smart-new");
+        let (_dir, settings_path, dropin) = paths("smart-new");
         let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1504,7 +1818,7 @@ mod tests {
 
     #[test]
     fn a_refused_stage_is_taken_out_when_sonar_turns_on() {
-        let (settings_path, dropin) = paths("smart-refused");
+        let (_dir, settings_path, dropin) = paths("smart-refused");
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.refuses_stage.borrow_mut() = true;
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
@@ -1523,7 +1837,7 @@ mod tests {
 
     #[test]
     fn a_refused_stage_is_taken_out_on_startup() {
-        let (settings_path, dropin) = paths("smart-refused-upgrade");
+        let (_dir, settings_path, dropin) = paths("smart-refused-upgrade");
         let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1542,7 +1856,7 @@ mod tests {
 
     #[test]
     fn a_stage_refused_at_login_is_taken_out_on_startup() {
-        let (settings_path, dropin) = paths("smart-refused-login");
+        let (_dir, settings_path, dropin) = paths("smart-refused-login");
         let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
@@ -1558,7 +1872,7 @@ mod tests {
 
     #[test]
     fn a_stage_refused_after_a_streamer_restart_is_taken_out() {
-        let (settings_path, dropin) = paths("smart-refused-streamer");
+        let (_dir, settings_path, dropin) = paths("smart-refused-streamer");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         sonar.enable().unwrap();
@@ -1571,7 +1885,7 @@ mod tests {
 
     #[test]
     fn a_compressor_removed_while_sonar_runs_leaves_the_dropin_at_once() {
-        let (settings_path, dropin) = paths("smart-removed");
+        let (_dir, settings_path, dropin) = paths("smart-removed");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();
@@ -1590,7 +1904,7 @@ mod tests {
 
     #[test]
     fn a_compressor_installed_while_sonar_runs_waits_for_sonar_off_and_on() {
-        let (settings_path, dropin) = paths("smart-installed");
+        let (_dir, settings_path, dropin) = paths("smart-installed");
         let fake = Fake::new(dropin.clone(), APPS);
         *fake.smart_volume.borrow_mut() = false;
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
@@ -1617,7 +1931,7 @@ mod tests {
 
     #[test]
     fn a_compressor_removed_before_a_pipewire_restart_brings_the_channels_back() {
-        let (settings_path, dropin) = paths("smart-removed-restart");
+        let (_dir, settings_path, dropin) = paths("smart-removed-restart");
         let fake = Fake::new(dropin.clone(), APPS);
         let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
         sonar.enable().unwrap();

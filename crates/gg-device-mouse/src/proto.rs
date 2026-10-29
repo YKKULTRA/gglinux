@@ -30,13 +30,19 @@ const BTN_DPI_SWITCH: u8 = 0x30;
 const BTN_SCROLL_UP: u8 = 0x31;
 const BTN_SCROLL_DOWN: u8 = 0x32;
 
-/// Map a DPI to its TrueMove Air code, rounding to the nearest supported stage.
-pub fn dpi_code(dpi: u16) -> u8 {
+/// The DPI the sensor runs for a requested one: clamped to its range and rounded
+/// to the nearest supported stage. This is what [`dpi_code`] encodes.
+pub fn nearest_dpi(dpi: u16) -> u16 {
     let clamped = dpi.clamp(DPI_MIN, DPI_MAX) as u32;
     let step = DPI_STEP as u32;
-    // Round to nearest stage, then index (stage 1 == DPI_MIN == index 0).
     let stage = ((clamped + step / 2) / step).max(1);
-    TRUEMOVE_AIR[(stage - 1) as usize]
+    (stage * step) as u16
+}
+
+/// Map a DPI to its TrueMove Air code, rounding to the nearest supported stage.
+pub fn dpi_code(dpi: u16) -> u8 {
+    // Stage 1 == DPI_MIN == index 0.
+    TRUEMOVE_AIR[(nearest_dpi(dpi) / DPI_STEP - 1) as usize]
 }
 
 /// One DPI stage. X and Y can differ.
@@ -293,6 +299,17 @@ mod tests {
         assert_eq!(dpi_code(1610), dpi_code(1600));
         // The sensor skips codes, so neighbouring stages must stay distinct.
         assert_ne!(dpi_code(1300), dpi_code(1400));
+    }
+
+    #[test]
+    fn nearest_dpi_is_the_stage_dpi_code_writes() {
+        assert_eq!(nearest_dpi(1549), 1500);
+        assert_eq!(nearest_dpi(1550), 1600);
+        assert_eq!(nearest_dpi(0), DPI_MIN);
+        assert_eq!(nearest_dpi(u16::MAX), DPI_MAX);
+        for dpi in [0, 50, 149, 150, 1550, 17951, 18049, 30000, u16::MAX] {
+            assert_eq!(dpi_code(nearest_dpi(dpi)), dpi_code(dpi), "{dpi}");
+        }
     }
 
     #[test]

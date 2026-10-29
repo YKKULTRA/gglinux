@@ -48,10 +48,16 @@ From PROTOCOLS.md §5, plus the gpu-screen-recorder docs:
 
 **The recorder** (daemon `clips.rs`, a tokio task):
 - **Command line:** a pure `argv(&settings, dir)`, so it can be tested.
+- **Desktop audio:** `-a default_output`. With Sonar on, the default output is the Game channel
+  alone, so it's `-a device:<node.name>.monitor` for the output Sonar's channels play into, whose
+  monitor carries every channel. Sonar's worker says when that changes (Sonar turned on or off, or
+  another output chosen), and a recorder taking desktop audio starts again there.
 - **Starting:** while enabled and the program is found on `PATH`, it runs the recorder as a child
-  process, creating `dir` if needed.
+  process, creating `dir` if needed. While enabled without the program, it looks for it every 5 s,
+  so clips start once it's installed.
 - **Crashes:** a child that exits on its own is restarted after 5 s, doubling to at most 60 s. A
-  child that has run for 60 s resets the delay.
+  child that has run for 60 s resets the delay. A start that fails (`dir` can't be created yet, the
+  program can't be run) is retried on the same backoff.
 - **Settings changes:** stop with `SIGINT` (waiting up to 3 s, then `kill`), then start again with
   the new flags.
 - **Save:** `SIGUSR1` to the child. After 1.5 s the clip list is re-read, and the new file is
@@ -69,12 +75,13 @@ From PROTOCOLS.md §5, plus the gpu-screen-recorder docs:
 - While clips are enabled, it binds a GlobalShortcuts portal session with the shortcut
   `save-clip` ("Save the last clip"), preferred trigger `ALT+S`.
 - Each activation saves. The trigger KDE reports is shown in the UI.
-- Failures (no portal, the owner declined) are logged once and shown as "no hotkey; use the button
-  or `ggctl clip save`".
+- Failures (no portal, the owner declined, a shortcut KDE bound with no key because Alt+S was taken
+  or cleared) are logged once and shown as "no hotkey; use the button or `ggctl clip save`", in
+  place of the hotkey (`hotkey_error`: apart from `error`, which each recorder start clears).
 
 **IPC:**
 - `ClipInfo { name, bytes, modified }`;
-- `ClipsState { available, enabled, recording, settings, dir, clips, error: Option<String>, hotkey: Option<String> }`;
+- `ClipsState { available, enabled, recording, settings, dir, clips, error: Option<String>, hotkey: Option<String>, hotkey_error: Option<String> }`;
 - requests: `get_clips_state`, `set_clips_settings { settings }`, `save_clip`,
   `delete_clip { name }`;
 - event: `clips_changed { state }`.

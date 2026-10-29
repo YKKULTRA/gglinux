@@ -3,8 +3,10 @@
 //! Everything sent is framed by [`proto`], which only frames opcodes on its
 //! allowlist, and checked against it once more at the write.
 
+use std::ffi::CString;
+
 use anyhow::{anyhow, Context, Result};
-use hidapi::{HidApi, HidDevice};
+use hidapi::{DeviceInfo, HidApi, HidDevice};
 use tracing::debug;
 
 pub mod keys;
@@ -24,6 +26,16 @@ const READ_TIMEOUT_MS: i32 = 200;
 
 pub struct Keyboard {
     device: HidDevice,
+    /// The lighting interface's node, to tell whether it's still there.
+    path: CString,
+}
+
+/// Whether `d` is an Apex Pro TKL Gen 3's lighting interface.
+fn is_lighting(d: &DeviceInfo) -> bool {
+    d.vendor_id() == VENDOR_ID
+        && d.product_id() == PRODUCT_ID
+        && d.interface_number() == CONTROL_INTERFACE
+        && d.usage_page() == VENDOR_USAGE_PAGE
 }
 
 impl Keyboard {
@@ -31,19 +43,20 @@ impl Keyboard {
     pub fn open(api: &HidApi) -> Result<Self> {
         let path = api
             .device_list()
-            .find(|d| {
-                d.vendor_id() == VENDOR_ID
-                    && d.product_id() == PRODUCT_ID
-                    && d.interface_number() == CONTROL_INTERFACE
-                    && d.usage_page() == VENDOR_USAGE_PAGE
-            })
+            .find(|d| is_lighting(d))
             .map(|d| d.path().to_owned())
             .ok_or_else(|| anyhow!("Apex Pro TKL Gen 3 lighting interface not found — is it plugged in?"))?;
         let device = api
             .open_path(&path)
             .with_context(|| format!("opening {}", path.to_string_lossy()))?;
         debug!(path = %path.to_string_lossy(), "opened keyboard lighting interface");
-        Ok(Self { device })
+        Ok(Self { device, path })
+    }
+
+    /// Whether `api`'s device list, as last refreshed, still has this
+    /// keyboard's lighting interface.
+    pub fn is_listed(&self, api: &HidApi) -> bool {
+        api.device_list().any(|d| is_lighting(d) && d.path() == self.path.as_c_str())
     }
 
     /// Take over the lighting; send before the first frame.
