@@ -1,6 +1,7 @@
 //! Lighting profiles, and rules that switch to one while a game runs. A tokio
 //! task scans running programs every 2 s and talks to the keyboard worker —
-//! through [`LightingPort`], so the switching is testable without it.
+//! through [`LightingPort`], so the switching is testable without it. The game
+//! it finds is also published for games-only clips.
 
 mod procs;
 mod store;
@@ -11,7 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gg_ipc::{Event, GameRule, Lighting, ProfilesState};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 use crate::keyboard::{self, Command as KeyboardCommand};
@@ -65,17 +66,34 @@ pub struct Controller<P> {
     /// The rule applied now, and the lighting to go back to.
     active: Option<GameRule>,
     before: Option<Lighting>,
+    /// The game from the rules that's running now, for games-only clips.
+    game_tx: watch::Sender<Option<String>>,
     published: Option<ProfilesState>,
 }
 
 impl<P: LightingPort> Controller<P> {
-    pub fn new(store: Store, path: PathBuf, port: P, event_tx: broadcast::Sender<Event>) -> Self {
-        Controller { store, path, port, event_tx, active: None, before: None, published: None }
+    pub fn new(
+        store: Store,
+        path: PathBuf,
+        port: P,
+        event_tx: broadcast::Sender<Event>,
+        game_tx: watch::Sender<Option<String>>,
+    ) -> Self {
+        Controller { store, path, port, event_tx, active: None, before: None, game_tx, published: None }
     }
 
     /// Apply or undo game rules for what's running (lower-cased names).
     pub async fn follow(&mut self, running: &HashSet<String>) {
         let picked = pick(&self.store, running).cloned();
+        // Before the lighting, which can fail: clips follow the game regardless.
+        let game = picked.as_ref().map(|r| r.process.clone());
+        self.game_tx.send_if_modified(|now| {
+            if *now == game {
+                return false;
+            }
+            *now = game;
+            true
+        });
         match decide(self.active.as_ref(), picked.as_ref()) {
             Action::Stay => {}
             Action::Apply(rule) => {
@@ -171,10 +189,14 @@ impl<P: LightingPort> Controller<P> {
     }
 }
 
-pub fn spawn(event_tx: broadcast::Sender<Event>, keyboard: keyboard::Handle) -> Handle {
+pub fn spawn(
+    event_tx: broadcast::Sender<Event>,
+    keyboard: keyboard::Handle,
+    game_tx: watch::Sender<Option<String>>,
+) -> Handle {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let path = gg_ipc::config_dir().join("profiles.json");
-    let mut c = Controller::new(store::load(&path), path, keyboard, event_tx);
+    let mut c = Controller::new(store::load(&path), path, keyboard, event_tx, game_tx);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(SCAN_EVERY);
         loop {
@@ -184,7 +206,7 @@ pub fn spawn(event_tx: broadcast::Sender<Event>, keyboard: keyboard::Handle) -> 
                     None => break,
                 },
                 _ = tick.tick() => {
-                    if c.store.rules.is_empty() && c.active.is_none() {
+                    if c.store.rules.is_empty() && c.active.is_none() && c.game_tx.borrow().is_none() {
                         continue; // nothing to watch for
                     }
                     let names = tokio::task::spawn_blocking(|| procs::running(std::path::Path::new("/proc"), unsafe { libc::getuid() }))
@@ -234,11 +256,23 @@ mod tests {
         ]).unwrap();
         let path = std::env::temp_dir().join(format!("gglinux-ctl-{}-{:?}.json", std::process::id(), std::thread::current().id()));
         let (event_tx, _) = broadcast::channel(8);
-        (Controller::new(store, path, FakePort(Arc::clone(&now)), event_tx), now)
+        (Controller::new(store, path, FakePort(Arc::clone(&now)), event_tx, watch::channel(None).0), now)
     }
 
     fn running(names: &[&str]) -> HashSet<String> {
         names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// A keyboard that isn't there.
+    struct NoKeyboard;
+
+    impl LightingPort for NoKeyboard {
+        async fn get(&self) -> Result<Lighting, String> {
+            Err("no keyboard".into())
+        }
+        async fn set(&self, _: Lighting) -> Result<(), String> {
+            Err("no keyboard".into())
+        }
     }
 
     #[tokio::test]
@@ -281,6 +315,19 @@ mod tests {
         c.follow(&running(&[])).await;
         assert_eq!(*now.lock().unwrap(), look(1.0));
         assert!(c.apply("Nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_running_game_is_shared_even_without_a_keyboard() {
+        let (with_keyboard, _now) = controller();
+        let (event_tx, _) = broadcast::channel(8);
+        let (game_tx, game) = watch::channel(None);
+        let mut c = Controller::new(with_keyboard.store, with_keyboard.path, NoKeyboard, event_tx, game_tx);
+        c.follow(&running(&["game-b"])).await;
+        assert_eq!(game.borrow().as_deref(), Some("game-b"), "clips hear of the game");
+        assert!(c.active.is_none(), "though no lighting was applied");
+        c.follow(&running(&[])).await;
+        assert_eq!(*game.borrow(), None);
     }
 
     #[tokio::test]

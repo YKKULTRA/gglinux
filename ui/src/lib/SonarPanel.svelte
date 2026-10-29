@@ -4,13 +4,18 @@
 
   import EqEditor from "./EqEditor.svelte";
   import { daemon } from "./daemon.svelte";
-  import type { Channel, EqBand, MicSettings } from "./types";
+  import type { Channel, EqBand, MicSettings, SmartLevel } from "./types";
 
   const CHANNELS: { value: Channel; label: string }[] = [
     { value: "game", label: "Game" },
     { value: "chat", label: "Chat" },
     { value: "media", label: "Media" },
     { value: "aux", label: "Aux" },
+  ];
+  const LEVELS: { value: SmartLevel; label: string }[] = [
+    { value: "quiet", label: "Quiet" },
+    { value: "balanced", label: "Balanced" },
+    { value: "loud", label: "Loud" },
   ];
   const label = (c: Channel) => CHANNELS.find((x) => x.value === c)?.label ?? c;
 
@@ -143,6 +148,44 @@
             <span class="unit">{c.present ? pct(c.volume) : "missing"}</span>
           </div>
         {/each}
+      </section>
+
+      <section>
+        <div class="head"><h4>Smart Volume</h4></div>
+        {#if !sonar.smart_volume.available}
+          <!-- The daemon says why: swh-plugins is missing (it asks for it), or PipeWire refused the stage. -->
+          <p class="hint">{sonar.smart_volume.reason ?? "Smart Volume isn't available."}</p>
+        {:else}
+          {#each sonar.channels as c, i (c.channel)}
+            {@const sv = sonar.smart_volume.settings[i]}
+            <div class="row">
+              <span class="label">{label(c.channel)}</span>
+              <label class="check inline">
+                <input
+                  type="checkbox"
+                  checked={sv.enabled}
+                  onchange={(e) =>
+                    quietly(() => daemon.setSmartVolume(c.channel, { ...sv, enabled: e.currentTarget.checked }))}
+                />
+                On
+              </label>
+              <select
+                value={sv.level}
+                disabled={!sv.enabled}
+                onchange={(e) =>
+                  quietly(() =>
+                    daemon.setSmartVolume(c.channel, { ...sv, level: e.currentTarget.value as SmartLevel }),
+                  )}
+              >
+                {#each LEVELS as l (l.value)}<option value={l.value}>{l.label}</option>{/each}
+              </select>
+            </div>
+          {/each}
+          <p class="hint">
+            Evens out a channel's loudness: quiet sounds come up, loud ones are held down.
+            Switching is instant.
+          </p>
+        {/if}
       </section>
 
       <section>
@@ -566,6 +609,9 @@
     margin-top: 0.8rem;
     font-size: 0.85rem;
     cursor: pointer;
+  }
+  .check.inline {
+    margin-top: 0;
   }
   .unit.wide {
     width: auto;

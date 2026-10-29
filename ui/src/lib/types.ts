@@ -179,6 +179,23 @@ export interface StreamMix {
   master: number;
 }
 
+export type SmartLevel = "quiet" | "balanced" | "loud";
+
+/** Smart Volume on one channel: quiet sounds come up, loud ones are held down. */
+export interface SmartVolume {
+  enabled: boolean;
+  level: SmartLevel;
+}
+
+export interface SmartVolumeState {
+  /** Whether the channels carry Smart Volume's stage, so it can be switched. */
+  available: boolean;
+  /** Why not: swh-plugins is missing, or PipeWire refused the stage. */
+  reason: string | null;
+  /** Per channel, in Game, Chat, Media, Aux order. */
+  settings: SmartVolume[];
+}
+
 export interface SonarState {
   available: boolean;
   enabled: boolean;
@@ -193,6 +210,7 @@ export interface SonarState {
   headphone: HeadphoneEq;
   mic: MicState;
   stream: StreamMix;
+  smart_volume: SmartVolumeState;
 }
 
 export interface Rgb {
@@ -299,6 +317,8 @@ export interface ClipsSettings {
   mic: boolean;
   /** Absolute folder; null means `~/Videos/gglinux`. */
   dir: string | null;
+  /** Record only while a program from the game rules runs. */
+  games_only: boolean;
 }
 
 export interface ClipInfo {
@@ -323,6 +343,10 @@ export interface ClipsState {
   error: string | null;
   /** The hotkey KDE bound, if any. */
   hotkey: string | null;
+  /** The game from the rules that's running now. */
+  game: string | null;
+  /** On and games-only, with no game from the rules running. */
+  waiting: boolean;
 }
 
 /** Request bodies — the `req` field of a {@link RequestFrame}. */
@@ -352,6 +376,7 @@ export type Request =
   | { method: "set_streamer"; params: { enabled: boolean } }
   | { method: "set_stream_volume"; params: { channel: Channel; volume: number } }
   | { method: "set_stream_master"; params: { volume: number } }
+  | { method: "set_smart_volume"; params: { channel: Channel; settings: SmartVolume } }
   | { method: "get_keyboard_state" }
   | { method: "set_lighting"; params: { lighting: Lighting } }
   | { method: "get_gamesense_state" }

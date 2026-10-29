@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use gg_ipc::{Channel, EqBand, HeadphoneEq, MicSettings};
+use gg_ipc::{Channel, EqBand, HeadphoneEq, MicSettings, SmartVolume};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -40,6 +40,12 @@ pub struct Settings {
     pub stream_volumes: BTreeMap<Channel, f32>,
     /// The stream mix's master level, 0..=1.
     pub stream_master: f32,
+    /// Smart Volume per channel; off when unset.
+    pub smart_volume: BTreeMap<Channel, SmartVolume>,
+    /// PipeWire wouldn't make the channels with Smart Volume's stage, so they
+    /// run without it. Only ever set while Sonar is on: turning Sonar off
+    /// forgets it, so turning it on again tries the stage again.
+    pub smart_volume_refused: bool,
 }
 
 impl Default for Settings {
@@ -60,6 +66,8 @@ impl Default for Settings {
             streamer: false,
             stream_volumes: BTreeMap::new(),
             stream_master: 1.0,
+            smart_volume: BTreeMap::new(),
+            smart_volume_refused: false,
         }
     }
 }
@@ -73,6 +81,11 @@ impl Settings {
     /// A channel's stream level, full if never set.
     pub fn stream_volume(&self, channel: Channel) -> f32 {
         self.stream_volumes.get(&channel).copied().unwrap_or(1.0)
+    }
+
+    /// A channel's Smart Volume, off if never set.
+    pub fn smart_volume(&self, channel: Channel) -> SmartVolume {
+        self.smart_volume.get(&channel).copied().unwrap_or_default()
     }
 }
 
@@ -140,5 +153,15 @@ mod tests {
         let path = scratch("settings-corrupt").join("sonar.json");
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(load(&path), Settings::default());
+    }
+
+    #[test]
+    fn settings_from_before_smart_volume_still_load() {
+        let path = scratch("settings-old").join("sonar.json");
+        std::fs::write(&path, r#"{"enabled":true,"output":"alsa_output.x","chatmix":0.5}"#).unwrap();
+        let s = load(&path);
+        assert!(s.enabled && s.smart_volume.is_empty());
+        assert_eq!(s.smart_volume(Channel::Game), gg_ipc::SmartVolume::default());
+        assert!(!s.smart_volume_refused);
     }
 }

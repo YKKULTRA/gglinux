@@ -1,6 +1,8 @@
 //! Instant replay: a supervised `gpu-screen-recorder` in replay mode, saved
-//! on `SIGUSR1`. Off by default. A waiter task per child reports its exit, so
-//! the controller's loop only ever waits on channels and one timer.
+//! on `SIGUSR1`. Off by default. With `games_only`, it records only while a
+//! game from the profiles' rules runs (the profiles watcher says which). A
+//! waiter task per child reports its exit, so the controller's loop only ever
+//! waits on channels and timers.
 
 mod hotkey;
 mod recorder;
@@ -10,13 +12,16 @@ use std::time::{Duration, Instant};
 
 use gg_ipc::{ClipsSettings, ClipsState, Event};
 use tokio::process::Command as Process;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 type Reply<T> = oneshot::Sender<Result<T, String>>;
 
 const STOP_GRACE: Duration = Duration::from_secs(3);
 const SAVE_SETTLE: Duration = Duration::from_millis(1500);
+/// How long games-only clips keep recording after the game has gone: time to
+/// save its last moments, and to bridge a launcher handing over to the game.
+const GAME_GRACE: Duration = Duration::from_secs(15);
 
 pub enum Command {
     GetState(Reply<ClipsState>),
@@ -85,6 +90,10 @@ pub struct Controller {
     generation: u64,
     delay: Duration,
     retry_at: Option<Instant>,
+    /// The game from the rules that's running now, from the profiles watcher.
+    game: Option<String>,
+    /// Games-only, the game gone: when to stop.
+    linger_until: Option<Instant>,
     error: Option<String>,
     hotkey: Option<String>,
     hotkey_task: Option<tokio::task::JoinHandle<()>>,
@@ -110,6 +119,7 @@ impl Controller {
         let c = Controller {
             settings, path, program, event_tx, internal_tx,
             running: None, generation: 0, delay: Duration::ZERO, retry_at: None,
+            game: None, linger_until: None,
             error: None, hotkey: None, hotkey_task: None, hotkey_allowed: false, published: None,
         };
         (c, internal_rx)
@@ -123,8 +133,13 @@ impl Controller {
         recorder::resolve_dir(&self.settings, &home())
     }
 
+    /// Whether the recorder should run: clips on, and a game running if they're games-only.
+    fn wanted(&self) -> bool {
+        self.settings.enabled && (!self.settings.games_only || self.game.is_some())
+    }
+
     pub async fn start(&mut self) {
-        if self.running.is_some() || !self.settings.enabled {
+        if self.running.is_some() || !self.wanted() {
             return;
         }
         let Some(program) = self.program() else {
@@ -173,6 +188,7 @@ impl Controller {
             info!("replay buffer stopped");
         }
         self.retry_at = None;
+        self.linger_until = None;
         self.publish();
     }
 
@@ -208,15 +224,41 @@ impl Controller {
         Ok(())
     }
 
+    /// The game from the rules that's running now changed. Games-only clips
+    /// start with a game, and stop [`GAME_GRACE`] after it has gone.
+    pub async fn set_game(&mut self, game: Option<String>) {
+        self.game = game;
+        if self.game.is_some() {
+            self.linger_until = None;
+            self.start().await;
+        } else if self.settings.games_only && self.running.is_some() && self.linger_until.is_none() {
+            self.linger_until = Some(Instant::now() + GAME_GRACE);
+        }
+        self.publish();
+    }
+
+    /// The grace after a game is over: stop, unless the game came back.
+    pub async fn linger_over(&mut self) {
+        self.linger_until = None;
+        if self.running.is_some() && !self.wanted() {
+            info!("the game has gone; stopping the replay buffer");
+            self.stop().await;
+        }
+    }
+
     pub async fn on_internal(&mut self, msg: Internal) {
         match msg {
             Internal::Exited { generation } => {
                 if self.running.as_ref().is_some_and(|r| r.generation == generation) {
                     let r = self.running.take().expect("checked");
-                    self.delay = recorder::next_delay(r.started.elapsed(), self.delay);
-                    self.retry_at = Some(Instant::now() + self.delay);
-                    self.error = Some(format!("gpu-screen-recorder stopped; retrying in {} s", self.delay.as_secs()));
-                    warn!(delay_s = self.delay.as_secs(), "gpu-screen-recorder stopped unexpectedly");
+                    self.linger_until = None;
+                    // After the game has gone, an exit just ends it.
+                    if self.wanted() {
+                        self.delay = recorder::next_delay(r.started.elapsed(), self.delay);
+                        self.retry_at = Some(Instant::now() + self.delay);
+                        self.error = Some(format!("gpu-screen-recorder stopped; retrying in {} s", self.delay.as_secs()));
+                        warn!(delay_s = self.delay.as_secs(), "gpu-screen-recorder stopped unexpectedly");
+                    }
                 }
             }
             Internal::Refresh => {}
@@ -255,6 +297,8 @@ impl Controller {
             clips: recorder::list(&dir),
             error: self.error.clone(),
             hotkey: self.hotkey.clone(),
+            game: self.game.clone(),
+            waiting: self.settings.enabled && self.settings.games_only && self.running.is_none() && self.game.is_none(),
         }
     }
 
@@ -291,24 +335,33 @@ impl Controller {
     }
 }
 
-pub fn spawn(event_tx: broadcast::Sender<Event>) -> Handle {
+pub fn spawn(event_tx: broadcast::Sender<Event>, mut games: watch::Receiver<Option<String>>) -> Handle {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let path = gg_ipc::config_dir().join("clips.json");
     let (mut c, mut internal) = Controller::new(recorder::load(&path), path, None, event_tx);
     c.hotkey_allowed = true;
     tokio::spawn(async move {
+        c.game = games.borrow_and_update().clone();
         c.start().await;
         loop {
             let retry = c.retry_at;
+            let linger = c.linger_until;
             tokio::select! {
                 command = rx.recv() => match command {
                     Some(command) => c.handle(command).await,
                     None => break,
                 },
                 Some(msg) = internal.recv() => c.on_internal(msg).await,
+                Ok(()) = games.changed() => {
+                    let game = games.borrow_and_update().clone();
+                    c.set_game(game).await;
+                }
                 _ = async { tokio::time::sleep_until(retry.expect("guarded").into()).await }, if retry.is_some() => {
                     c.retry_at = None;
                     c.start().await;
+                }
+                _ = async { tokio::time::sleep_until(linger.expect("guarded").into()).await }, if linger.is_some() => {
+                    c.linger_over().await;
                 }
             }
         }
@@ -459,6 +512,81 @@ mod tests {
         let _exited = next_exit(&mut internal).await;
         tokio::time::timeout(Duration::from_secs(1), c.stop()).await.unwrap();
         assert!(!c.state().recording);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    fn games_only(dir: &Path, program: PathBuf) -> (Controller, mpsc::UnboundedReceiver<Internal>) {
+        let (mut c, internal) = controller(dir, program);
+        c.settings.games_only = true;
+        (c, internal)
+    }
+
+    #[tokio::test]
+    async fn games_only_waits_for_a_game_and_stops_after_it_leaves() {
+        let d = scratch("games-only");
+        let (mut c, _internal) = games_only(&d, stand_in(&d, false));
+        start(&mut c).await;
+        let s = c.state();
+        assert!(!s.recording && s.waiting, "no game yet");
+        assert!(!d.join("log").exists(), "nothing was started");
+        c.set_game(Some("game-a".into())).await;
+        start(&mut c).await; // retried if the stand-in was busy
+        assert!(log_has(&d, "start").await);
+        let s = c.state();
+        assert!(s.recording && !s.waiting);
+        assert_eq!(s.game.as_deref(), Some("game-a"));
+        c.set_game(None).await;
+        assert!(c.state().recording, "kept through the grace, so the game's last moments can be saved");
+        assert!(c.linger_until.is_some());
+        c.linger_over().await;
+        assert!(log_has(&d, "int").await, "stopped with SIGINT");
+        let s = c.state();
+        assert!(!s.recording && s.waiting);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_game_back_within_the_grace_keeps_the_recorder() {
+        let d = scratch("games-back");
+        let (mut c, _internal) = games_only(&d, stand_in(&d, false));
+        c.set_game(Some("game-a".into())).await;
+        start(&mut c).await;
+        assert!(log_has(&d, "start").await);
+        c.set_game(None).await;
+        c.set_game(Some("game-a".into())).await;
+        assert!(c.linger_until.is_none());
+        c.linger_over().await; // a timer that fires late changes nothing
+        assert!(c.state().recording);
+        let log = std::fs::read_to_string(d.join("log")).unwrap();
+        assert_eq!(log.lines().filter(|l| l.starts_with("start")).count(), 1, "one recorder throughout:\n{log}");
+        assert!(!log.lines().any(|l| l == "int"), "{log}");
+        c.stop().await;
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn turning_games_only_on_with_no_game_stops_the_recorder() {
+        let d = scratch("games-on");
+        let (mut c, _internal) = controller(&d, stand_in(&d, false));
+        start(&mut c).await;
+        assert!(log_has(&d, "start").await);
+        c.set_settings(ClipsSettings { games_only: true, ..c.settings.clone() }).await.unwrap();
+        assert!(log_has(&d, "int").await);
+        assert!(c.state().waiting);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_crash_after_the_game_is_not_retried() {
+        let d = scratch("games-crash");
+        let (mut c, mut internal) = games_only(&d, stand_in(&d, true));
+        c.set_game(Some("game-a".into())).await;
+        start(&mut c).await;
+        c.set_game(None).await;
+        let exited = next_exit(&mut internal).await;
+        c.on_internal(exited).await;
+        assert!(c.retry_at.is_none() && c.linger_until.is_none(), "no restart without the game");
+        assert!(c.state().waiting);
         std::fs::remove_dir_all(d).unwrap();
     }
 }

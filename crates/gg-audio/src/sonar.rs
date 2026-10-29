@@ -11,18 +11,23 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
     AppStream, AudioDevice, Channel, ChannelEq, ChannelState, EqBand, HeadphoneEq, MicSettings, MicState,
-    SonarState, StreamMix,
+    SmartVolume, SmartVolumeState, SonarState, StreamMix,
 };
 use tracing::{debug, info, warn};
 
 use crate::graph::Graph;
 use crate::settings::{self, Settings};
 use crate::tools::{self, PwTools};
-use crate::{config, eq, mic, mix};
+use crate::{config, eq, mic, mix, smart};
 
 /// How long PipeWire gets to bring nodes up after a restart.
 const APPEAR_TIMEOUT: Duration = Duration::from_secs(5);
 const APPEAR_POLL: Duration = Duration::from_millis(250);
+
+/// Whether PipeWire has all four channel sinks.
+fn channels_up(g: &Graph) -> bool {
+    Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some())
+}
 
 pub struct Sonar<T: PwTools> {
     tools: T,
@@ -40,14 +45,23 @@ pub struct Sonar<T: PwTools> {
     /// The same for the stream mix, kept apart so a stream that's late or
     /// missing never holds back the channels' own levels.
     stream_levels_applied: bool,
+    /// Whether Smart Volume's compressor was installed at the last look, so
+    /// `tick` notices it going.
+    compressor_seen: bool,
+    /// Whether the channels PipeWire made carry Smart Volume's stage. Read
+    /// from the drop-in whenever they come up, since PipeWire made them from
+    /// it; the drop-in only gains the stage just before a restart.
+    stage_loaded: bool,
 }
 
 impl<T: PwTools> Sonar<T> {
     /// Load saved settings and look at PipeWire once. If settings say enabled
     /// but the drop-in is gone, the user removed it by hand: become disabled
-    /// rather than put it back.
+    /// rather than put it back. With Sonar on, it also checks that PipeWire
+    /// took Smart Volume's stage.
     pub fn new(tools: T, settings_path: PathBuf, dropin_path: PathBuf) -> Self {
         let settings = settings::load(&settings_path);
+        let compressor_seen = tools.smart_volume_supported();
         let mut sonar = Sonar {
             tools,
             settings,
@@ -58,6 +72,8 @@ impl<T: PwTools> Sonar<T> {
             available: false,
             levels_applied: false,
             stream_levels_applied: false,
+            compressor_seen,
+            stage_loaded: false,
         };
         sonar.refresh();
         if sonar.settings.enabled && !sonar.dropin_path.exists() {
@@ -66,6 +82,7 @@ impl<T: PwTools> Sonar<T> {
             sonar.persist();
         } else if sonar.settings.enabled {
             sonar.upgrade_dropin();
+            sonar.check_stage();
             sonar.keep_levels();
         }
         sonar
@@ -79,6 +96,7 @@ impl<T: PwTools> Sonar<T> {
     pub fn tick(&mut self) {
         self.refresh();
         if self.settings.enabled {
+            self.follow_compressor();
             self.keep_levels();
             self.route();
         }
@@ -154,6 +172,11 @@ impl<T: PwTools> Sonar<T> {
                 volumes: Channel::ALL.iter().map(|&c| self.settings.stream_volume(c)).collect(),
                 master: self.settings.stream_master,
             },
+            smart_volume: SmartVolumeState {
+                available: self.smart_volume_available(),
+                reason: self.smart_volume_unavailable().map(str::to_owned),
+                settings: Channel::ALL.iter().map(|&c| self.settings.smart_volume(c)).collect(),
+            },
         }
     }
 
@@ -162,6 +185,7 @@ impl<T: PwTools> Sonar<T> {
         if self.settings.enabled {
             return Ok(());
         }
+        self.settings.smart_volume_refused = false; // Sonar is off: a refusal on record is stale
         self.refresh();
         if !self.available {
             bail!("PipeWire is not reachable (pw-dump failed)");
@@ -171,7 +195,7 @@ impl<T: PwTools> Sonar<T> {
         let output = self.choose_output().context("no output device for the channels to play into")?;
         let mic_input = self.choose_mic();
 
-        let text = config::dropin(&output, mic_input.as_deref(), self.settings.streamer)?;
+        let text = config::dropin(&output, mic_input.as_deref(), self.settings.streamer, self.stage_wanted())?;
         if let Some(dir) = self.dropin_path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
@@ -180,23 +204,27 @@ impl<T: PwTools> Sonar<T> {
         info!(%output, path = %self.dropin_path.display(), "enabling Sonar; restarting PipeWire");
         self.tools.run(&tools::restart_pipewire())?;
 
-        let channels_up = |g: &Graph| Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some());
         let want_mic = mic_input.is_some();
         let all_up = |g: &Graph| channels_up(g) && (!want_mic || g.node(mic::SOURCE).is_some());
         if !self.wait_until(all_up) {
             if channels_up(&self.graph) {
                 // The mic module is nofail: the channels are fine without it.
                 warn!("the Sonar mic did not load; continuing without it");
-            } else {
+            } else if !self.drop_refused_stage(&output, mic_input.as_deref()) {
                 warn!("Sonar channels did not appear; undoing");
                 let _ = std::fs::remove_file(&self.dropin_path);
                 let _ = self.tools.run(&tools::restart_pipewire());
+                // Not the stage's fault: turning Sonar on again tries it again.
+                self.settings.smart_volume_refused = false;
+                self.persist();
                 bail!(
                     "PipeWire did not create the Sonar channels within {} s, so the change was undone",
                     APPEAR_TIMEOUT.as_secs()
                 );
             }
+            // Otherwise PipeWire refused Smart Volume's stage: the channels run without it.
         }
+        self.stage_loaded = self.staged();
         self.take_defaults()?;
 
         self.settings.enabled = true;
@@ -226,6 +254,7 @@ impl<T: PwTools> Sonar<T> {
         info!("disabling Sonar; restarting PipeWire");
         self.tools.run(&tools::restart_pipewire())?;
         self.settings.enabled = false;
+        self.settings.smart_volume_refused = false; // turning Sonar on again tries the stage again
         self.routed.clear();
         self.levels_applied = false;
         self.stream_levels_applied = false;
@@ -259,7 +288,7 @@ impl<T: PwTools> Sonar<T> {
         if !self.graph.physical_sinks().any(|n| n.name == name) {
             bail!("no output device named {name}");
         }
-        let text = self.expected_dropin(name)?;
+        let text = self.running_dropin(name)?;
         self.settings.output = Some(name.to_owned());
         self.persist();
         if self.settings.enabled {
@@ -362,7 +391,7 @@ impl<T: PwTools> Sonar<T> {
         self.persist();
         if self.settings.enabled {
             if let Some(output) = self.settings.output.clone() {
-                let text = self.expected_dropin(&output)?;
+                let text = self.running_dropin(&output)?;
                 std::fs::write(&self.dropin_path, text)
                     .with_context(|| format!("writing {}", self.dropin_path.display()))?;
             }
@@ -390,13 +419,13 @@ impl<T: PwTools> Sonar<T> {
             .with_context(|| format!("writing {}", self.dropin_path.display()))?;
         info!(enabled, "streamer mode changed; restarting PipeWire");
         self.tools.run(&tools::restart_pipewire())?;
-        let ready = |g: &Graph| {
-            Channel::ALL.iter().all(|&c| g.node(&config::sink_name(c)).is_some())
-                && (!enabled || g.node(config::STREAM_SINK).is_some())
-        };
+        let ready = |g: &Graph| channels_up(g) && (!enabled || g.node(config::STREAM_SINK).is_some());
         if !self.wait_until(ready) {
-            // Never undone for this: the channels may be fine without the stream.
-            warn!(enabled, "the channels or the stream mix did not appear after the restart");
+            let mic = self.dropin_mic();
+            if channels_up(&self.graph) || !self.drop_refused_stage(&output, mic.as_deref()) {
+                // Never undone for this: the channels may be fine without the stream.
+                warn!(enabled, "the channels or the stream mix did not appear after the restart");
+            }
         }
         self.take_defaults()?;
         self.levels_applied = false;
@@ -434,6 +463,17 @@ impl<T: PwTools> Sonar<T> {
         Ok(())
     }
 
+    /// Turn Smart Volume on or off for a channel, or change its level: live,
+    /// through the stage's own controls, never a PipeWire restart.
+    pub fn set_smart_volume(&mut self, channel: Channel, smart_volume: SmartVolume) -> Result<()> {
+        if let Some(why) = self.smart_volume_unavailable() {
+            bail!("{why}");
+        }
+        self.settings.smart_volume.insert(channel, smart_volume);
+        self.persist();
+        self.apply_smart_volume(channel)
+    }
+
     // --- internals ------------------------------------------------------------
 
     /// Make the Game channel the default output and gglinux Mic the default input.
@@ -462,10 +502,56 @@ impl<T: PwTools> Sonar<T> {
             .or_else(|| self.graph.physical_sources().next().map(|n| n.name.clone()))
     }
 
+    /// Why Smart Volume can't be used here, if it can't.
+    fn smart_volume_unavailable(&self) -> Option<&'static str> {
+        if !self.tools.smart_volume_supported() {
+            Some(
+                "Smart Volume needs the SC4 compressor from swh-plugins (sc4m_1916.so), \
+                 which isn't installed. Install swh-plugins, then turn Sonar off and on.",
+            )
+        } else if self.settings.smart_volume_refused {
+            Some(
+                "PipeWire wouldn't make the channels with Smart Volume, so they run without it. \
+                 Turn Sonar off and on to try again.",
+            )
+        } else if self.settings.enabled && !self.stage_loaded {
+            Some(
+                "The Sonar channels were made before swh-plugins was installed, so they run \
+                 without Smart Volume. Turn Sonar off and on to add it.",
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Whether Smart Volume can be switched: the channels carry its stage, or
+    /// will when Sonar turns on.
+    fn smart_volume_available(&self) -> bool {
+        self.smart_volume_unavailable().is_none()
+    }
+
+    /// Whether the drop-in should carry Smart Volume's stage at the next
+    /// PipeWire start: the compressor is there and PipeWire hasn't refused it.
+    fn stage_wanted(&self) -> bool {
+        self.tools.smart_volume_supported() && !self.settings.smart_volume_refused
+    }
+
+    /// The mic the drop-in carries: the saved one, if the plugins exist.
+    fn dropin_mic(&self) -> Option<String> {
+        self.settings.mic_input.clone().filter(|_| self.tools.mic_plugins_present())
+    }
+
     /// The drop-in this version writes for the saved output and mic.
     fn expected_dropin(&self, output: &str) -> Result<String> {
-        let mic = self.settings.mic_input.as_deref().filter(|_| self.tools.mic_plugins_present());
-        config::dropin(output, mic, self.settings.streamer)
+        config::dropin(output, self.dropin_mic().as_deref(), self.settings.streamer, self.stage_wanted())
+    }
+
+    /// The drop-in for a write PipeWire isn't restarted for: it keeps the
+    /// stage only if the channels already carry it, so it never gains the
+    /// stage PipeWire hasn't loaded.
+    fn running_dropin(&self, output: &str) -> Result<String> {
+        let stage = self.stage_loaded && self.stage_wanted();
+        config::dropin(output, self.dropin_mic().as_deref(), self.settings.streamer, stage)
     }
 
     fn apply_mic(&self) -> Result<()> {
@@ -500,6 +586,85 @@ impl<T: PwTools> Sonar<T> {
         match result {
             Ok(()) => self.refresh(),
             Err(e) => warn!(error = %format!("{e:#}"), "could not update Sonar's drop-in"),
+        }
+    }
+
+    /// Whether the drop-in on disk carries Smart Volume's stage.
+    fn staged(&self) -> bool {
+        std::fs::read_to_string(&self.dropin_path).is_ok_and(|t| t.contains(smart::INPUTS[0]))
+    }
+
+    /// On startup with Sonar on, whether or not the drop-in was just rewritten:
+    /// a PipeWire upgraded since may refuse a stage it took before.
+    fn check_stage(&mut self) {
+        let Some(output) = self.settings.output.clone() else { return };
+        if self.staged() && !self.wait_until(channels_up) {
+            let mic = self.dropin_mic();
+            self.drop_refused_stage(&output, mic.as_deref());
+        }
+    }
+
+    /// The channels didn't come. If the drop-in carries Smart Volume's stage
+    /// and PipeWire answers, PipeWire refused the stage: the channel modules
+    /// that carry it are `nofail`, so it started without them. Remember that
+    /// (first, so a crash can't bring the stage back), write the drop-in
+    /// without the stage and restart PipeWire once more. Returns whether the
+    /// channels are up now.
+    fn drop_refused_stage(&mut self, output: &str, mic: Option<&str>) -> bool {
+        if !self.staged() || !self.available {
+            return false;
+        }
+        warn!("PipeWire did not make the Sonar channels with Smart Volume's stage; going on without it");
+        self.settings.smart_volume_refused = true;
+        self.stage_loaded = false;
+        self.persist();
+        let result = config::dropin(output, mic, self.settings.streamer, false)
+            .and_then(|text| {
+                std::fs::write(&self.dropin_path, text)
+                    .with_context(|| format!("writing {}", self.dropin_path.display()))
+            })
+            .and_then(|()| self.tools.run(&tools::restart_pipewire()));
+        if let Err(e) = result {
+            warn!(error = %format!("{e:#}"), "could not take Smart Volume's stage out");
+            return false;
+        }
+        self.wait_until(channels_up)
+    }
+
+    /// `swh-plugins` was removed while Sonar is on: write the drop-in without
+    /// Smart Volume's stage at once, so no later PipeWire start, gglinux's or
+    /// anyone's, loads a plugin that isn't there. PipeWire keeps the copy it
+    /// loaded until then. If it already restarted without the channels,
+    /// restart it once more to bring them back.
+    fn follow_compressor(&mut self) {
+        let present = self.tools.smart_volume_supported();
+        let gone = std::mem::replace(&mut self.compressor_seen, present) && !present;
+        if !gone || !self.staged() {
+            return;
+        }
+        let Some(output) = self.settings.output.clone() else { return };
+        warn!("Smart Volume's compressor (swh-plugins) is gone; taking it out of the Sonar channels");
+        let written = self.expected_dropin(&output).and_then(|text| {
+            std::fs::write(&self.dropin_path, text).with_context(|| format!("writing {}", self.dropin_path.display()))
+        });
+        if let Err(e) = written {
+            warn!(error = %format!("{e:#}"), "could not take Smart Volume's stage out");
+            return;
+        }
+        // PipeWire may still run the stage, but the next start won't have it.
+        self.stage_loaded = false;
+        if !channels_up(&self.graph) {
+            info!("restarting PipeWire to bring the Sonar channels back without Smart Volume");
+            match self.tools.run(&tools::restart_pipewire()) {
+                Ok(()) => {
+                    // `keep_levels` and `route` never see the channels gone: push it all again.
+                    self.levels_applied = false;
+                    self.stream_levels_applied = false;
+                    self.routed.clear();
+                    self.wait_until(channels_up);
+                }
+                Err(e) => warn!(error = %format!("{e:#}"), "could not restart PipeWire"),
+            }
         }
     }
 
@@ -566,12 +731,14 @@ impl<T: PwTools> Sonar<T> {
 
     /// Push the saved levels once per appearance of the channels, and the
     /// stream levels once per appearance of the stream mix (while streamer mode
-    /// is on). Each waits only for its own nodes.
+    /// is on). Each waits only for its own nodes. Each appearance of the
+    /// channels also says whether they carry Smart Volume's stage.
     fn keep_levels(&mut self) {
         let channels = Channel::ALL.iter().all(|&c| self.graph.node(&config::sink_name(c)).is_some());
         if !channels {
             self.levels_applied = false;
         } else if !self.levels_applied {
+            self.stage_loaded = self.staged();
             match self.apply_levels() {
                 Ok(()) => self.levels_applied = true,
                 Err(e) => warn!(error = %format!("{e:#}"), "could not restore Sonar volumes"),
@@ -590,7 +757,7 @@ impl<T: PwTools> Sonar<T> {
         }
     }
 
-    /// Push saved channel volumes, EQ, the mic and ChatMix to PipeWire.
+    /// Push saved channel volumes, EQ, Smart Volume, the mic and ChatMix to PipeWire.
     fn apply_levels(&self) -> Result<()> {
         for (&channel, &volume) in &self.settings.volumes {
             if let Some(node) = self.graph.node(&config::sink_name(channel)) {
@@ -599,6 +766,7 @@ impl<T: PwTools> Sonar<T> {
         }
         for channel in Channel::ALL {
             self.apply_chain(channel)?;
+            self.apply_smart_volume(channel)?;
         }
         self.apply_mic()?;
         self.apply_chatmix()
@@ -627,6 +795,19 @@ impl<T: PwTools> Sonar<T> {
         Ok(())
     }
 
+    /// Set a channel's Smart Volume controls, if PipeWire has the channel and
+    /// it carries the stage.
+    fn apply_smart_volume(&self, channel: Channel) -> Result<()> {
+        if !self.smart_volume_available() {
+            return Ok(());
+        }
+        if let Some(node) = self.graph.node(&config::sink_name(channel)) {
+            let props = smart::props(&self.settings.smart_volume(channel));
+            self.tools.run(&tools::set_params(node.id, &props))?;
+        }
+        Ok(())
+    }
+
     /// ChatMix lives on the Game and Chat outlets, so it multiplies with the
     /// channel volumes instead of overwriting them.
     fn apply_chatmix(&self) -> Result<()> {
@@ -650,7 +831,7 @@ impl<T: PwTools> Sonar<T> {
 mod tests {
     use super::*;
     use crate::testing::{dump_with_source, scratch};
-    use gg_ipc::{HeadphoneEq, MicSettings};
+    use gg_ipc::{HeadphoneEq, MicSettings, SmartLevel};
     use std::cell::RefCell;
 
     const HEADSET: &str = "alsa_output.usb-SteelSeries_Arctis";
@@ -666,6 +847,11 @@ mod tests {
         channels_come_up: bool,
         mic_plugins: bool,
         mic_comes_up: bool,
+        /// Whether swh's compressor is installed.
+        smart_volume: RefCell<bool>,
+        /// A PipeWire that refuses Smart Volume's stage: with `sv_comp` in the
+        /// drop-in it starts without the channels (their modules are `nofail`).
+        refuses_stage: RefCell<bool>,
         /// Off holds the stream mix back while the channels are up.
         stream_comes_up: RefCell<bool>,
         runs: RefCell<Vec<Vec<String>>>,
@@ -680,6 +866,8 @@ mod tests {
                 channels_come_up: true,
                 mic_plugins: true,
                 mic_comes_up: true,
+                smart_volume: RefCell::new(true),
+                refuses_stage: RefCell::new(false),
                 stream_comes_up: RefCell::new(true),
                 runs: RefCell::new(Vec::new()),
             }
@@ -741,7 +929,9 @@ mod tests {
 
         fn run(&self, argv: &[String]) -> Result<()> {
             if argv[0] == "systemctl" {
-                *self.up.borrow_mut() = self.channels_come_up && self.dropin.exists();
+                let refused = *self.refuses_stage.borrow()
+                    && std::fs::read_to_string(&self.dropin).is_ok_and(|t| t.contains("sv_comp"));
+                *self.up.borrow_mut() = self.channels_come_up && self.dropin.exists() && !refused;
             }
             self.runs.borrow_mut().push(argv.to_vec());
             Ok(())
@@ -751,6 +941,10 @@ mod tests {
 
         fn mic_plugins_present(&self) -> bool {
             self.mic_plugins
+        }
+
+        fn smart_volume_supported(&self) -> bool {
+            *self.smart_volume.borrow()
         }
     }
 
@@ -790,8 +984,9 @@ mod tests {
         let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         assert!(sonar.enable().is_err());
         assert!(!dropin.exists(), "the drop-in is removed again");
-        assert_eq!(fake.count("systemctl"), 2, "restarted once to apply, once to undo");
-        assert!(!settings::load(&settings_path).enabled);
+        assert_eq!(fake.count("systemctl"), 3, "to apply, again without Smart Volume's stage, then to undo");
+        let saved = settings::load(&settings_path);
+        assert!(!saved.enabled && !saved.smart_volume_refused, "the stage wasn't to blame");
     }
 
     #[test]
@@ -1006,7 +1201,7 @@ mod tests {
         let fake = Fake::new(dropin.clone(), APPS);
         let sonar = Sonar::new(&fake, settings_path, dropin.clone());
         assert!(sonar.is_enabled());
-        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false).unwrap());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, true).unwrap());
         assert_eq!(fake.count("systemctl"), 1);
     }
 
@@ -1021,8 +1216,9 @@ mod tests {
         };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
-        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false).unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, true).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
+        *fake.up.borrow_mut() = true; // PipeWire already runs this drop-in
         let _sonar = Sonar::new(&fake, settings_path, dropin);
         assert_eq!(fake.count("systemctl"), 0);
     }
@@ -1111,7 +1307,7 @@ mod tests {
         let saved = Settings { enabled: true, output: Some(BT.into()), ..Settings::default() };
         settings::save(&settings_path, &saved).unwrap();
         std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
-        std::fs::write(&dropin, config::dropin(BT, None, false).unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, None, false, true).unwrap()).unwrap();
         let fake = Fake::new(dropin.clone(), APPS);
         let _sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
         assert!(std::fs::read_to_string(&dropin).unwrap().contains("gglinux_mic"));
@@ -1224,5 +1420,219 @@ mod tests {
         sonar.tick();
         assert!(fake.ran(&["wpctl", "set-volume", "25", "1.000"]), "the master level");
         assert!(!fake.ran(&["wpctl", "set-volume", "21", "0.400"]), "the channels are not pushed again");
+    }
+
+    #[test]
+    fn enable_sets_every_channels_smart_volume() {
+        let (settings_path, dropin) = paths("smart-enable");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        sonar.enable().unwrap();
+        assert!(std::fs::read_to_string(&dropin).unwrap().contains("name = sv_comp"));
+        let off = crate::smart::props(&SmartVolume::default());
+        for id in ["20", "21", "22", "23"] {
+            assert!(fake.ran(&["pw-cli", "set-param", id, "Props", &off]), "channel {id} starts off");
+        }
+    }
+
+    #[test]
+    fn smart_volume_switches_live_without_a_restart() {
+        let (settings_path, dropin) = paths("smart-live");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin);
+        sonar.enable().unwrap();
+        let restarts = fake.count("systemctl");
+        let loud = SmartVolume { enabled: true, level: SmartLevel::Loud };
+        sonar.set_smart_volume(Channel::Media, loud).unwrap();
+        assert!(fake.ran(&["pw-cli", "set-param", "22", "Props", &crate::smart::props(&loud)]));
+        let off = SmartVolume { enabled: false, ..loud };
+        sonar.set_smart_volume(Channel::Media, off).unwrap();
+        assert!(fake.ran(&["pw-cli", "set-param", "22", "Props", &crate::smart::props(&off)]));
+        assert_eq!(fake.count("systemctl"), restarts, "never a PipeWire restart");
+        assert_eq!(settings::load(&settings_path).smart_volume(Channel::Media), off);
+        let s = sonar.snapshot().smart_volume;
+        assert!(s.available && s.reason.is_none());
+        assert_eq!(s.settings, vec![SmartVolume::default(), SmartVolume::default(), off, SmartVolume::default()]);
+    }
+
+    #[test]
+    fn without_the_compressor_the_channels_are_as_before() {
+        let (settings_path, dropin) = paths("smart-none");
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.smart_volume.borrow_mut() = false;
+        let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        sonar.enable().unwrap();
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        let s = sonar.snapshot().smart_volume;
+        assert!(!s.available, "{s:?}");
+        assert!(s.reason.as_deref().is_some_and(|r| r.contains("Install swh-plugins")), "asks for the package: {s:?}");
+        let on = SmartVolume { enabled: true, ..SmartVolume::default() };
+        assert!(sonar.set_smart_volume(Channel::Game, on).is_err());
+        assert!(
+            !fake.runs.borrow().iter().any(|r| r[0] == "pw-cli" && r[4].contains("sv_mix")),
+            "no Smart Volume controls sent"
+        );
+    }
+
+    #[test]
+    fn a_compressor_that_disappears_takes_the_stage_out_on_startup() {
+        let (settings_path, dropin) = paths("smart-gone");
+        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, true).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.smart_volume.borrow_mut() = false; // swh-plugins removed while gglinux was off
+        let _sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(fake.count("systemctl"), 1, "one restart");
+    }
+
+    #[test]
+    fn a_compressor_that_appears_adds_the_stage_on_startup() {
+        let (settings_path, dropin) = paths("smart-new");
+        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, false).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        let sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, true).unwrap());
+        assert_eq!(fake.count("systemctl"), 1, "one restart");
+        assert!(sonar.snapshot().smart_volume.available, "the channels came back with the stage");
+    }
+
+    #[test]
+    fn a_refused_stage_is_taken_out_when_sonar_turns_on() {
+        let (settings_path, dropin) = paths("smart-refused");
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.refuses_stage.borrow_mut() = true;
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        sonar.enable().unwrap();
+        assert!(sonar.is_enabled(), "the channels run, without Smart Volume");
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(fake.count("systemctl"), 2, "once with the stage, once without");
+        assert!(settings::load(&settings_path).smart_volume_refused);
+        let s = sonar.snapshot().smart_volume;
+        assert!(!s.available && s.reason.as_deref().is_some_and(|r| r.contains("off and on")), "{s:?}");
+        let on = SmartVolume { enabled: true, ..SmartVolume::default() };
+        assert!(sonar.set_smart_volume(Channel::Game, on).is_err());
+        sonar.disable().unwrap();
+        assert!(!settings::load(&settings_path).smart_volume_refused, "turning Sonar on again tries the stage again");
+    }
+
+    #[test]
+    fn a_refused_stage_is_taken_out_on_startup() {
+        let (settings_path, dropin) = paths("smart-refused-upgrade");
+        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        // Sonar was on before Smart Volume, so the startup upgrade adds the stage.
+        let before = config::dropin(BT, Some(MIC), false, false).unwrap();
+        std::fs::write(&dropin, &before).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.refuses_stage.borrow_mut() = true;
+        let sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        assert!(sonar.is_enabled());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), before);
+        assert_eq!(fake.count("systemctl"), 2, "the upgrade, then the stage taken out");
+        assert!(settings::load(&settings_path).smart_volume_refused);
+        assert!(!sonar.snapshot().smart_volume.available);
+    }
+
+    #[test]
+    fn a_stage_refused_at_login_is_taken_out_on_startup() {
+        let (settings_path, dropin) = paths("smart-refused-login");
+        let saved = Settings { enabled: true, output: Some(BT.into()), mic_input: Some(MIC.into()), ..Settings::default() };
+        settings::save(&settings_path, &saved).unwrap();
+        std::fs::create_dir_all(dropin.parent().unwrap()).unwrap();
+        // The drop-in is current, but this PipeWire (a newer one, say) refused it at login.
+        std::fs::write(&dropin, config::dropin(BT, Some(MIC), false, true).unwrap()).unwrap();
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.refuses_stage.borrow_mut() = true;
+        let _sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(fake.count("systemctl"), 1, "one restart, without the stage");
+        assert!(settings::load(&settings_path).smart_volume_refused);
+    }
+
+    #[test]
+    fn a_stage_refused_after_a_streamer_restart_is_taken_out() {
+        let (settings_path, dropin) = paths("smart-refused-streamer");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path.clone(), dropin.clone());
+        sonar.enable().unwrap();
+        *fake.refuses_stage.borrow_mut() = true; // PipeWire was upgraded since
+        sonar.set_streamer(true).unwrap();
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), true, false).unwrap());
+        assert_eq!(fake.count("systemctl"), 3, "on, streamer mode, then without the stage");
+        assert!(sonar.is_enabled() && settings::load(&settings_path).smart_volume_refused);
+    }
+
+    #[test]
+    fn a_compressor_removed_while_sonar_runs_leaves_the_dropin_at_once() {
+        let (settings_path, dropin) = paths("smart-removed");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        sonar.enable().unwrap();
+        let restarts = fake.count("systemctl");
+        *fake.smart_volume.borrow_mut() = false; // swh-plugins removed
+        sonar.tick();
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(fake.count("systemctl"), restarts, "PipeWire still runs the stage it loaded: no restart");
+        assert!(!sonar.snapshot().smart_volume.available);
+        sonar.tick();
+        assert_eq!(fake.count("systemctl"), restarts, "once is enough");
+        *fake.smart_volume.borrow_mut() = true; // installed again
+        sonar.tick();
+        assert!(!sonar.snapshot().smart_volume.available, "the drop-in lost the stage: it waits for Sonar off and on");
+    }
+
+    #[test]
+    fn a_compressor_installed_while_sonar_runs_waits_for_sonar_off_and_on() {
+        let (settings_path, dropin) = paths("smart-installed");
+        let fake = Fake::new(dropin.clone(), APPS);
+        *fake.smart_volume.borrow_mut() = false;
+        let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        sonar.enable().unwrap();
+        *fake.smart_volume.borrow_mut() = true; // swh-plugins installed
+        sonar.tick();
+        let s = sonar.snapshot().smart_volume;
+        assert!(!s.available && s.reason.as_deref().is_some_and(|r| r.contains("before swh-plugins")), "{s:?}");
+        let on = SmartVolume { enabled: true, ..SmartVolume::default() };
+        assert!(sonar.set_smart_volume(Channel::Game, on).is_err());
+        assert!(
+            !fake.runs.borrow().iter().any(|r| r[0] == "pw-cli" && r[4].contains("sv_mix")),
+            "no Smart Volume controls sent"
+        );
+        sonar.set_output(HEADSET).unwrap();
+        assert!(!std::fs::read_to_string(&dropin).unwrap().contains("sv_comp"), "the stage comes only with a restart");
+
+        sonar.disable().unwrap();
+        sonar.enable().unwrap();
+        assert!(sonar.snapshot().smart_volume.available);
+        sonar.set_smart_volume(Channel::Game, on).unwrap();
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &crate::smart::props(&on)]));
+    }
+
+    #[test]
+    fn a_compressor_removed_before_a_pipewire_restart_brings_the_channels_back() {
+        let (settings_path, dropin) = paths("smart-removed-restart");
+        let fake = Fake::new(dropin.clone(), APPS);
+        let mut sonar = Sonar::new(&fake, settings_path, dropin.clone());
+        sonar.enable().unwrap();
+        sonar.set_chatmix(0.5).unwrap();
+        fake.runs.borrow_mut().clear();
+        // swh-plugins removed, and PipeWire restarted by something else before gglinux
+        // looked: it skipped the channel modules.
+        *fake.smart_volume.borrow_mut() = false;
+        *fake.up.borrow_mut() = false;
+        sonar.tick();
+        assert_eq!(std::fs::read_to_string(&dropin).unwrap(), config::dropin(BT, Some(MIC), false, false).unwrap());
+        assert_eq!(fake.count("systemctl"), 1, "one restart, without the stage");
+        assert!(sonar.snapshot().channels.iter().all(|c| c.present));
+        assert!(fake.ran(&["pw-cli", "set-param", "20", "Props", &chain_of(&sonar, Channel::Game)]), "the EQ is pushed again");
+        assert!(fake.ran(&["wpctl", "set-volume", "30", "0.500"]), "and ChatMix");
+        assert!(fake.ran(&["pw-metadata", "40", "target.object", "gglinux_chat"]), "and the apps routed again");
     }
 }

@@ -82,12 +82,14 @@ async fn main() -> Result<()> {
     // GameSense's registry exists before the keyboard worker, which draws it.
     let engine = gamesense::Engine::load();
     let keyboard = keyboard::spawn(event_tx.clone(), vec![engine.overlay()]);
+    // The game from the profiles' rules that's running now; games-only clips follow it.
+    let (game_tx, game_rx) = watch::channel::<Option<String>>(None);
     let workers = Workers {
         mouse: mouse::spawn(event_tx.clone()),
         headset: headset::spawn(event_tx.clone()),
         gamesense: gamesense::spawn(engine, event_tx.clone(), keyboard.clone()),
-        profiles: profiles::spawn(event_tx.clone(), keyboard.clone()),
-        clips: clips::spawn(event_tx.clone()),
+        profiles: profiles::spawn(event_tx.clone(), keyboard.clone(), game_tx),
+        clips: clips::spawn(event_tx.clone(), game_rx),
         keyboard,
         sonar: sonar::spawn(event_tx.clone()),
     };
@@ -349,6 +351,12 @@ async fn dispatch(
         ),
         Request::SetStreamMaster { volume } => outcome(
             workers.sonar.send::<()>(|reply| SonarCommand::SetStreamMaster { volume, reply }).await,
+        ),
+        Request::SetSmartVolume { channel, settings } => outcome(
+            workers
+                .sonar
+                .send::<()>(|reply| SonarCommand::SetSmartVolume { channel, settings, reply })
+                .await,
         ),
         Request::GetKeyboardState => match workers.keyboard.send(KeyboardCommand::GetState).await {
             Ok(state) => ResponseData::Keyboard { state },

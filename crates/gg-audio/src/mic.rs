@@ -5,6 +5,7 @@
 //! stays in the graph and is switched off through its own controls: RNNoise's
 //! `Dry Mix` at 1, the gate's thresholds at 0 (always open), the compressor at 1:1.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{ensure, Result};
@@ -17,28 +18,39 @@ pub const CAPTURE: &str = "gglinux_mic.in";
 
 /// LADSPA plugins; PipeWire appends `.so` when it loads them.
 const RNNOISE: &str = "librnnoise_ladspa";
-const SC4M: &str = "sc4m_1916";
+/// swh's SC4 compressor, which Smart Volume uses too.
+pub(crate) const SC4M: &str = "sc4m_1916";
 
-/// Where PipeWire looks for LADSPA plugins after `LADSPA_PATH`.
-const DEFAULT_LADSPA_DIRS: [&str; 3] = ["/usr/lib64/ladspa", "/usr/lib/ladspa", "/usr/local/lib/ladspa"];
+/// Where PipeWire 1.6 looks for LADSPA plugins when `LADSPA_PATH` isn't set
+/// (`/usr/lib` is its library directory on Arch).
+const DEFAULT_LADSPA_DIRS: [&str; 3] = ["/usr/lib64/ladspa", "/usr/lib/ladspa", "/usr/lib"];
 
 /// Compressor settings the UI does not expose.
 const COMP_THRESHOLD_DB: f32 = -18.0;
 const COMP_RATIO: f32 = 4.0;
 
-/// Whether both plugins are installed, searching `LADSPA_PATH`, then the defaults.
+/// Whether both plugins are installed where PipeWire looks.
 pub fn plugins_present() -> bool {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("LADSPA_PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    dirs.extend(DEFAULT_LADSPA_DIRS.iter().map(PathBuf::from));
-    plugins_present_in(&dirs)
+    plugins_present_in(&ladspa_dirs(std::env::var_os("LADSPA_PATH")))
 }
 
 /// Whether both plugins exist as files in one of `dirs`.
 pub fn plugins_present_in(dirs: &[PathBuf]) -> bool {
-    let found = |plugin: &str| dirs.iter().any(|d| d.join(format!("{plugin}.so")).is_file());
-    found(RNNOISE) && found(SC4M)
+    ladspa_found(dirs, RNNOISE) && ladspa_found(dirs, SC4M)
+}
+
+/// Where PipeWire looks for LADSPA plugins, given `LADSPA_PATH`: its entries
+/// replace the defaults rather than come before them.
+pub(crate) fn ladspa_dirs(ladspa_path: Option<OsString>) -> Vec<PathBuf> {
+    match ladspa_path {
+        Some(path) => std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()).collect(),
+        None => DEFAULT_LADSPA_DIRS.iter().map(PathBuf::from).collect(),
+    }
+}
+
+/// Whether a plugin, named as PipeWire loads it (without `.so`), is a file in one of `dirs`.
+pub(crate) fn ladspa_found(dirs: &[PathBuf], plugin: &str) -> bool {
+    dirs.iter().any(|d| d.join(format!("{plugin}.so")).is_file())
 }
 
 pub fn validate(s: &MicSettings) -> Result<()> {
@@ -188,5 +200,17 @@ mod tests {
         assert!(!plugins_present_in(std::slice::from_ref(&dir)), "both are needed");
         std::fs::write(dir.join("sc4m_1916.so"), b"").unwrap();
         assert!(plugins_present_in(&[dir]));
+    }
+
+    #[test]
+    fn plugins_are_looked_for_where_pipewire_looks() {
+        let defaults: Vec<PathBuf> =
+            ["/usr/lib64/ladspa", "/usr/lib/ladspa", "/usr/lib"].iter().map(PathBuf::from).collect();
+        assert_eq!(ladspa_dirs(None), defaults);
+        assert_eq!(
+            ladspa_dirs(Some("/opt/a::/opt/b".into())),
+            [PathBuf::from("/opt/a"), PathBuf::from("/opt/b")],
+            "LADSPA_PATH replaces the defaults, and an empty entry is skipped"
+        );
     }
 }

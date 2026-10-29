@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use gg_audio::sonar::Sonar;
 use gg_audio::tools::SystemTools;
-use gg_ipc::{Channel, EqBand, Event, HeadphoneEq, MicSettings, SonarState};
+use gg_ipc::{Channel, EqBand, Event, HeadphoneEq, MicSettings, SmartVolume, SonarState};
 use tokio::sync::{broadcast, oneshot};
 
 /// How often to look for new app streams while Sonar is on.
@@ -34,6 +34,7 @@ pub enum Command {
     SetStreamer { enabled: bool, reply: Reply<()> },
     SetStreamVolume { channel: Channel, volume: f32, reply: Reply<()> },
     SetStreamMaster { volume: f32, reply: Reply<()> },
+    SetSmartVolume { channel: Channel, settings: SmartVolume, reply: Reply<()> },
 }
 
 #[derive(Clone)]
@@ -133,6 +134,9 @@ fn handle(command: Command, sonar: &mut Sonar<SystemTools>) {
         }
         Command::SetStreamMaster { volume, reply } => {
             let _ = reply.send(sonar.set_stream_master(volume).map_err(text));
+        }
+        Command::SetSmartVolume { channel, settings, reply } => {
+            let _ = reply.send(sonar.set_smart_volume(channel, settings).map_err(text));
         }
     }
 }

@@ -28,6 +28,7 @@ import type {
   ResponseData,
   ScreenSettings,
   ServerMessage,
+  SmartVolume,
   SonarState,
 } from "./types";
 
@@ -239,6 +240,11 @@ class Daemon {
 
   setStreamMaster(volume: number): Promise<void> {
     return this.#sonarCommand({ method: "set_stream_master", params: { volume } });
+  }
+
+  /** Live: the channel's own controls, never a PipeWire restart. */
+  setSmartVolume(channel: Channel, settings: SmartVolume): Promise<void> {
+    return this.#sonarCommand({ method: "set_smart_volume", params: { channel, settings } });
   }
 
   async getKeyboardState(): Promise<KeyboardState> {
