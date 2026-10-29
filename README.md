@@ -51,6 +51,7 @@ is no longer available to test it.
 | Keyboard | Breathing and spectrum effects | Untested |
 | Keyboard | Reactive lighting (Fade, Ripple on key press), opt-in | Untested |
 | Keyboard | OLED screen: text, clock, a picture | Untested |
+| Keyboard | Screen burn-in care: the picture moves a pixel now and then, and goes dark while you're away | Untested |
 | Keyboard | Actuation point (global and per key), Rapid Trigger, Rapid Tap | Untested |
 | Keyboard | Key remap, second actuation point, saving to the keyboard's flash | Not built |
 | Headset | Base-station screen burn-in protection | Verified |
@@ -65,6 +66,7 @@ is no longer available to test it.
 | Profiles | Named lighting profiles, switched automatically per game | Untested |
 | Moments | Instant-replay clips through gpu-screen-recorder, hotkey, clip library | Untested |
 | Desktop | Tray, start at login, settings backup and restore, `ggctl` | Untested |
+| Desktop | Turn any part off (keyboard, headset, mouse, Sonar, GameSense, profiles, clips) | Untested |
 
 The full parity checklist against GG, with the reasons behind each status, is in
 [PLAN.md](PLAN.md#feature-parity-checklist-vs-steelseries-gg).
@@ -228,6 +230,33 @@ under `[Service]`.
 
 Only one daemon runs at a time: a second one refuses to start while the first is listening.
 
+**Starting before anyone logs in.** The unit starts with your user's systemd instance, which
+normally starts at login. To have it run from boot instead, which keeps the base station's screen
+dark at the login screen too, two more things are needed, both outside gglinux:
+
+```sh
+sudo loginctl enable-linger "$USER"   # your user services start at boot and keep running after logout
+```
+
+and device access before login, since the udev rule's ACLs only come with a session. A local
+rule giving your user the same three control interfaces does it, for example
+`/etc/udev/rules.d/62-gglinux-before-login.rules`:
+
+```udev
+ACTION=="remove", GOTO="gglinux_boot_end"
+SUBSYSTEM!="hidraw", GOTO="gglinux_boot_end"
+IMPORT{builtin}="usb_id"
+ENV{ID_VENDOR_ID}!="1038", GOTO="gglinux_boot_end"
+ENV{ID_MODEL_ID}=="1642", ENV{ID_USB_INTERFACE_NUM}=="01", OWNER="you", MODE="0600"
+ENV{ID_MODEL_ID}=="12e0", ENV{ID_USB_INTERFACE_NUM}=="04", OWNER="you", MODE="0600"
+ENV{ID_MODEL_ID}=="1872", ENV{ID_USB_INTERFACE_NUM}=="03", OWNER="you", MODE="0600"
+LABEL="gglinux_boot_end"
+```
+
+with your user name for `you`, then `sudo udevadm control --reload && sudo udevadm trigger
+--subsystem-match=hidraw --action=change`. Linger also starts your other enabled user services at
+boot (PipeWire, for one). Undo with `loginctl disable-linger` and by deleting the rule.
+
 ## Using it
 
 Open **gglinux** from your app menu. The app is optional: the daemon keeps applying your settings
@@ -244,6 +273,19 @@ writes a small `coreProps.json` into every Proton prefix under
 games under Proton can find it. Turning it off removes those files. Only native Steam is supported,
 not Flatpak Steam. Few games speak GameSense; **Run test** shows what it looks like.
 
+**Parts you don't use** can be turned off in Settings → *Parts of gglinux*, or with
+`ggctl parts sonar off`. A part that's off isn't started at all: its device is left alone, nothing
+of it runs in the background, and its page is hidden; its settings are kept for when it's back.
+Applying a change restarts the daemon. Turning Sonar off takes its channels out of PipeWire if
+they're on; turning the headset off ends the base station's screen protection.
+
+**The keyboard's screen** is an OLED, and one picture held for hours burns in. Unless you turn
+it off, a picture of gglinux's (text, clock or image) moves a pixel every two minutes, within two
+pixels of where it's drawn, and goes dark while nobody is at the computer: the session locked
+(logind, or the screensaver service that Plasma's locker and Hyprland's hypridle answer),
+another session switched to, the computer going to sleep, or nobody logged in. The keyboard's own
+screen can go dark then too, which is off by default because gglinux otherwise leaves it alone.
+
 **ggctl** drives the daemon from scripts and keyboard shortcuts:
 
 ```sh
@@ -253,6 +295,8 @@ ggctl profile list            # saved lighting profiles
 ggctl profile apply "Late Night"
 ggctl gamesense on            # also: gamesense off, gamesense test
 ggctl mouse                   # the mouse's battery and the settings gglinux applied
+ggctl parts                   # which parts run; ggctl parts clips off turns one off
+ggctl screen care shift off   # burn-in care: shift, away, own (each on or off)
 ggctl --help
 ```
 

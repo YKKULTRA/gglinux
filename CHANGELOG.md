@@ -28,7 +28,7 @@ Pro TKL Gen 3 keyboard (`1038:1642`), Arctis Nova Pro Wireless headset and base 
 
 ## [Unreleased]
 
-### Keyboard screen and switches (M4b, M5), Hyprland
+### Keyboard screen and switches (M4b, M5), screen care, parts, Hyprland
 
 2026-10-29.
 
@@ -53,6 +53,20 @@ Pro TKL Gen 3 keyboard (`1038:1642`), Arctis Nova Pro Wireless headset and base 
 - **Hyprland:** the clip hotkey's message gives the `global` bind line for `hyprland.lua` and
   `hyprland.conf`; Settings explains that Hyprland doesn't run autostart entries and shows the
   line that starts the tray window; the README has a Hyprland section.
+- **Screen burn-in care.** A picture of gglinux's moves a pixel every two minutes (a 5 × 5 walk
+  around where it's drawn) and goes dark while nobody is at the computer: no active, unlocked
+  session of the user on a seat (logind), the screensaver service says locked (hypridle and
+  Plasma's locker answer `org.freedesktop.ScreenSaver.GetActive`; hypridle never tells logind), the
+  computer going to sleep (a logind delay lock holds sleep until the screen is dark), or nobody
+  logged in. Optionally the keyboard's own screen goes dark then too (off by default). Both on by
+  default for gglinux's pictures; `ggctl screen care ...`.
+- **Parts.** Every part (keyboard, headset, mouse, Sonar, GameSense, profiles, clips) can be
+  turned off in Settings or with `ggctl parts <part> off`. One that's off isn't started: its
+  device is left alone, its page is hidden, and its requests are refused with where to turn it
+  back on. GameSense needs the keyboard. Applying a change restarts the daemon in place (same
+  process, so systemd keeps tracking it). Turning Sonar off takes its channels out of PipeWire;
+  turning GameSense off takes its files out of the Proton prefixes.
+- Backups now include the switch, screen, screen-care and parts settings (they were left out).
 
 ### Device daemon and IPC (M0)
 
