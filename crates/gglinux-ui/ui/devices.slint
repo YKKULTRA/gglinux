@@ -1,0 +1,588 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The Engine page's device list, and the mouse and headset panels.
+
+import { ComboBox, SpinBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Card, Title, Hint, ErrorLine, Toggle, Button, Segmented, AccentSlider, PanelHead, Battery, Row, Unit, Head, Badge, Divider, Shown } from "widgets.slint";
+
+export struct Iface {
+    number: int,
+    usage-page: string,
+    usage: string,
+    path: string,
+    vendor: bool,
+}
+
+export struct Device {
+    id: string,
+    name: string,
+    kind: string,
+    ids: string,
+    connected: bool,
+    summary: string,
+    /// Its interface table is open.
+    open: bool,
+    interfaces: [Iface],
+}
+
+export global EngineUi {
+    in property <[Device]> devices;
+    in property <bool> mouse;
+    in property <bool> headset;
+    in property <bool> keyboard;
+    /// Open or close a card's interface table, by device id.
+    callback toggle(string);
+}
+
+// --- boxes that keep showing the truth ----------------------------------------
+
+/// A number box showing `value`. A SpinBox stops following its binding once it's
+/// typed in, so `value` is pushed into it whenever it changes, and again when a
+/// request ends (`busy` falls) so a refused entry doesn't stay in the box.
+component NumberBox {
+    in property <int> value;
+    in property <int> minimum;
+    in property <int> maximum: 100;
+    in property <int> step: 1;
+    in property <bool> enabled: true;
+    in property <bool> busy;
+    /// Also commit after a pause in editing: the box's arrows don't take the
+    /// focus, so leaving the box may never come.
+    in property <bool> commit-on-pause;
+    /// Each change, typed or stepped, as it happens.
+    callback edited(int);
+    /// The value once editing is done: on leaving the box, or after a pause.
+    callback committed(int);
+    property <bool> dirty;
+    function commit() {
+        pause.running = false;
+        if root.dirty {
+            root.dirty = false;
+            root.committed(sb.value);
+        }
+    }
+    HorizontalLayout {
+        sb := SpinBox {
+            minimum: root.minimum;
+            maximum: root.maximum;
+            step-size: root.step;
+            value: root.value;
+            enabled: root.enabled;
+            edited(v) => {
+                root.dirty = true;
+                if root.commit-on-pause {
+                    pause.running = true;
+                    pause.restart();
+                }
+                root.edited(v);
+            }
+            changed has-focus => {
+                if !self.has-focus {
+                    root.commit();
+                }
+            }
+        }
+    }
+    pause := Timer {
+        interval: 1200ms;
+        running: false;
+        triggered => { root.commit(); }
+    }
+    changed value => { sb.value = root.value; }
+    changed busy => {
+        if !root.busy && !root.dirty {
+            sb.value = root.value;
+        }
+    }
+}
+
+/// A drop-down showing `index`, for the same reason as `NumberBox`: a ComboBox
+/// keeps its own pick once used, so `index` is pushed into it when it changes
+/// and when a request ends.
+component Pick {
+    in property <[string]> model;
+    in property <int> index;
+    in property <bool> enabled: true;
+    in property <bool> busy;
+    callback picked(int);
+    HorizontalLayout {
+        cb := ComboBox {
+            model: root.model;
+            current-index: root.index;
+            enabled: root.enabled;
+            selected => { root.picked(self.current-index); }
+        }
+    }
+    changed index => { cb.current-index = root.index; }
+    changed busy => {
+        if !root.busy {
+            cb.current-index = root.index;
+        }
+    }
+}
+
+// --- the device cards ---------------------------------------------------------
+
+component DeviceCard inherits Card {
+    in property <Device> device;
+    HorizontalLayout {
+        spacing: 14px;
+        alignment: start;
+        Rectangle {
+            width: 46px;
+            height: 46px;
+            border-radius: 10px;
+            background: Theme.surface-2;
+            Image {
+                width: 26px;
+                colorize: Theme.accent;
+                source: root.device.kind == "keyboard" ? @image-url("icons/keyboard.svg")
+                    : root.device.kind == "mouse" ? @image-url("icons/mouse.svg")
+                    : root.device.kind == "headset" ? @image-url("icons/headset.svg")
+                    : @image-url("icons/other.svg");
+            }
+        }
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Text { text: root.device.name; color: Theme.text; font-size: 14.5px; font-weight: 600; }
+                VerticalLayout { alignment: center; Badge { text: root.device.connected ? "CONNECTED" : "OFFLINE"; good: root.device.connected; } }
+            }
+            Text { text: root.device.ids; color: Theme.text-dim; font-size: Theme.small; }
+            TouchArea {
+                height: t.preferred-height;
+                mouse-cursor: pointer;
+                clicked => { EngineUi.toggle(root.device.id); }
+                t := Text {
+                    x: 0;
+                    text: (root.device.open ? "▾ " : "▸ ") + root.device.summary;
+                    color: parent.has-hover ? Theme.text : Theme.text-dim;
+                    font-size: Theme.small;
+                }
+            }
+            if root.device.open : VerticalLayout {
+                spacing: 2px;
+                padding-top: 4px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { width: 40px; text: "iface"; color: Theme.text-dim; font-size: Theme.tiny; }
+                    Text { width: 80px; text: "usage page"; color: Theme.text-dim; font-size: Theme.tiny; }
+                    Text { width: 48px; text: "usage"; color: Theme.text-dim; font-size: Theme.tiny; }
+                    Text { text: "node"; color: Theme.text-dim; font-size: Theme.tiny; }
+                }
+                for i in root.device.interfaces : HorizontalLayout {
+                    spacing: 8px;
+                    Text { width: 40px; text: i.number; color: i.vendor ? Theme.accent : Theme.text-dim; font-size: Theme.tiny; }
+                    Text { width: 80px; text: i.usage-page; color: i.vendor ? Theme.accent : Theme.text-dim; font-size: Theme.tiny; font-family: Theme.mono; }
+                    Text { width: 48px; text: i.usage; color: i.vendor ? Theme.accent : Theme.text-dim; font-size: Theme.tiny; font-family: Theme.mono; }
+                    Text { text: i.path; color: i.vendor ? Theme.accent : Theme.text-dim; font-size: Theme.tiny; font-family: Theme.mono; }
+                }
+            }
+        }
+    }
+}
+
+/// The device cards in as many columns of at least 360 px as fit, like the old
+/// app's grid.
+export component DeviceList {
+    property <length> gap: 12px;
+    property <int> cols: max(1, floor((root.width + root.gap) / (360px + root.gap)));
+    property <int> rows: ceil(EngineUi.devices.length / root.cols);
+    VerticalLayout {
+        spacing: root.gap;
+        for r in root.rows : HorizontalLayout {
+            spacing: root.gap;
+            for c in root.cols : VerticalLayout {
+                // Equal columns, whatever is in them (an empty one too).
+                min-width: 0;
+                preferred-width: 0;
+                horizontal-stretch: 1;
+                if r * root.cols + c < EngineUi.devices.length : DeviceCard {
+                    device: EngineUi.devices[r * root.cols + c];
+                }
+            }
+        }
+    }
+}
+
+// --- the mouse ---------------------------------------------------------------
+
+export global MouseUi {
+    in property <bool> known;
+    in property <bool> connected;
+    /// -1: not known (the mouse reports nothing while asleep).
+    in property <int> battery: -1;
+    in property <bool> charging;
+    /// What this daemon wrote this session, or "".
+    in property <string> applied;
+    in property <[int]> stages: [800, 1600];
+    in property <int> active;
+    in property <int> polling: 1000;
+    /// Per button, its place in `actions`, or -1 for a key set elsewhere.
+    in property <[int]> buttons: [0, 1, 2, 3, 4, 5];
+    /// Per button, that key's name, or "".
+    in property <[string]> button-keys: ["", "", "", "", "", ""];
+    in-out property <bool> persist;
+    in property <string> busy;
+    in property <string> error;
+    out property <[int]> rates: [125, 250, 500, 1000];
+    out property <[string]> button-names: ["Left", "Right", "Middle", "Back", "Forward", "DPI"];
+    out property <[string]> actions: [
+        "Left click", "Right click", "Middle click", "Back", "Forward", "Cycle DPI",
+        "Scroll up", "Scroll down", "Play / pause", "Next track", "Previous track",
+        "Mute", "Volume up", "Volume down", "Disabled",
+    ];
+    /// While typing: the number as it stands.
+    callback edit-stage(int, int);
+    /// Done typing: the number, snapped to the mouse's steps.
+    callback set-stage(int, int);
+    callback add-stage();
+    callback remove-stage(int);
+    callback pick-stage(int);
+    callback pick-polling(int);
+    callback pick-button(int, int);
+    callback factory-buttons();
+    callback apply-dpi();
+    callback apply-polling();
+    callback apply-buttons();
+    callback save();
+}
+
+/// The mouse can't be read: say so, and what this session wrote.
+component Caveat inherits Rectangle {
+    in property <string> applied;
+    background: Theme.surface-2;
+    border-radius: 8px;
+    VerticalLayout {
+        padding-left: 11px;
+        padding-right: 11px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 2px;
+        Hint { text: "This mouse has no way to report its settings back, so nothing here is read from the hardware."; }
+        HorizontalLayout {
+            spacing: root.applied != "" ? 5px : 0;
+            Hint {
+                text: root.applied != "" ? "Applied this session:" : "Nothing has been written this session: the mouse is running its onboard configuration.";
+                wrap: root.applied != "" ? no-wrap : word-wrap;
+                horizontal-stretch: root.applied != "" ? 0 : 1;
+            }
+            Text {
+                text: root.applied != "" ? root.applied + "." : "";
+                color: Theme.text;
+                font-size: Theme.small;
+                wrap: word-wrap;
+                horizontal-stretch: root.applied != "" ? 1 : 0;
+                max-width: root.applied != "" ? 100000px : 0px;
+            }
+        }
+    }
+}
+
+export component MousePanel inherits Card {
+    PanelHead {
+        icon: @image-url("icons/mouse.svg");
+        title: "Rival 3 Wireless Gen 2";
+        meta: MouseUi.battery >= 0 ? (MouseUi.charging ? "·  charging" : "·  on battery")
+            : MouseUi.connected ? "battery unknown: the mouse reports nothing while asleep"
+            : "not connected";
+        if MouseUi.battery >= 0 : Battery { level: MouseUi.battery; }
+    }
+    Caveat { applied: MouseUi.applied; }
+    Divider { }
+    Head {
+        text: "DPI STAGES";
+        Button { text: "Add stage"; small: true; enabled: MouseUi.stages.length < 5; clicked => { MouseUi.add-stage(); } }
+    }
+    for dpi[i] in MouseUi.stages : HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        TouchArea {
+            width: 46px;
+            mouse-cursor: pointer;
+            clicked => { MouseUi.pick-stage(i); }
+            Rectangle {
+                width: 30px;
+                height: 26px;
+                x: 0;
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: i == MouseUi.active ? Theme.accent : Theme.line;
+                background: i == MouseUi.active ? Theme.accent.with-alpha(0.16) : Theme.surface-2;
+                Text { text: i + 1; color: i == MouseUi.active ? Theme.accent : Theme.text-dim; font-weight: 600; }
+            }
+        }
+        NumberBox {
+            width: 130px;
+            minimum: 100;
+            maximum: 18000;
+            step: 100;
+            value: dpi;
+            edited(v) => { MouseUi.edit-stage(i, v); }
+            committed(v) => { MouseUi.set-stage(i, v); }
+        }
+        Text { text: "dpi"; color: Theme.text-dim; vertical-alignment: center; }
+        Button { text: "×"; small: true; enabled: MouseUi.stages.length > 1; clicked => { MouseUi.remove-stage(i); } }
+    }
+    Hint { text: "The highlighted stage is the one the mouse switches to; click a number to pick it."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "dpi" ? "Applying…" : "Apply DPI"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-dpi(); } }
+    }
+    Divider { }
+    Head { text: "POLLING RATE"; }
+    HorizontalLayout {
+        alignment: start;
+        Segmented {
+            options: ["125 Hz", "250 Hz", "500 Hz", "1000 Hz"];
+            current: MouseUi.polling == 125 ? 0 : MouseUi.polling == 250 ? 1 : MouseUi.polling == 500 ? 2 : MouseUi.polling == 1000 ? 3 : -1;
+            picked(i) => { MouseUi.pick-polling(MouseUi.rates[i]); }
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "polling" ? "Applying…" : "Apply polling rate"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-polling(); } }
+    }
+    Divider { }
+    Head {
+        text: "BUTTONS";
+        Button { text: "Reset to factory"; small: true; clicked => { MouseUi.factory-buttons(); } }
+    }
+    for name[i] in MouseUi.button-names : Row {
+        label: name;
+        Pick {
+            width: 220px;
+            model: MouseUi.actions;
+            index: MouseUi.buttons[i];
+            picked(a) => { MouseUi.pick-button(i, a); }
+        }
+        // A key set elsewhere (with ggctl) isn't in the menu; it's kept as it is.
+        Text {
+            text: MouseUi.button-keys[i] != "" ? "key " + MouseUi.button-keys[i] : "";
+            color: Theme.text-dim;
+            font-size: Theme.small;
+            vertical-alignment: center;
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "buttons" ? "Applying…" : "Apply buttons"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-buttons(); } }
+    }
+    Divider { }
+    Toggle { text: "Write to onboard memory as well"; checked: MouseUi.persist; toggled(v) => { MouseUi.persist = v; } }
+    Hint { text: "Without this, settings are lost when the mouse sleeps. With it, they survive, and overwrite what was stored, which cannot be recovered."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "save" ? "Saving…" : "Save current settings to mouse"; enabled: MouseUi.busy == ""; clicked => { MouseUi.save(); } }
+    }
+    ErrorLine { text: MouseUi.error; }
+}
+
+// --- the headset -------------------------------------------------------------
+
+export global HeadsetUi {
+    in property <bool> known;
+    in property <bool> connected;
+    in property <string> power;
+    in property <int> battery: -1;
+    in property <int> spare: -1;
+    in property <bool> protect;
+    in property <int> lit-seconds: 10;
+    /// -1: left as it is.
+    in property <int> brightness: -1;
+    in property <bool> screen-dark;
+    in property <bool> controls;
+    /// Indexes into the choices below; -1 for not known.
+    in property <int> noise: -1;
+    in property <int> transparency: -1;
+    /// -1 not known, 0 live, 1 muted.
+    in property <int> mic-muted: -1;
+    in property <int> sidetone: -1;
+    in property <int> mic-volume: -1;
+    in property <int> mic-led: -1;
+    in property <int> auto-off: -1;
+    in property <int> radio: -1;
+    in property <int> eq-preset: -1;
+    in property <bool> editing-custom;
+    in property <[float]> bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    in property <bool> busy;
+    in property <string> error;
+    out property <[string]> auto-off-names: ["Never", "1 min", "5 min", "10 min", "15 min", "30 min", "60 min"];
+    out property <[string]> band-names: ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
+    callback set-protect(bool);
+    callback set-lit-seconds(int);
+    callback set-brightness(int);
+    callback set-noise(int);
+    callback set-transparency(int);
+    callback set-sidetone(int);
+    callback set-mic-volume(int);
+    callback set-mic-led(int);
+    callback set-auto-off(int);
+    callback set-radio(int);
+    callback pick-preset(int);
+    callback set-band(int, float);
+    callback apply-bands();
+}
+
+export component HeadsetPanel inherits Card {
+    PanelHead {
+        icon: @image-url("icons/headset.svg");
+        title: "Arctis Nova Pro Wireless";
+        meta: !HeadsetUi.connected ? "base station not connected"
+            : (HeadsetUi.spare < 0 ? "·  no spare battery" : "·  spare \{HeadsetUi.spare}%");
+        if HeadsetUi.connected : Text { text: HeadsetUi.power + (HeadsetUi.battery >= 0 ? "  ·" : ""); color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; }
+        if HeadsetUi.connected && HeadsetUi.battery >= 0 : Battery { level: HeadsetUi.battery; low: 25; }
+    }
+    Shown { shown: HeadsetUi.known; gap: 0; VerticalLayout {
+        spacing: 10px;
+        Divider { }
+        Head {
+            text: "SCREEN BURN-IN PROTECTION";
+            state: HeadsetUi.connected && HeadsetUi.protect ? (HeadsetUi.screen-dark ? "screen dark" : "screen lit") : "";
+        }
+        Toggle {
+            text: "Keep the base-station screen dark, lighting it briefly for battery, headset and volume changes";
+            checked: HeadsetUi.protect;
+            enabled: !HeadsetUi.busy;
+            toggled(v) => { HeadsetUi.set-protect(v); }
+        }
+        Row {
+            label: "Stay lit for";
+            NumberBox {
+                width: 120px;
+                minimum: 3;
+                maximum: 600;
+                value: HeadsetUi.lit-seconds;
+                enabled: !HeadsetUi.busy && HeadsetUi.protect;
+                busy: HeadsetUi.busy;
+                commit-on-pause: true;
+                committed(v) => { HeadsetUi.set-lit-seconds(v); }
+            }
+            Unit { text: "seconds"; }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Row {
+            label: "Brightness";
+            AccentSlider {
+                minimum: 1;
+                maximum: 10;
+                value: HeadsetUi.brightness < 0 ? 10 : HeadsetUi.brightness;
+                enabled: !HeadsetUi.busy;
+                released(v) => { HeadsetUi.set-brightness(v); }
+            }
+            Unit { text: HeadsetUi.brightness < 0 ? "unchanged" : HeadsetUi.brightness; }
+        }
+        Hint { text: "No brightness switches the screen off (the lowest level is still lit), so protection blanks it with a black image instead. These settings reset when the daemon restarts."; }
+    } }
+    Shown { shown: HeadsetUi.connected && HeadsetUi.controls; gap: 0; VerticalLayout {
+        spacing: 10px;
+        Divider { }
+        Head { text: "NOISE CONTROL"; }
+        HorizontalLayout {
+            alignment: start;
+            Segmented { options: ["Off", "Transparency", "ANC"]; current: HeadsetUi.noise; enabled: !HeadsetUi.busy; picked(i) => { HeadsetUi.set-noise(i); } }
+        }
+        if HeadsetUi.noise == 1 : Row {
+            label: "Transparency";
+            AccentSlider { minimum: 1; maximum: 10; value: HeadsetUi.transparency < 0 ? 5 : HeadsetUi.transparency; enabled: !HeadsetUi.busy; released(v) => { HeadsetUi.set-transparency(v); } }
+            Unit { text: HeadsetUi.transparency < 0 ? "–" : HeadsetUi.transparency; }
+        }
+        Divider { }
+        Head { text: "MICROPHONE"; state: HeadsetUi.mic-muted < 0 ? "" : HeadsetUi.mic-muted == 1 ? "muted" : "live"; }
+        Row {
+            label: "Sidetone";
+            Segmented { options: ["Off", "Low", "Medium", "High"]; current: HeadsetUi.sidetone; enabled: !HeadsetUi.busy; picked(i) => { HeadsetUi.set-sidetone(i); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Row {
+            label: "Mic volume";
+            AccentSlider { minimum: 1; maximum: 10; value: HeadsetUi.mic-volume < 0 ? 10 : HeadsetUi.mic-volume; enabled: !HeadsetUi.busy; released(v) => { HeadsetUi.set-mic-volume(v); } }
+            Unit { text: HeadsetUi.mic-volume < 0 ? "unknown" : HeadsetUi.mic-volume; }
+        }
+        Row {
+            label: "Mute light";
+            AccentSlider { minimum: 1; maximum: 10; value: HeadsetUi.mic-led < 0 ? 10 : HeadsetUi.mic-led; enabled: !HeadsetUi.busy; released(v) => { HeadsetUi.set-mic-led(v); } }
+            Unit { text: HeadsetUi.mic-led < 0 ? "–" : HeadsetUi.mic-led; }
+        }
+        Hint { text: "The headset can't report sidetone or mic volume, so those show what was last set here (\"unknown\" until then)."; }
+        Divider { }
+        Head { text: "POWER & RADIO"; }
+        Row {
+            label: "Auto-off";
+            Pick {
+                width: 160px;
+                // "unknown" is a choice only until the base station says.
+                model: HeadsetUi.auto-off < 0 ? ["unknown", "Never", "1 min", "5 min", "10 min", "15 min", "30 min", "60 min"] : HeadsetUi.auto-off-names;
+                index: HeadsetUi.auto-off < 0 ? 0 : HeadsetUi.auto-off;
+                enabled: !HeadsetUi.busy;
+                busy: HeadsetUi.busy;
+                picked(i) => {
+                    if HeadsetUi.auto-off < 0 {
+                        if i > 0 { HeadsetUi.set-auto-off(i - 1); }
+                    } else {
+                        HeadsetUi.set-auto-off(i);
+                    }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Row {
+            label: "2.4 GHz";
+            Segmented { options: ["Speed", "Range"]; current: HeadsetUi.radio; enabled: !HeadsetUi.busy; picked(i) => { HeadsetUi.set-radio(i); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        Divider { }
+        Head { text: "EQUALIZER"; }
+        HorizontalLayout {
+            alignment: start;
+            Segmented {
+                options: ["Flat", "Bass Boost", "Focus", "Smiley", "Custom"];
+                current: HeadsetUi.editing-custom ? 4 : HeadsetUi.eq-preset;
+                enabled: !HeadsetUi.busy;
+                picked(i) => { HeadsetUi.pick-preset(i); }
+            }
+        }
+        if HeadsetUi.editing-custom || HeadsetUi.eq-preset == 4 : VerticalLayout {
+            spacing: 6px;
+            for db[i] in HeadsetUi.bands : Row {
+                label: HeadsetUi.band-names[i] + " Hz";
+                label-width: 70px;
+                AccentSlider { minimum: -10; maximum: 10; step: 0.5; value: db; enabled: !HeadsetUi.busy; changed(v) => { HeadsetUi.set-band(i, v); } }
+                Unit { text: (db > 0 ? "+" : "") + db + " dB"; }
+            }
+            HorizontalLayout {
+                alignment: start;
+                Button { text: "Apply custom EQ"; enabled: !HeadsetUi.busy; clicked => { HeadsetUi.apply-bands(); } }
+            }
+        }
+        Hint { text: "The base station can't report its EQ, so the preset shows what was last set here."; }
+    } }
+    ErrorLine { text: HeadsetUi.error; }
+}
+
+/// The mouse and headset panels: side by side once both fit at a readable
+/// width, else one above the other. Each is capped as in the old app, since a
+/// column of short rows stretched wide leaves each label far from its control.
+export component DevicePanels {
+    property <length> gap: 18px;
+    property <length> cap: 560px;
+    property <bool> side: EngineUi.mouse && EngineUi.headset && root.width >= 2 * 420px + root.gap;
+    property <length> lane: root.side ? min(root.cap, (root.width - root.gap) / 2) : min(root.cap, root.width);
+    m := Shown {
+        x: 0;
+        y: 0;
+        width: root.lane;
+        shown: EngineUi.mouse;
+        MousePanel { }
+    }
+    h := Shown {
+        x: root.side ? root.lane + root.gap : 0;
+        y: root.side ? 0 : m.height;
+        width: root.lane;
+        shown: EngineUi.headset;
+        HeadsetPanel { }
+    }
+    height: root.side ? max(m.height, h.height) : m.height + h.height;
+}

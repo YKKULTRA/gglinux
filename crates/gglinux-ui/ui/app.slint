@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The gglinux window: a sidebar of pages, and the page.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { NavItem, Card, Title, Hint, Code, Shown } from "widgets.slint";
+import { EngineUi, DeviceList, DevicePanels } from "devices.slint";
+import { KeyboardPanel } from "keyboard.slint";
+import { SonarPanel } from "sonar.slint";
+import { GamesPanel, MomentsPanel, PartsPanel, ProfilesPanel, SettingsPanel } from "pages.slint";
+
+export { Theme, EngineUi }
+export { MouseUi, HeadsetUi } from "devices.slint";
+export { KeyboardUi, SwitchesUi, ScreenUi, TapRow } from "keyboard.slint";
+export { Key } from "widgets.slint";
+export { SonarUi, SonarChannel, SonarApp, EqHandle } from "sonar.slint";
+export { GamesUi, Game, MomentsUi, Clip, PartsUi, PartRow, ProfilesUi, RuleRow, SettingsUi } from "pages.slint";
+
+export enum Page { engine, sonar, games, moments, settings }
+
+/// Which parts of gglinux run (the daemon's `Parts`).
+export struct Parts {
+    keyboard: bool,
+    headset: bool,
+    mouse: bool,
+    sonar: bool,
+    gamesense: bool,
+    profiles: bool,
+    clips: bool,
+}
+
+/// What the whole window shares: the daemon connection and the page.
+export global Gg {
+    in-out property <bool> connected;
+    in-out property <Parts> parts: {
+        keyboard: true, headset: true, mouse: true, sonar: true,
+        gamesense: true, profiles: true, clips: true,
+    };
+    in-out property <bool> restarting;
+    in-out property <Page> page: Page.engine;
+    public pure function shown(p: Page) -> bool {
+        if p == Page.sonar { return parts.sonar; }
+        if p == Page.games { return parts.gamesense && parts.keyboard; }
+        if p == Page.moments { return parts.clips; }
+        return true;
+    }
+}
+
+component PageHead {
+    in property <string> title;
+    in property <string> blurb;
+    VerticalLayout {
+        spacing: 3px;
+        padding-bottom: 18px;
+        Text { text: root.title; color: Theme.text; font-size: 20px; font-weight: 620; }
+        Text { text: root.blurb; color: Theme.text-dim; font-size: 13px; }
+    }
+}
+
+component Offline inherits Card {
+    in property <string> heading: "gglinuxd isn't running";
+    in property <bool> how: true;
+    Title { text: root.heading; }
+    if root.how : Hint { text: "Start the daemon, and this fills in by itself:"; }
+    if root.how : Code { text: "systemctl --user enable --now gglinuxd"; }
+    if root.how : Hint { text: "The app reconnects on its own; there's no need to restart it."; }
+}
+
+component EnginePage {
+    VerticalLayout {
+        alignment: start;
+        Shown {
+            shown: EngineUi.devices.length == 0;
+            Card {
+                max-width: 620px;
+                Title { text: "No SteelSeries devices found"; }
+                Hint { text: "Connected devices show up here the moment they're plugged in. If yours is attached but missing, check its cable or try another USB port. A wireless one is found through its dongle or base station, so that is what needs to be plugged in."; }
+            }
+        }
+        DevicePanels { }
+        Shown { shown: EngineUi.keyboard; KeyboardPanel { max-width: 760px; } }
+        DeviceList { }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "gglinux";
+    icon: @image-url("../../../data/icons/128x128.png");
+    // The old app's sizes: the widest panel (760) and the sidebar fit side by side.
+    preferred-width: 1120px;
+    preferred-height: 740px;
+    min-width: 900px;
+    min-height: 580px;
+    background: Theme.bg;
+    default-font-size: Theme.font;
+
+    HorizontalLayout {
+        Rectangle {
+            width: 218px;
+            background: Theme.surface;
+            VerticalLayout {
+                padding-top: 16px;
+                padding-bottom: 12px;
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 2px;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-bottom: 16px;
+                    spacing: 9px;
+                    Rectangle {
+                        width: 20px;
+                        height: 20px;
+                        border-radius: 6px;
+                        background: @linear-gradient(140deg, Theme.accent 0%, Theme.accent-2 100%);
+                    }
+                    Text { text: "gglinux"; color: Theme.text; font-size: 15px; font-weight: 650; vertical-alignment: center; }
+                }
+                NavItem { label: "Engine"; icon: @image-url("icons/engine.svg"); active: Gg.page == Page.engine; clicked => { Gg.page = Page.engine; } }
+                if Gg.shown(Page.sonar) : NavItem { label: "Sonar"; icon: @image-url("icons/sonar.svg"); active: Gg.page == Page.sonar; clicked => { Gg.page = Page.sonar; } }
+                if Gg.shown(Page.games) : NavItem { label: "Games"; icon: @image-url("icons/games.svg"); active: Gg.page == Page.games; clicked => { Gg.page = Page.games; } }
+                if Gg.shown(Page.moments) : NavItem { label: "Moments"; icon: @image-url("icons/moments.svg"); active: Gg.page == Page.moments; clicked => { Gg.page = Page.moments; } }
+                NavItem { label: "Settings"; icon: @image-url("icons/settings.svg"); active: Gg.page == Page.settings; clicked => { Gg.page = Page.settings; } }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    padding-left: 6px;
+                    spacing: 4px;
+                    VerticalLayout {
+                        alignment: center;
+                        // The pip, with a faint ring while connected.
+                        Rectangle {
+                            width: 13px;
+                            height: 13px;
+                            border-radius: 6.5px;
+                            background: Gg.connected ? Theme.ok.with-alpha(0.2) : transparent;
+                            Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: Gg.connected ? Theme.ok : Theme.text-dim;
+                            }
+                        }
+                    }
+                    Text {
+                        text: Gg.connected ? "daemon connected" : "daemon offline";
+                        color: Theme.text-dim;
+                        font-size: 11.5px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        Rectangle { width: 1px; background: Theme.line; }
+        sv := ScrollView {
+            // The page at its own height: left to the view, it's squeezed into
+            // the window instead of scrolling.
+            content-width: sv.visible-width;
+            content-height: page.preferred-height;
+            page := VerticalLayout {
+                width: sv.visible-width;
+                height: self.preferred-height;
+                padding-top: 24px;
+                padding-left: 28px;
+                padding-right: 28px;
+                padding-bottom: 36px;
+                // Each piece brings its own gap below: a hidden one then takes no room.
+                spacing: 0;
+                alignment: start;
+                if Gg.page == Page.engine : PageHead { title: "Engine"; blurb: "Devices, lighting, bindings"; }
+                if Gg.page == Page.sonar : PageHead { title: "Sonar"; blurb: "Per-app audio routing and EQ"; }
+                if Gg.page == Page.games : PageHead { title: "Games"; blurb: "GameSense: games drive your lighting"; }
+                if Gg.page == Page.moments : PageHead { title: "Moments"; blurb: "Instant replay and clips"; }
+                if Gg.page == Page.settings : PageHead { title: "Settings"; blurb: "Parts, profiles, start at login, backups"; }
+                Shown {
+                    shown: !Gg.connected;
+                    Offline {
+                        max-width: 620px;
+                        heading: Gg.restarting ? "gglinuxd is starting again with the new parts…" : "gglinuxd isn't running";
+                        how: Gg.page == Page.engine && !Gg.restarting;
+                    }
+                }
+                if Gg.connected && Gg.page == Page.engine : EnginePage { }
+                Shown { shown: Gg.connected && Gg.page == Page.sonar; SonarPanel { max-width: 760px; } }
+                Shown { shown: Gg.connected && Gg.page == Page.games; GamesPanel { max-width: 760px; } }
+                Shown { shown: Gg.connected && Gg.page == Page.moments; MomentsPanel { max-width: 760px; } }
+                Shown { shown: Gg.connected && Gg.page == Page.settings; PartsPanel { max-width: 760px; } }
+                Shown { shown: Gg.connected && Gg.page == Page.settings && Gg.parts.profiles; ProfilesPanel { max-width: 760px; } }
+                // Outside the guard: starting at login and backups work without the daemon.
+                Shown { shown: Gg.page == Page.settings; SettingsPanel { max-width: 760px; showing: Gg.page == Page.settings; } }
+            }
+        }
+    }
+}

@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gg-ipc", "crates/gg-hid", "crates/gg-device-mouse", "crates/gg-device-headset", "crates/gg-device-keyboard", "crates/gg-gamesense", "crates/gg-audio", "crates/gglinuxd"]
-exclude = ["ui"]
+members = ["crates/gg-ipc", "crates/gg-hid", "crates/gg-device-mouse", "crates/gg-device-headset", "crates/gg-device-keyboard", "crates/gg-gamesense", "crates/gg-audio", "crates/gglinuxd", "crates/gglinux-ui"]
 
 [workspace.package]
 version = "0.0.1"
@@ -33,3 +32,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Slimmer, faster debug builds for the C-heavy hidapi dep.
 [profile.dev.package."*"]
 opt-level = 1
+
+# No symbol tables in the installed binaries (the app's is most of its size).
+[profile.release]
+strip = true

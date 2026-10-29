@@ -1,0 +1,491 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Games (GameSense), Moments (clips), and Settings (parts, profiles, start at
+// login, backups).
+
+import { ComboBox, LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Card, Hint, ErrorLine, Toggle, Button, AccentSlider, Row, Unit, Head, Divider, Shown, Title, Code, Segmented } from "widgets.slint";
+
+/// A piece that comes and goes, bringing its gap above it. In a layout with no
+/// spacing a hidden one takes no room at all; a spaced layout would keep the
+/// gaps around it.
+component Opt {
+    in property <bool> shown: true;
+    in property <length> gap: 10px;
+    visible: root.shown;
+    height: root.shown ? inner.preferred-height : 0px;
+    inner := VerticalLayout {
+        spacing: 0;
+        padding-top: root.gap;
+        @children
+    }
+}
+
+/// A boxed note on the page colour: something missing, or a question.
+component Notice inherits Rectangle {
+    background: Theme.bg;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        @children
+    }
+}
+
+/// Dim one-line text, for a panel waiting on its first answer.
+component Waiting inherits Text {
+    color: Theme.text-dim;
+    font-size: Theme.small;
+}
+
+// --- Games ---------------------------------------------------------------------
+
+export struct Game {
+    name: string,
+    who: string,
+    events: string,
+    enabled: bool,
+    active: bool,
+}
+
+export global GamesUi {
+    in property <bool> known;
+    in property <bool> enabled;
+    in property <string> listening;
+    in property <[Game]> games;
+    in property <bool> busy;
+    in property <string> error;
+    callback set-enabled(bool);
+    callback test();
+    callback set-game(int, bool);
+    callback remove(int);
+}
+
+export component GamesPanel inherits Card {
+    VerticalLayout {
+        spacing: 0;
+        if !GamesUi.known : Waiting { text: "Asking gglinuxd about GameSense…"; }
+        Shown { shown: GamesUi.known; gap: 0; VerticalLayout {
+            spacing: 10px;
+            Toggle { text: "Let games control the keyboard lighting (GameSense)"; checked: GamesUi.enabled; enabled: !GamesUi.busy; toggled(v) => { GamesUi.set-enabled(v); } }
+            Hint { text: "Turning this on writes a small coreProps.json into each of Steam's Proton prefixes, so Windows games find gglinux; turning it off removes them. Games that support GameSense can take the keyboard over while they run, even with gglinux lighting off, and hand it back 15 seconds after they go quiet."; }
+            if GamesUi.enabled : Text { text: GamesUi.listening; color: Theme.text-dim; font-size: Theme.small; overflow: elide; }
+            HorizontalLayout {
+                alignment: start;
+                Button { text: "Run test (F-key health bar, 20 s)"; enabled: !GamesUi.busy; clicked => { GamesUi.test(); } }
+            }
+            Divider { }
+            Head { text: "GAMES"; }
+            if GamesUi.games.length == 0 : Text { text: "No game has talked to GameSense yet."; color: Theme.text-dim; font-size: Theme.small; }
+            for g[i] in GamesUi.games : HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    // Lit while the game is drawing; dim once it has gone quiet.
+                    Rectangle { width: 9px; height: 9px; border-radius: 4.5px; background: g.active ? Theme.accent : Theme.line; }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    Text { text: g.name; color: Theme.text; font-weight: 600; overflow: elide; }
+                    if g.who != "" : Text { text: g.who; color: Theme.text-dim; font-size: Theme.small; overflow: elide; }
+                    Text { text: g.events; color: Theme.text-dim; font-size: Theme.small; overflow: elide; }
+                }
+                VerticalLayout { alignment: center; horizontal-stretch: 0; Toggle { text: "on"; label-color: Theme.text-dim; checked: g.enabled; enabled: !GamesUi.busy; toggled(v) => { GamesUi.set-game(i, v); } } }
+                VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Remove"; small: true; enabled: !GamesUi.busy; clicked => { GamesUi.remove(i); } } }
+            }
+        } }
+        Opt { shown: GamesUi.error != ""; gap: GamesUi.known ? 10px : 0; ErrorLine { text: GamesUi.error; } }
+    }
+}
+
+// --- Moments -------------------------------------------------------------------
+
+export struct Clip {
+    name: string,
+    meta: string,
+}
+
+export global MomentsUi {
+    in property <bool> known;
+    in property <bool> available;
+    in property <bool> enabled;
+    in property <bool> recording;
+    in property <bool> games-only;
+    in property <string> keeping;
+    in property <bool> waiting;
+    /// Profiles is off, so games-only clips can't see a game.
+    in property <bool> profiles-off;
+    in property <int> seconds: 30;
+    in property <[string]> rates;
+    // Two-way: the list keeps a pick of its own, which must follow the settings.
+    in-out property <int> rate;
+    in property <int> quality;
+    in property <bool> desktop-audio;
+    in property <bool> mic;
+    in property <string> hotkey;
+    in property <bool> hotkey-bad;
+    in property <string> recorder-error;
+    in property <string> dir;
+    in property <[Clip]> clips;
+    /// The clip whose Delete was clicked, waiting for a yes.
+    in-out property <string> confirm;
+    in property <bool> busy;
+    in property <string> error;
+    callback set-enabled(bool);
+    callback set-games-only(bool);
+    callback set-seconds(int);
+    callback set-rate(int);
+    callback set-quality(int);
+    callback set-desktop-audio(bool);
+    callback set-mic(bool);
+    callback save();
+    callback open-folder();
+    callback delete(string);
+}
+
+export component MomentsPanel inherits Card {
+    VerticalLayout {
+        spacing: 0;
+        if !MomentsUi.known : Waiting { text: "Asking gglinuxd about clips…"; }
+        Shown { shown: MomentsUi.known; gap: 0; VerticalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                spacing: 0;
+                Shown { shown: !MomentsUi.available; gap: 12px; Notice {
+                    Hint { text: "Clips need gpu-screen-recorder. Install it, then come back:"; }
+                    Code { text: "sudo pacman -S gpu-screen-recorder"; }
+                } }
+                // Turning off stays possible if the recorder was uninstalled while on.
+                Toggle { text: "Keep an instant-replay buffer"; checked: MomentsUi.enabled; enabled: !MomentsUi.busy && (MomentsUi.available || MomentsUi.enabled); toggled(v) => { MomentsUi.set-enabled(v); } }
+            }
+            Toggle { text: "Only while a game from your game rules runs"; checked: MomentsUi.games-only; enabled: !MomentsUi.busy; toggled(v) => { MomentsUi.set-games-only(v); } }
+            VerticalLayout {
+                spacing: 0;
+                Hint { text: MomentsUi.keeping; }
+                // With Profiles off no game can come, so that's said instead of waiting.
+                Opt { shown: MomentsUi.waiting && !MomentsUi.profiles-off; gap: 6px; Hint { text: "Waiting for a game from your game rules (Settings → Profiles) to start."; } }
+                Opt { shown: MomentsUi.games-only && MomentsUi.profiles-off; gap: 6px; Hint {
+                    text: "Profiles is turned off in Settings → Parts, and games-only clips find the game through its rules, so they won't start.";
+                    color: Theme.danger;
+                } }
+            }
+            Row {
+                label: "Length";
+                seconds := AccentSlider { minimum: 5; maximum: 300; step: 5; value: MomentsUi.seconds; enabled: !MomentsUi.busy; released(v) => { MomentsUi.set-seconds(v); } }
+                Unit { text: round(seconds.shown) + " s"; }
+            }
+            Row {
+                label: "Frame rate";
+                ComboBox { width: 120px; model: MomentsUi.rates; current-index <=> MomentsUi.rate; enabled: !MomentsUi.busy; selected => { MomentsUi.set-rate(self.current-index); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Row {
+                label: "Quality";
+                Segmented { options: ["Medium", "High", "Very high", "Ultra"]; current: MomentsUi.quality; enabled: !MomentsUi.busy; picked(i) => { MomentsUi.set-quality(i); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            HorizontalLayout {
+                spacing: 18px;
+                alignment: start;
+                Toggle { text: "Desktop audio"; checked: MomentsUi.desktop-audio; enabled: !MomentsUi.busy; toggled(v) => { MomentsUi.set-desktop-audio(v); } }
+                Toggle { text: "Microphone"; checked: MomentsUi.mic; enabled: !MomentsUi.busy; toggled(v) => { MomentsUi.set-mic(v); } }
+            }
+            VerticalLayout {
+                spacing: 0;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Save clip"; primary: true; enabled: !MomentsUi.busy && MomentsUi.recording; clicked => { MomentsUi.save(); } } }
+                    Text { text: MomentsUi.hotkey; color: MomentsUi.hotkey-bad ? Theme.danger : Theme.text-dim; font-size: Theme.small; vertical-alignment: center; wrap: word-wrap; }
+                }
+                Opt { shown: MomentsUi.recorder-error != ""; ErrorLine { text: MomentsUi.recorder-error; } }
+            }
+            Divider { }
+            VerticalLayout {
+                spacing: 0;
+                Head {
+                    text: "CLIPS";
+                    // The folder is made when recording starts, so before the first clip it may not exist.
+                    if MomentsUi.clips.length > 0 : Button { text: "Open folder"; small: true; clicked => { MomentsUi.open-folder(); } }
+                }
+                Opt { shown: MomentsUi.clips.length == 0; gap: 8px; Hint { text: "No clips yet in " + MomentsUi.dir + "."; } }
+                for c in MomentsUi.clips : HorizontalLayout {
+                    padding-top: 8px;
+                    spacing: 10px;
+                    Text { text: c.name; color: Theme.text; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                    // Deleting takes the file away for good, so it asks first.
+                    if c.name != MomentsUi.confirm : Text { text: c.meta; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 0; }
+                    if c.name != MomentsUi.confirm : VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Delete"; small: true; enabled: !MomentsUi.busy; clicked => { MomentsUi.confirm = c.name; } } }
+                    if c.name == MomentsUi.confirm : Text { text: "Delete the file for good?"; color: Theme.danger; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 0; }
+                    if c.name == MomentsUi.confirm : VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Delete"; small: true; primary: true; enabled: !MomentsUi.busy; clicked => { MomentsUi.delete(c.name); } } }
+                    if c.name == MomentsUi.confirm : VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Keep"; small: true; clicked => { MomentsUi.confirm = ""; } } }
+                }
+            }
+        } }
+        Opt { shown: MomentsUi.error != ""; gap: MomentsUi.known ? 10px : 0; ErrorLine { text: MomentsUi.error; } }
+    }
+}
+
+// --- Settings: parts -----------------------------------------------------------
+
+export struct PartRow {
+    label: string,
+    what: string,
+    on: bool,
+    note: string,
+}
+
+export global PartsUi {
+    in property <[PartRow]> parts;
+    in property <bool> changed;
+    in property <bool> busy;
+    in property <string> error;
+    callback set(int, bool);
+    callback apply();
+}
+
+export component PartsPanel inherits Card {
+    Title { text: "Parts of gglinux"; }
+    Hint { text: "Turn off what you don't use. A part that's off doesn't run at all: its device is left alone and its page is hidden. Its settings are kept for when you turn it back on."; }
+    // One row each, no wrapping: the notes come from the panel, one line apiece.
+    for p[i] in PartsUi.parts : VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Toggle { text: p.label; checked: p.on; enabled: !PartsUi.busy; label-color: Theme.text; toggled(v) => { PartsUi.set(i, v); } width: 120px; }
+            Text { text: p.what; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+        }
+        if p.note != "" : HorizontalLayout {
+            padding-left: 24px;
+            Text { text: p.note; color: Theme.danger; font-size: Theme.small; overflow: elide; }
+        }
+    }
+    VerticalLayout {
+        spacing: 0;
+        padding-top: 4px;
+        HorizontalLayout {
+            spacing: 12px;
+            VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Apply"; primary: PartsUi.changed; enabled: !PartsUi.busy && PartsUi.changed; clicked => { PartsUi.apply(); } } }
+            Text {
+                text: PartsUi.busy ? "Starting gglinuxd again with the new parts…" : PartsUi.changed ? "Applying restarts gglinuxd, which takes a few seconds." : "";
+                color: Theme.text-dim;
+                font-size: Theme.small;
+                vertical-alignment: center;
+            }
+        }
+        Opt { shown: PartsUi.error != ""; ErrorLine { text: PartsUi.error; } }
+    }
+}
+
+// --- Settings: profiles --------------------------------------------------------
+
+export struct RuleRow {
+    process: string,
+    profile: string,
+}
+
+export global ProfilesUi {
+    in property <bool> known;
+    in property <string> now;
+    in property <[string]> profiles;
+    in property <[RuleRow]> rules;
+    /// The running programs that fit what's typed, after a line that says so.
+    in property <[string]> running;
+    in property <bool> has-running;
+    // Two-way: the lists keep a pick of their own, which must follow these.
+    in-out property <int> running-pick;
+    in-out property <string> new-name;
+    /// The name typed is a saved profile's: saving replaces it.
+    in property <bool> name-taken;
+    in-out property <string> new-process;
+    in-out property <int> new-profile: -1;
+    /// The profile whose Delete was clicked, waiting for a yes.
+    in-out property <string> confirm;
+    in property <bool> busy;
+    in property <string> error;
+    callback apply(int);
+    callback delete(string);
+    callback save();
+    callback name-edited(string);
+    callback process-edited(string);
+    callback remove-rule(int);
+    callback add-rule();
+    callback refresh();
+}
+
+export component ProfilesPanel inherits Card {
+    VerticalLayout {
+        spacing: 0;
+        if !ProfilesUi.known : Waiting { text: "Asking gglinuxd about profiles…"; }
+        Shown { shown: ProfilesUi.known; gap: 0; VerticalLayout {
+            spacing: 10px;
+            if ProfilesUi.now != "" : Text { text: ProfilesUi.now; color: Theme.accent; font-size: Theme.small; overflow: elide; }
+            Head { text: "PROFILES"; }
+            if ProfilesUi.profiles.length == 0 : Text { text: "No profiles yet. Set up the keyboard lighting, then save it here."; color: Theme.text-dim; font-size: Theme.small; }
+            for name[i] in ProfilesUi.profiles : HorizontalLayout {
+                spacing: 8px;
+                Text { text: name; color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                if name != ProfilesUi.confirm : Button { text: "Apply"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.apply(i); } }
+                if name != ProfilesUi.confirm : Button { text: "Delete"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.confirm = name; } }
+                if name == ProfilesUi.confirm : Text { text: "Delete this profile?"; color: Theme.danger; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 0; }
+                if name == ProfilesUi.confirm : Button { text: "Delete"; small: true; primary: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.delete(name); } }
+                if name == ProfilesUi.confirm : Button { text: "Keep"; small: true; clicked => { ProfilesUi.confirm = ""; } }
+            }
+            VerticalLayout {
+                spacing: 0;
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit { placeholder-text: "Profile name"; text <=> ProfilesUi.new-name; edited(t) => { ProfilesUi.name-edited(t); } accepted => { if !ProfilesUi.busy { ProfilesUi.save(); } } }
+                    Button { text: ProfilesUi.name-taken ? "Replace saved lighting" : "Save current lighting"; enabled: !ProfilesUi.busy && ProfilesUi.new-name != ""; clicked => { ProfilesUi.save(); } }
+                }
+                Opt { shown: ProfilesUi.name-taken; gap: 6px; Hint { text: "A profile by this name is saved already: saving replaces its lighting with the current one."; } }
+            }
+            Divider { }
+            Head {
+                text: "GAME RULES";
+                Button { text: "Refresh running programs"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.refresh(); } }
+            }
+            if ProfilesUi.rules.length == 0 : Text { text: "No game rules yet."; color: Theme.text-dim; font-size: Theme.small; }
+            for r[i] in ProfilesUi.rules : HorizontalLayout {
+                spacing: 8px;
+                Text { text: r.process; color: Theme.text; font-family: Theme.mono; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                Text { text: "→ " + r.profile; color: Theme.text-dim; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
+                Button { text: "Remove"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.remove-rule(i); } }
+            }
+            Row {
+                label: "Program";
+                label-width: 70px;
+                LineEdit { placeholder-text: "e.g. RDR2.exe"; text <=> ProfilesUi.new-process; edited(t) => { ProfilesUi.process-edited(t); } }
+                // Picks a running program into the box; narrowed down by what's typed there.
+                ComboBox {
+                    width: 220px;
+                    model: ProfilesUi.running;
+                    current-index <=> ProfilesUi.running-pick;
+                    enabled: ProfilesUi.has-running;
+                    selected(v) => {
+                        if self.current-index > 0 {
+                            ProfilesUi.new-process = v;
+                            ProfilesUi.process-edited(v);
+                        }
+                    }
+                }
+            }
+            Row {
+                label: "Profile";
+                label-width: 70px;
+                ComboBox {
+                    width: 220px;
+                    model: ProfilesUi.profiles.length == 0 ? ["No profiles yet"] : ProfilesUi.profiles;
+                    current-index <=> ProfilesUi.new-profile;
+                    enabled: ProfilesUi.profiles.length > 0;
+                }
+                VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Add rule"; enabled: !ProfilesUi.busy && ProfilesUi.new-process != "" && ProfilesUi.new-profile >= 0 && ProfilesUi.profiles.length > 0; clicked => { ProfilesUi.add-rule(); } } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Hint { text: "While a listed program runs, its profile replaces the lighting; when it exits, the lighting goes back."; }
+        } }
+        Opt { shown: ProfilesUi.error != ""; gap: ProfilesUi.known ? 10px : 0; ErrorLine { text: ProfilesUi.error; } }
+    }
+}
+
+// --- Settings: start at login and backups -------------------------------------
+
+export global SettingsUi {
+    in property <bool> autostart-known;
+    in property <bool> autostart;
+    in property <bool> reads-autostart: true;
+    in property <string> desktop;
+    in property <string> lua-line;
+    in property <string> conf-line;
+    in property <string> exported;
+    in property <string> note;
+    /// A backup picked and checked, waiting for a yes before it replaces anything.
+    in property <string> restore-path;
+    in property <string> restore-what;
+    /// The desktop's file chooser didn't open, so a path can be typed instead.
+    in property <bool> typing;
+    in-out property <string> typed-path;
+    in property <string> version;
+    in property <bool> busy;
+    in property <string> error;
+    callback opened();
+    callback set-autostart(bool);
+    callback export();
+    callback restore();
+    callback restore-typed();
+    callback confirm-restore();
+    callback cancel-restore();
+    callback open-export-folder();
+}
+
+export component SettingsPanel inherits Card {
+    /// The page is on screen. Each time it comes up, what's on disk is read
+    /// again: something else may have changed it meanwhile.
+    in property <bool> showing;
+    changed showing => {
+        if root.showing {
+            SettingsUi.opened();
+        }
+    }
+    VerticalLayout {
+        spacing: 0;
+        Toggle {
+            text: "Start gglinux when I log in (the daemon, and this window hidden in the tray)";
+            checked: SettingsUi.autostart;
+            enabled: !SettingsUi.busy && SettingsUi.autostart-known;
+            toggled(v) => { SettingsUi.set-autostart(v); }
+        }
+        Opt { shown: !SettingsUi.reads-autostart; gap: 12px; Notice {
+            Hint { text: (SettingsUi.desktop == "" ? "This desktop" : SettingsUi.desktop) + " doesn't run autostart entries, so this starts only the daemon. For the tray window too, start it from your compositor's config. In hyprland.lua, inside hl.on(\"hyprland.start\", function() … end):"; }
+            Code { text: SettingsUi.lua-line; }
+            Hint { text: "or in hyprland.conf:"; }
+            Code { text: SettingsUi.conf-line; }
+            Hint { text: "The tray icon needs a bar with a tray, such as Waybar's tray module."; }
+        } }
+    }
+    Divider { }
+    VerticalLayout {
+        spacing: 0;
+        Head { text: "BACKUP"; }
+        HorizontalLayout {
+            padding-top: 10px;
+            spacing: 8px;
+            alignment: start;
+            Button { text: "Back up settings"; enabled: !SettingsUi.busy; clicked => { SettingsUi.export(); } }
+            Button { text: "Restore from a backup…"; enabled: !SettingsUi.busy && SettingsUi.restore-path == ""; clicked => { SettingsUi.restore(); } }
+        }
+        Opt { shown: SettingsUi.exported != ""; HorizontalLayout {
+            spacing: 8px;
+            Hint { text: "Saved to " + SettingsUi.exported; vertical-alignment: center; }
+            VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Open folder"; small: true; clicked => { SettingsUi.open-export-folder(); } } }
+        } }
+        Opt { shown: SettingsUi.typing && SettingsUi.restore-path == ""; VerticalLayout {
+            spacing: 8px;
+            Hint { text: "Without the desktop's file chooser, type where the backup is instead:"; }
+            HorizontalLayout {
+                spacing: 8px;
+                LineEdit { placeholder-text: "~/Documents/gglinux-backup-….json"; text <=> SettingsUi.typed-path; accepted => { if !SettingsUi.busy { SettingsUi.restore-typed(); } } }
+                Button { text: "Restore…"; enabled: !SettingsUi.busy && SettingsUi.typed-path != ""; clicked => { SettingsUi.restore-typed(); } }
+            }
+        } }
+        // Restoring replaces every setting the backup holds, so it asks first.
+        Opt { shown: SettingsUi.restore-path != ""; gap: 12px; Notice {
+            Text { text: "Restore " + SettingsUi.restore-path + "?"; color: Theme.text; wrap: word-wrap; }
+            Hint { text: SettingsUi.restore-what; }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Button { text: "Restore"; primary: true; enabled: !SettingsUi.busy; clicked => { SettingsUi.confirm-restore(); } }
+                Button { text: "Cancel"; enabled: !SettingsUi.busy; clicked => { SettingsUi.cancel-restore(); } }
+            }
+        } }
+        Opt { shown: SettingsUi.note != ""; Hint { text: SettingsUi.note; } }
+        Opt { shown: SettingsUi.error != ""; ErrorLine { text: SettingsUi.error; } }
+    }
+    Divider { }
+    Head { text: "ABOUT"; }
+    Hint { text: "gglinux " + SettingsUi.version + ", free software under the GPL-3.0-or-later. It is not made, endorsed or supported by SteelSeries."; }
+}
