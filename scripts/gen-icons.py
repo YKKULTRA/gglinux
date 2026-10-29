@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Render the gglinux app icon at every size Tauri bundles.
+"""Render the gglinux app icon at every size the app and the packages install.
 
 Draws once at 1024px and downsamples, so there is a single source of truth for the
 mark. Run after changing the design:  python3 scripts/gen-icons.py
@@ -11,7 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 S = 1024
-OUT = Path(__file__).resolve().parent.parent / "ui" / "src-tauri" / "icons"
+OUT = Path(__file__).resolve().parent.parent / "data" / "icons"
 
 BG_TOP = (28, 32, 39)
 BG_BOTTOM = (12, 14, 17)

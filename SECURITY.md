@@ -87,5 +87,5 @@ prefix so Windows games can find it, and removes only files it wrote.
 
 - Anything that needs root, or another process already running as your user with the same access
   gglinux has (it can talk to the devices and the socket directly).
-- Bugs in PipeWire, WebKitGTK, gpu-screen-recorder or the kernel's hidraw driver. Please report
+- Bugs in PipeWire, Slint, gpu-screen-recorder or the kernel's hidraw driver. Please report
   those upstream; a heads-up is still welcome if gglinux should work around one.
