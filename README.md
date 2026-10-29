@@ -32,7 +32,7 @@ Expect bugs, and please report them.
 
 | Device | USB ID | Status |
 |---|---|---|
-| Apex Pro TKL Gen 3 (keyboard) | `1038:1642` | Lighting verified. OLED and actuation blocked. |
+| Apex Pro TKL Gen 3 (keyboard) | `1038:1642` | Lighting verified. Screen and switches untested. |
 | Arctis Nova Pro Wireless (headset + base station) | `1038:12e0` | Screen protection verified. Controls untested. |
 | Rival 3 Wireless Gen 2 (mouse) | `1038:1872` | Parked: built, never confirmed on hardware. |
 
@@ -50,8 +50,9 @@ is no longer available to test it.
 | Keyboard | Per-key static colours, wave effect, hand-back to onboard lighting | Verified |
 | Keyboard | Breathing and spectrum effects | Untested |
 | Keyboard | Reactive lighting (Fade, Ripple on key press), opt-in | Untested |
-| Keyboard | OLED screen | Blocked (needs a USB capture of GG on Windows) |
-| Keyboard | Actuation point, Rapid Trigger, Rapid Tap, key remap | Blocked (same capture) |
+| Keyboard | OLED screen: text, clock, a picture | Untested |
+| Keyboard | Actuation point (global and per key), Rapid Trigger, Rapid Tap | Untested |
+| Keyboard | Key remap, second actuation point, saving to the keyboard's flash | Not built |
 | Headset | Base-station screen burn-in protection | Verified |
 | Headset | ANC, transparency, sidetone, mic volume and mute light, auto-off, 2.4 GHz mode, on-device EQ | Untested |
 | Mouse | DPI stages, polling rate, button remap, onboard save | Parked |
@@ -127,7 +128,7 @@ is missing:
 | `noise-suppression-for-voice` | RNNoise noise suppression in the virtual mic | no virtual mic |
 | `swh-plugins` | the `sc4m` compressor (virtual mic and Smart Volume) | no virtual mic, no Smart Volume |
 | `gpu-screen-recorder` | instant-replay clips | the Moments page asks you to install it |
-| `xdg-desktop-portal` with a backend (KDE, GNOME, ...) | the clip hotkey and screen capture | no clip hotkey or portal screen capture |
+| `xdg-desktop-portal` with a backend (KDE, GNOME, Hyprland, ...) | the clip hotkey and screen capture | no clip hotkey or portal screen capture |
 
 ## Install
 
@@ -266,6 +267,33 @@ app dies with `Gdk-Message: Error 71 (Protocol error)`, on XWayland the window s
 detects the driver and sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself. If you set that variable
 yourself, your value wins.
 
+### Hyprland
+
+gglinux was built on KDE Plasma; on Hyprland three things need a line in your config, because
+Hyprland leaves them to it:
+
+- **The clip hotkey.** Hyprland lists portal shortcuts but binds none itself. With clips on, add
+  (Lua config, `hyprland.lua`):
+
+  ```lua
+  hl.bind("ALT + S", hl.dsp.global("io.github.ykk.gglinux:save-clip"))
+  ```
+
+  or, with a `hyprland.conf`: `bind = ALT, S, global, io.github.ykk.gglinux:save-clip`.
+  `hyprctl globalshortcuts` shows the shortcut once clips are on.
+- **Start at login.** Hyprland doesn't run autostart entries (unless a session manager such as
+  uwsm does), so Settings → *Start gglinux when I log in* starts only the daemon there. For the
+  tray window too, run `gglinux --hidden` from `hl.on("hyprland.start", ...)` with
+  `hl.exec_cmd`, or `exec-once` in `hyprland.conf`. Settings shows the exact line.
+- **The tray icon** needs a bar with a tray, such as Waybar's `tray` module.
+
+Clips record through the ScreenCast portal (`xdg-desktop-portal-hyprland`), which may ask you to
+pick a screen when the replay buffer starts.
+
+The portal knows gglinux by its app id, and only accepts it while the desktop entry named after
+it, `io.github.ykk.gglinux.desktop`, is installed (both install routes put it there). Without it,
+current portals refuse the clip hotkey on every desktop.
+
 ## Uninstall
 
 Turn Sonar and GameSense off in the app first. Sonar's PipeWire drop-in keeps its channels in
@@ -286,7 +314,7 @@ sudo rm -f /etc/udev/rules.d/61-gglinux-reactive.rules     # if you opted in to 
 ```sh
 systemctl --user disable --now gglinuxd
 rm -f ~/.local/bin/{gglinuxd,gglinux,ggctl}
-rm -f ~/.local/share/applications/gglinux.desktop
+rm -f ~/.local/share/applications/{io.github.ykk.gglinux,gglinux}.desktop
 rm -f ~/.local/share/icons/hicolor/128x128/apps/gglinux.png
 rm -f ~/.config/systemd/user/gglinuxd.service
 rm -f ~/.config/autostart/gglinux.desktop
@@ -315,5 +343,8 @@ gglinux is free software under the [GNU General Public License v3.0 or later](LI
 The device protocols come from the work of others: rivalcfg (WTFPL) for the mouse,
 HeadsetControl (GPL-3.0), loteran/Arctis-Sound-Manager (GPL-3.0+) and Dymstro/nova-chatmix-linux
 (0BSD) for the headset, OpenRGB (GPL-2.0+) for the keyboard lighting, and apex-tux (Unlicense) for
-the OLED research. RNNoise comes from werman/noise-suppression-for-voice and clips from
-gpu-screen-recorder. See the reuse map in [PLAN.md](PLAN.md#reuse-map-what-we-port-and-its-license).
+the OLED research. The keyboard's screen and switch commands are from Apex Control's protocol
+reference (github.com/Rikearon/apex-control, `docs/PROTOCOL.md`, CC BY 4.0, adapted in
+[docs/PROTOCOLS.md](docs/PROTOCOLS.md)) and agree with apex-pro-tkl-gen3-linux (MIT) on the screen.
+The screen's 8 × 8 font is Daniel Hepper's public-domain font8x8. RNNoise comes from
+werman/noise-suppression-for-voice and clips from gpu-screen-recorder. See the reuse map in [PLAN.md](PLAN.md#reuse-map-what-we-port-and-its-license).
