@@ -28,6 +28,38 @@ Pro TKL Gen 3 keyboard (`1038:1642`), Arctis Nova Pro Wireless headset and base 
 
 ## [Unreleased]
 
+### Native desktop app (M10)
+
+2026-10-29. Runs on the owner's desktop (Hyprland, NVIDIA's 615 driver with the open kernel
+module); not yet tried on Plasma or under X11.
+
+- The desktop app is native: Rust and [Slint](https://slint.dev) in `crates/gglinux-ui`, a member
+  of the cargo workspace, in place of the Tauri 2 and Svelte 5 UI on WebKitGTK. The pages, their
+  wording, the `gglinux` command and the desktop entry stay the same.
+- About 55 MB of memory (49 to 59 MB, shown or hidden in the tray) instead of 240 MB, most of
+  which was WebKit's web and network processes.
+- No NVIDIA workaround: the old UI had to turn off WebKit's DMABUF renderer on NVIDIA's driver
+  (see M0); the new one draws with OpenGL and needs nothing set.
+- The tray icon (StatusNotifierItem, through `ksni`) shows the window or quits. Closing the window
+  keeps gglinux in the tray; with no tray to hold it, closing quits instead. `gglinux --hidden`
+  starts in the tray, as start at login does.
+- One copy at a time over D-Bus: a second launch asks the running copy (`io.github.ykk.gglinux`,
+  method `Activate`) to show its window and exits. A debug build answers to its own name, so it
+  runs beside an installed copy.
+- The keyboard's picture and a backup to restore are picked in the desktop portal's file dialog.
+  Without a portal, a box to type the backup's path appears instead.
+- New on the way: deleting a clip or a profile, and restoring a backup, ask first (restoring
+  lists what the backup holds and when it was made); the Sonar EQ takes typed frequency, gain and
+  Q for the selected point, and opens an AutoEQ file directly; Settings has an About line.
+- Building needs only cargo: `install-local.sh`, the Arch package and CI build one workspace, with
+  no Node, npm or WebKitGTK. The package depends on fontconfig, wayland, libxkbcommon and
+  libglvnd instead of webkit2gtk-4.1, gtk3, libsoup3 and libayatana-appindicator; CI is one job.
+- The app needs Rust 1.92 (Slint 1.18's minimum); the daemon and `ggctl` still build with 1.87.
+- `cargo run -p gglinux --example shot` draws any page to a PNG with no display, and
+  `scripts/screenshots.sh` redraws the README's screenshots that way, against the fake daemon.
+- The old UI's web storage, `~/.local/share/io.github.ykk.gglinux`, is no longer used and can be
+  deleted.
+
 ### Keyboard screen and switches (M4b, M5), screen care, parts, Hyprland
 
 2026-10-29.

@@ -7,7 +7,8 @@ parts of GG that matter for the devices it supports: device control (GG's Engine
 audio mixer on PipeWire, GameSense lighting for games, and instant-replay clips (GG's Moments).
 
 It is a Rust daemon, `gglinuxd`, that does all the device and audio work, a small CLI, `ggctl`,
-and a Tauri 2 desktop app. Licensed GPL-3.0-or-later.
+and a native desktop app, `gglinux`, written in Rust with [Slint](https://slint.dev). Licensed
+GPL-3.0-or-later.
 
 > gglinux is an independent project. It is not made, endorsed or supported by SteelSeries.
 > "SteelSeries", "GG", "Sonar", "Moments" and "GameSense" are SteelSeries trademarks, used here only
@@ -73,15 +74,15 @@ The full parity checklist against GG, with the reasons behind each status, is in
 
 ### Screenshots
 
-Not added yet. Planned:
+Drawn by the app itself against the fake daemon, with no display (`./scripts/screenshots.sh`, see
+[CONTRIBUTING.md](CONTRIBUTING.md#pictures-of-the-app-without-a-screen)), so the devices and values
+are made up.
 
-1. Engine page: the device list with a keyboard and a headset connected.
-2. Keyboard panel: the per-key editor with a few keys painted.
-3. Headset panel: noise mode, sidetone and the screen-protection setting.
-4. Sonar page: the four channels with the ChatMix slider.
-5. EQ editor: the curve editor with an imported AutoEQ profile.
-6. Games page: GameSense on, with the built-in test game running.
-7. Moments page: the clip library.
+| | |
+|---|---|
+| ![Engine: the mouse panel](docs/screenshots/engine.png) | ![The keyboard: lighting with painted keys, and the switches](docs/screenshots/keyboard.png) |
+| ![Sonar: channels, Smart Volume, streamer mode](docs/screenshots/sonar.png) | ![Sonar's EQ editor](docs/screenshots/eq.png) |
+| ![Settings: parts, profiles, start at login](docs/screenshots/settings.png) | ![Moments: instant replay and clips](docs/screenshots/moments.png) |
 
 ## How it works
 
@@ -101,22 +102,23 @@ More detail in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The byte-level devi
 
 - Linux with systemd (for the user service and logind's device ACLs).
 - PipeWire 1.0 or newer with WirePlumber 0.5, for Sonar and the audio-driven effects.
-- To build: Rust 1.87 or newer for the daemon, 1.88 or newer for the desktop app, and Node.js 20
-  or newer with npm for the app's frontend (CI uses Node 22).
-- Build libraries for the daemon: `libudev` headers and `pkg-config`. For the app: WebKitGTK 4.1,
-  libsoup 3, an AppIndicator library for the tray, and librsvg.
+- To build: Rust 1.87 or newer for the daemon, 1.92 or newer for the desktop app (Slint 1.18 needs
+  it).
+- Build libraries: `libudev` headers and `pkg-config` for the daemon, fontconfig for the app.
+- To run the app: a Wayland or X11 session with OpenGL (EGL), which any Mesa or NVIDIA driver
+  provides. Its tray icon needs a tray that speaks StatusNotifierItem: Plasma's, or Waybar's `tray`
+  module on Hyprland.
 
 On **Arch Linux**:
 
 ```sh
-sudo pacman -S --needed base-devel rust nodejs npm webkit2gtk-4.1 libayatana-appindicator librsvg
+sudo pacman -S --needed base-devel rust fontconfig
 ```
 
 On **Debian or Ubuntu** (tested on Ubuntu 24.04, which is also what CI uses):
 
 ```sh
-sudo apt install build-essential pkg-config libudev-dev \
-  libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+sudo apt install build-essential pkg-config libudev-dev libfontconfig-dev
 ```
 
 Rust from [rustup](https://rustup.rs) is the easiest way to get a new enough toolchain on Debian
@@ -130,7 +132,7 @@ is missing:
 | `noise-suppression-for-voice` | RNNoise noise suppression in the virtual mic | no virtual mic |
 | `swh-plugins` | the `sc4m` compressor (virtual mic and Smart Volume) | no virtual mic, no Smart Volume |
 | `gpu-screen-recorder` | instant-replay clips | the Moments page asks you to install it |
-| `xdg-desktop-portal` with a backend (KDE, GNOME, Hyprland, ...) | the clip hotkey and screen capture | no clip hotkey or portal screen capture |
+| `xdg-desktop-portal` with a backend (KDE, GNOME, Hyprland, ...) | the clip hotkey, screen capture, and the app's file dialogs (keyboard picture, restoring a backup) | no clip hotkey or portal screen capture; the app can't open files |
 
 ## Install
 
@@ -161,7 +163,7 @@ This puts `gglinuxd`, `ggctl` and the app (`gglinux`) in `~/.local/bin`, the use
 `~/.config/systemd/user/`, a menu entry and icon in `~/.local/share/`, and the udev rule in
 `/etc/udev/rules.d/`. Options:
 
-- `--no-ui` skips the desktop app (no npm or WebKitGTK needed).
+- `--no-ui` skips the desktop app.
 - `--no-udev` skips the udev rule (and sudo).
 - `--no-build` installs what an earlier build left.
 - `--reactive` also installs the optional reactive-lighting rule (see below).
@@ -304,12 +306,20 @@ The Rival 3's protocol is write-only: there is no way to read its current settin
 replaces whatever was configured before, and `ggctl mouse` reports what gglinux applied this
 session.
 
-### NVIDIA proprietary driver
+### The app
 
-WebKitGTK's DMABUF renderer can't allocate buffers on the NVIDIA proprietary driver: on Wayland the
-app dies with `Gdk-Message: Error 71 (Protocol error)`, on XWayland the window stays empty. gglinux
-detects the driver and sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself. If you set that variable
-yourself, your value wins.
+`gglinux` opens the window; `gglinux --hidden` starts it in the tray (that's what starting at
+login runs). Closing the window keeps it in the tray, as GG does; **Quit** in the tray icon's menu
+ends it. Launching it again while it runs shows the running copy's window instead of starting a
+second one. Hidden in the tray it uses about 60 MB of memory.
+
+Without a tray to show its icon, closing the window quits the app, and a `--hidden` start opens
+the window after 10 seconds, so it is never left running where you can't reach it. If a tray
+appears later (Waybar starting after the app, say), closing hides it again.
+
+It draws with OpenGL, on Wayland or X11. It was tried on Hyprland with NVIDIA's 615 driver (open
+kernel module) and needs nothing set there; the Tauri app it replaced needed
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` on that driver, which no longer applies.
 
 ### Hyprland
 
@@ -370,7 +380,8 @@ sudo udevadm control --reload
 **Your settings** (both kinds of install):
 
 ```sh
-rm -rf ~/.config/gglinux ~/.local/share/io.github.ykk.gglinux   # settings and the app's web storage
+rm -rf ~/.config/gglinux                       # settings
+rm -rf ~/.local/share/io.github.ykk.gglinux    # left by the old app (before 2026-10-29), if there
 ```
 
 ## Development

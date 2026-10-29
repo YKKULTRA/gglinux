@@ -12,12 +12,17 @@ devices work as generic HID/USB-audio, but every configurable feature — key ac
 sidetone, ANC, the per-app audio mixer, ChatMix, EQ, game-event lighting — is inaccessible. Piecemeal
 tools exist (rivalcfg, HeadsetControl, OpenRGB, apex-tux, a handful of ChatMix scripts) but nothing
 unifies them, none touch the Apex Pro Gen 3 switch behavior, and there is no Sonar or GameSense
-equivalent. `gglinux` fills that gap: **one Rust daemon + one Tauri UI** that reaches parity with GG
+equivalent. `gglinux` fills that gap: **one Rust daemon + one desktop app** that reaches parity with GG
 for these devices, published under GPL-3.0 so it can build directly on the GPL-licensed prior art.
+The app was planned and built as a Tauri UI; since M10 (2026-10-29) it is a native Rust + Slint app.
 
 **Decisions (locked):** Rust daemon `gglinuxd` + Tauri 2 UI over unix-socket JSON-RPC · GPL-3.0-or-later ·
 gpu-screen-recorder as the clip engine · build order = **quick wins first** (mouse + headset → Sonar
 audio → keyboard RGB/OLED → keyboard actuation RE → GameSense → polish).
+
+**Changed 2026-10-29 (M10):** the UI is now a native Rust + Slint app (`crates/gglinux-ui`), not
+Tauri 2 + Svelte. The Tauri UI held 240 MB in the tray, two thirds of it in WebKit's own processes;
+the Slint one holds about 55 MB. The daemon, the socket protocol and everything else above stand.
 
 **Environment (verified):** Arch Linux, kernel 7.1.4-arch1, KDE Plasma 6 / Wayland, PipeWire 1.6.8 +
 WirePlumber 0.5.15, Intel UHD 770 + NVIDIA RTX 4090 (VAAPI + NVENC), Rust/Node/Python present. All three
@@ -30,7 +35,7 @@ Byte-level protocol detail for every device lives in **[docs/PROTOCOLS.md](docs/
 
 ## Architecture
 
-Cargo workspace; the daemon owns all hardware/audio, the Tauri app is a thin client.
+Cargo workspace; the daemon owns all hardware/audio, the desktop app is a thin client.
 
 ```
 gglinux/
@@ -38,26 +43,38 @@ gglinux/
   crates/
     gglinuxd/        # bin: tokio runtime, unix-socket JSON-RPC server, orchestrator, device registry
     gg-hid/          # shared hidapi plumbing: enumerate/open by (vid,pid,iface,usage_page), hotplug (udev)
-    gg-ipc/          # serde JSON-RPC request/response types — shared with the Tauri backend
+    gg-ipc/          # serde JSON-RPC request/response types — shared with ggctl and the app
     gg-device-mouse/    # Rival 3 Wireless Gen 2   (port rivalcfg, WTFPL)
     gg-device-headset/  # Arctis Nova Pro Wireless (port HeadsetControl GPL-3 + loteran + Dymstro)
     gg-device-keyboard/ # Apex Pro TKL Gen 3 + OLED (port OpenRGB RGB + apex-tux OLED; actuation = fresh RE)
     gg-audio/        # Sonar-style PipeWire graph (pipewire-rs): virtual sinks, EQ, routing, ChatMix, mic
     gg-gamesense/    # axum HTTP server + coreProps.json writer (native + per-Proton-prefix)
     gg-clips/        # gpu-screen-recorder supervisor + GlobalShortcuts portal
-  ui/                # Tauri 2 app: src-tauri/ (Rust IPC client) + frontend/ (web UI); depends on gg-ipc
+    gglinux-ui/      # the desktop app since M10: Rust + Slint (ui/*.slint), a client of gg-ipc
+  ui/                # until M10: Tauri 2 app, src-tauri/ (Rust IPC client) + frontend/ (web UI)
   data/udev/70-gglinux.rules
   data/systemd/gglinuxd.service  # systemd --user unit
   packaging/aur/PKGBUILD
 ```
 
-**Process model.** `gglinuxd` runs as a **systemd `--user` unit** (persistent, single instance, survives
-UI close) — *not* a Tauri sidecar (those die with the app). The Tauri backend opens a
-`tokio::net::UnixStream` to the daemon and bridges JSON-RPC to the webview via Tauri commands/events.
+This is the layout as planned in M0. What was built differs in places: clips live in `gglinuxd`
+(no `gg-clips` crate), `gg-audio` drives PipeWire's command-line tools rather than pipewire-rs
+(M3), the udev rule is `60-gglinux.rules`, the package is in `packaging/arch/`, and `ui/` was
+deleted in M10. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the tree as it is.
 
-**IPC.** unix-socket JSON-RPC for daemon↔UI (our protocol, versioned, no D-Bus coupling). `zbus` inside
-the daemon only for the things that *are* D-Bus: `org.freedesktop.portal.GlobalShortcuts` (clip hotkey)
-and StatusNotifierItem (tray). `pipewire-rs` for audio-graph objects.
+**Process model.** `gglinuxd` runs as a **systemd `--user` unit** (persistent, single instance, survives
+UI close) — *not* a child of the app, which would die with it (the plan ruled out a Tauri sidecar
+for that reason). The app keeps one `tokio::net::UnixStream` to the daemon on a thread of its own
+and fills the Slint window's globals from it; until M10 the Tauri backend held that socket and
+bridged JSON-RPC to the webview via Tauri commands/events.
+
+**IPC.** unix-socket JSON-RPC for daemon↔UI (our protocol, versioned, no D-Bus coupling). `zbus` only
+for the things that *are* D-Bus: in the daemon, `org.freedesktop.portal.GlobalShortcuts` (clip
+hotkey) and asking logind and the screensaver whether anyone is there (screen care); in the app
+(since M10), the tray (StatusNotifierItem, through `ksni`), one copy at a time (the name
+`io.github.ykk.gglinux` and its `Activate` method) and the file-chooser portal. (The plan had the
+tray in the daemon; the Tauri UI drew it itself.) `pipewire-rs` was planned for audio-graph
+objects; M3 used PipeWire's CLI tools instead.
 
 **HID.** `hidapi` crate with the **hidraw backend** (coexists with `hid-generic`, no driver detach; gives
 `usage_page`/`interface_number` for selecting the right interface among the many each device exposes).
@@ -71,9 +88,13 @@ active seat user; **no root, no polkit, no plugdev**). Must sort before `73-seat
 **Packaging.** **AUR PKGBUILD is the primary channel.** Flatpak is not viable as primary (a sandbox can't
 install udev rules, and hidraw + PipeWire-node-creation + spawning gpu-screen-recorder fight the sandbox).
 
-**Tauri on KDE/Wayland/NVIDIA.** Ship env defaults `WEBKIT_DISABLE_DMABUF_RENDERER=1` and
-`__NV_DISABLE_EXPLICIT_SYNC=1` (the #1 Tauri-Linux blank-screen/Error-71 issue on the RTX 4090). Tray via
-StatusNotifierItem works well on Plasma 6.
+**The app on KDE/Wayland/NVIDIA.** The plan for Tauri was to ship env defaults
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` and `__NV_DISABLE_EXPLICIT_SYNC=1` (the #1 Tauri-Linux
+blank-screen/Error-71 issue on the RTX 4090); the Tauri UI set the first one itself on NVIDIA's
+driver, from M0 until M10. The Slint app (M10) draws with OpenGL through Slint's femtovg renderer,
+with no browser engine, and needs neither: it ran on Hyprland with the NVIDIA 615 driver (open
+kernel module) with nothing set. Tray via StatusNotifierItem: the plan expected it to work well on
+Plasma 6. The Slint app's tray (`ksni`) was tried on Hyprland; Plasma is still to be tried.
 
 ---
 
@@ -322,6 +343,68 @@ goes away. **Games-only clips** keep the replay buffer only while a program from
 runs. Event-based highlights (kills and the like) stay out of scope. Not yet verified: Sonar
 hasn't run live, and `gpu-screen-recorder` isn't installed.
 
+### M8 and M9
+
+Not planned up front, so recorded where they landed: **M8** (2026-10-02) was a bug hunt, 64
+confirmed bugs fixed test-first (CHANGELOG, "Fixed"); **M9** (2026-10-29) built the Apex screen and
+switches (see M4 and M5), screen burn-in care, turning parts off, and the Hyprland notes.
+
+### M10 — Native desktop app: Rust + Slint  — **done 2026-10-29; live-tested on Hyprland**
+
+Asked for by the owner on 2026-10-29, who took the UI for an Electron app and asked for a native
+one, maybe in Rust. Measured first, hidden in the tray: the Tauri UI held **240 MB** PSS (its own
+process 74 MB, WebKitWebProcess 127 MB, WebKitNetworkProcess 38 MB) next to the daemon's 9 MB.
+Slint, GTK4 (relm4), iced and Qt were compared, and the owner chose **Slint**: its markup is close
+to Svelte, so each panel ports directly; it draws headless, for screenshots; it used the least
+memory; and its GPLv3 licence option fits gglinux's. Design record:
+`docs/superpowers/specs/2026-10-29-native-app-design.md`.
+
+Built: `crates/gglinux-ui` (package and binary `gglinux`), a member of the cargo workspace that uses
+`gg-ipc`'s types directly. Every page of the old UI is ported (Engine with the mouse, headset and
+keyboard panels, Sonar with the EQ editor, Games, Moments, Settings with parts and profiles).
+Desktop parts: the tray through `ksni` (StatusNotifierItem); one copy at a time through the D-Bus
+name `io.github.ykk.gglinux` (a second launch calls the first one's `Activate` and exits);
+`--hidden` for starting at login; closing the window hides it to the tray, and **Quit** in the
+tray menu ends it. The `shot` example draws any page to a PNG with Slint's software renderer
+against the fake daemon; `scripts/screenshots.sh` makes the README's pictures with it. The `ui/`
+tree (Svelte, Tauri, npm) is deleted: `install-local.sh`, the PKGBUILD and CI build one cargo
+workspace with no Node.
+
+Parity pass (2026-10-29): each page was checked against its Svelte panel line by line, and the
+gaps were fixed. The largest fixes:
+- repeated rows are now updated in place rather than rebuilt on every daemon event, which had cut
+  off slider and EQ drags;
+- list boxes now follow the daemon's state after a pick or a refused change;
+- working copies are reset when the daemon goes away;
+- the client keeps answers and notifications in the order they arrived;
+- deleting a clip or a profile, and restoring a backup, now ask first;
+- without a tray, closing the window quits the app, so it is never left unreachable.
+
+The app has 96 unit tests, including the daemon client against a fake socket.
+
+Measured on the owner's desktop (Hyprland, NVIDIA 615 with the open kernel module):
+- **49–59 MB** PSS, shown or hidden in the tray;
+- **no CPU time** over 30 s hidden in the tray;
+- no NVIDIA workaround needed (the Tauri UI needed WebKit's DMABUF renderer off there).
+
+Live-tested there:
+- a `--hidden` start puts the icon in the tray with no window;
+- a second `--hidden` launch exits at once, and a plain second launch shows the first copy's
+  window;
+- closing the window hides it, and the tray icon shows it again;
+- restarting `gglinuxd` shows the offline card, then the panels come back by themselves;
+- **Quit** exits with status 0 and leaves the daemon running.
+
+**Accept:** every control, text, state and behaviour of the Svelte panels exists in the Slint ones
+or is noted as not applying; the tray, start at login, the hand-over, the portal's file dialogs and
+backups work on Plasma and Hyprland; `makepkg -si` installs it.
+
+Not tried yet:
+- Plasma and X11;
+- the portal file dialogs (keyboard picture, restoring a backup);
+- the colour picker and EQ dragging with a real mouse;
+- `makepkg -si`.
+
 ---
 
 ## Feature parity checklist (vs SteelSeries GG)
@@ -378,7 +461,8 @@ highlights: **skipped**.
 
 **Elsewhere:** GG Home → the UI's device dashboard, listing the three devices live: **verified**
 (M0; unplugging and replugging not yet seen). Start at login, tray, `ggctl` and an Arch
-`PKGBUILD`: **built** (M7d). The 3D Aim Trainer: **skipped**.
+`PKGBUILD`: **built** (M7d; the tray, start at login and the one-copy guard were built again for
+the native app in M10). The 3D Aim Trainer: **skipped**.
 
 ---
 
@@ -396,6 +480,13 @@ highlights: **skipped**.
 - **Proton coreProps reachability (M6).** Confirmed reachable (shared host netns); the only failure mode
   is Flatpak Steam — documented, not engineered around.
 - **Tauri/webkit2gtk on Wayland/NVIDIA.** Ship the env workarounds; fall back to X11 backend if needed.
+  It happened: WebKit's DMABUF renderer crashed the UI on Wayland (Gdk protocol error 71) or left
+  the window empty on XWayland, so the UI turned it off on NVIDIA's driver (M0). Gone with WebKit
+  in M10.
+- **The native app (M10).** Slint has no tray and no colour picker of its own, so gglinux has its
+  own of both. The tray needs a StatusNotifierItem host; without one, closing the window quits
+  instead of hiding it, so the app is never lost. Slint 1.18 measures wrapped text inside an `if`
+  in a scrolling page at the wrong height; such pieces use the `Shown` widget instead.
 
 ---
 
@@ -411,6 +502,9 @@ highlights: **skipped**.
 - **GameSense (M6):** a local test client POSTing the SDK example events; then CS2 under Proton driving
   the OLED; verify per-prefix coreProps is written and picked up.
 - **End-to-end (M7):** `makepkg -si` on a clean checkout; game-launch profile switch; hotkey clip save.
+- **The app (M10):** every page drawn headless against the fake daemon (`shot`,
+  `scripts/screenshots.sh`) and checked by eye; each panel compared with its Svelte original; then
+  live on Plasma and Hyprland: the tray, start at login, the hand-over, file dialogs.
 
 Reference clients to validate the GameSense server: `SteelSeries/unity-gamesense-client`, the PyPI
 `gamesense` package. Prior art to diff audio behavior against: `loteran/Arctis-Sound-Manager`.

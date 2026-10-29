@@ -9,14 +9,14 @@ A short map of how gglinux fits together. The byte-level device protocols are in
 
 ```
  ┌──────────────┐   ┌──────────┐            ┌────────────────────────────────────────────┐
- │ gglinux (UI) │   │  ggctl   │            │ gglinuxd (systemd --user service)          │
- │ Tauri 2 +    │   │  (CLI)   │            │                                            │
- │ Svelte 5     │   └────┬─────┘            │  device registry (gg-hid: hidapi + udev)   │
- └──────┬───────┘        │                  │  keyboard ─┐                               │
-        │ Tauri commands │                  │  headset  ─┼─ one worker thread per device │
- ┌──────┴───────┐        │  unix socket,    │  mouse    ─┘   (hidraw, blocking I/O)      │
- │ Rust backend │        │  newline-        │  sonar      ── PipeWire CLI tools          │
- │ (bridge)     ├────────┴─ delimited ──────┤  gamesense  ── HTTP on 127.0.0.1           │
+ │ gglinux      │   │  ggctl   │            │ gglinuxd (systemd --user service)          │
+ │ (the app:    │   │  (CLI)   │            │                                            │
+ │ Rust + Slint)│   └────┬─────┘            │  device registry (gg-hid: hidapi + udev)   │
+ │              │        │                  │  keyboard ─┐                               │
+ │  pages ◄─┐   │        │                  │  headset  ─┼─ one worker thread per device │
+ │  client ─┴───┤        │  unix socket,    │  mouse    ─┘   (hidraw, blocking I/O)      │
+ │  tray, D-Bus │        │  newline-        │  sonar      ── PipeWire CLI tools          │
+ │              ├────────┴─ delimited ──────┤  gamesense  ── HTTP on 127.0.0.1           │
  └──────────────┘           JSON-RPC        │  clips      ── gpu-screen-recorder child   │
                                             │  profiles   ── /proc scan every 2 s        │
                                             └────────────────────────────────────────────┘
@@ -24,10 +24,16 @@ A short map of how gglinux fits together. The byte-level device protocols are in
 
 - **`gglinuxd`** owns everything that touches hardware, audio or the network. It runs as a
   `systemd --user` unit, so it outlives the UI and needs no root.
-- **The UI** (`ui/`) is a thin client. Its Rust backend (`ui/src-tauri`) keeps one connection to
-  the daemon and forwards requests and events to the Svelte frontend. It also owns a few
-  desktop-only jobs: the tray, start-at-login (`~/.config/autostart`), opening folders, and
-  settings export/import.
+- **The app** (`crates/gglinux-ui`, binary `gglinux`) is a thin client written in Rust with
+  Slint. A connection thread keeps one socket to the daemon, reconnects every second while it's
+  away, and keeps the daemon's latest state for every part; after a change succeeds it reads that
+  part's state again, because only the daemon knows what was applied. The window is Slint markup
+  (`ui/*.slint`): each page's values live in a Slint global that the Rust side fills from the
+  state, and each control's callback becomes a request. It also owns a few desktop-only jobs: the
+  tray icon (StatusNotifierItem, through `ksni`), one copy at a time (a second launch asks the
+  first, over D-Bus as `io.github.ykk.gglinux`, to show its window), start-at-login
+  (`~/.config/autostart`), file dialogs through the desktop portal, opening folders, and settings
+  export/import.
 - **`ggctl`** (`crates/gglinuxd/src/bin/ggctl.rs`) is a command-line client of the same socket.
 
 ## The socket protocol
@@ -46,7 +52,7 @@ accepts is a frame the other side accepts.
 
 | Crate | Role |
 |---|---|
-| `gg-ipc` | Wire types for the socket, shared by the daemon, `ggctl` and the UI backend. |
+| `gg-ipc` | Wire types for the socket, shared by the daemon, `ggctl` and the app. |
 | `gg-hid` | Enumerates SteelSeries devices by vendor/product/interface/usage page, watches udev for hotplug, and diffs device lists. |
 | `gg-device-keyboard` | Apex Pro TKL Gen 3 lighting: frames feature reports from an opcode allowlist, the US ANSI TKL layout and key table. |
 | `gg-device-headset` | Arctis Nova Pro Wireless: packet builders and reply decoding for status, settings, EQ and the base-station screen. |
@@ -54,9 +60,11 @@ accepts is a frame the other side accepts.
 | `gg-audio` | Sonar: the PipeWire drop-in that declares the channels, EQ and mic chain as filter chains; reading the graph from `pw-dump`; routing rules; settings. All PipeWire access goes through a `PwTools` trait, so tests run against a fake. |
 | `gg-gamesense` | GameSense: request and handler parsing, zones, painting events onto the key grid, the registry of games, and the `coreProps.json` files written into Proton prefixes. |
 | `gglinuxd` | The daemon: socket server, device workers, Sonar controller, GameSense HTTP server, clips supervisor, profiles watcher, and the `ggctl` binary. |
+| `gglinux-ui` | The desktop app, `gglinux`: the daemon client, the Slint pages, the tray and the one-copy guard. Because it uses `gg-ipc`'s types directly, there's no second copy of the protocol to keep in step. |
 
-`ui/src-tauri` is a separate cargo project (it is excluded from the workspace) because Tauri's
-dependency tree would slow every daemon build.
+The app replaced a Tauri 2 + Svelte UI on 2026-10-29: the same pages, without a browser engine,
+at about a quarter of the memory (60 MB in the tray against 240 MB). Why, and how it's put
+together: [the design record](superpowers/specs/2026-10-29-native-app-design.md).
 
 ## Device workers
 
