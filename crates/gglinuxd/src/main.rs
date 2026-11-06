@@ -702,7 +702,7 @@ async fn dispatch(
         req @ (Request::GetOnboard
         | Request::ReadOnboard { .. }
         | Request::LoadOnboard { .. }
-        | Request::WriteOnboard { .. }) => keyboard::onboard::handle(req, &workers.keyboard).await,
+        | Request::WriteOnboard { .. }) => keyboard::onboard::serve(req, &workers.keyboard).await,
         req @ (Request::GetActions | Request::SetActions { .. }) => {
             actions::serve(req, &workers.actions).await
         }
@@ -1198,16 +1198,6 @@ mod tests {
             ask("get_experimental", "").await,
             ResponseData::Experimental { experimental } if experimental.keyboard_onboard
         ));
-        for (method, params) in [
-            ("read_onboard", r#"{"slot":null}"#),
-            ("load_onboard", r#"{"slot":0}"#),
-            ("write_onboard", r#"{"slot":4,"from":{"kind":"current"}}"#),
-        ] {
-            match ask(method, params).await {
-                ResponseData::Error { message } => assert_eq!(message, "not built yet", "{method}"),
-                other => panic!("{method}: {other:?}"),
-            }
-        }
         // Bindings are built: with only keyboard_onboard on, they're refused by their own gate.
         for (method, params) in [
             ("read_bindings", ""),
@@ -1222,6 +1212,15 @@ mod tests {
             }
         }
         assert!(fake.sent().is_empty(), "none of it reached the keyboard");
+        // The onboard slots are built: with the gate on (above), a read reaches the keyboard,
+        // whose unscripted answers aren't a slot image, and says so.
+        match ask("read_onboard", r#"{"slot":0}"#).await {
+            ResponseData::Error { message } => assert!(message.contains("slot 1"), "{message}"),
+            other => panic!("read_onboard: {other:?}"),
+        }
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 25);
+        assert!(sent.iter().all(|s| s.report[1] == 0x83), "chunk reads only");
         // The actions service answers its own: an empty list is no change, F12 isn't a spare key.
         assert!(matches!(
             ask("set_actions", r#"{"bindings":[]}"#).await,

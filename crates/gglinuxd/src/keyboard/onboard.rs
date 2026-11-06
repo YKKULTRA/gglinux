@@ -173,20 +173,6 @@ pub async fn serve(req: Request, kb: &Handle) -> ResponseData {
     }
 }
 
-/// What `main` routes the onboard requests to. Reading, loading and writing are built
-/// ([`serve`]), but stay unrouted here until `main`'s routing test, which still expects
-/// the stubs' answer, is updated with them (see the unit's report).
-pub async fn handle(req: Request, kb: &Handle) -> ResponseData {
-    match req {
-        Request::ReadOnboard { .. }
-        | Request::LoadOnboard { .. }
-        | Request::WriteOnboard { .. } => ResponseData::Error {
-            message: "not built yet".into(),
-        },
-        req => serve(req, kb).await,
-    }
-}
-
 /// Run one operation: refused while the gate is off or with no keyboard; `busy`, and
 /// announced, from its start to its end; its error kept in the state.
 fn run(
@@ -742,25 +728,6 @@ mod tests {
         assert_eq!(state.active, Some(2));
         assert_eq!(rig.slots.loaded(), Some(2));
         assert_eq!(slot_ops(&rig.slots), [0xB2]);
-    }
-
-    #[tokio::test]
-    async fn the_routed_handle_keeps_the_stubs_answer_until_main_is_updated() {
-        let rig = rig("onboard-handle", true, |_| {});
-        assert!(matches!(
-            handle(Request::GetOnboard, &rig.kb).await,
-            ResponseData::Onboard { .. }
-        ));
-        for req in [
-            Request::ReadOnboard { slot: None },
-            Request::LoadOnboard { slot: 0 },
-        ] {
-            assert!(matches!(
-                handle(req, &rig.kb).await,
-                ResponseData::Error { message } if message == "not built yet"
-            ));
-        }
-        assert!(slot_ops(&rig.slots).is_empty());
     }
 
     #[test]

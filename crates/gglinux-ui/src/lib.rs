@@ -199,6 +199,7 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
             // Panels whose controls are greyed while their gate is off.
             bindings::show(ui, s);
             switches::show(ui, s, &forms);
+            onboard::show(ui, s);
         }
         Changed::Bindings => bindings::show(ui, s),
         Changed::Onboard => onboard::show(ui, s),

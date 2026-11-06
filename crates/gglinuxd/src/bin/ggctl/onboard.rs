@@ -32,9 +32,6 @@ fn request(rest: &[&str]) -> Result<Request> {
                 path: absolute(file)?,
             },
         },
-        // The plan's name for the bare command. It answers as the stub did until ggctl's
-        // own test of the stubs is updated (see the unit's report).
-        ["list"] => bail!("not built yet"),
         _ => bail!("{USAGE}"),
     })
 }
@@ -57,13 +54,6 @@ fn absolute(file: &str) -> Result<String> {
 }
 
 /// What `ggctl onboard` prints for the slots.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "main prints the answer with this once its match has the onboard arm (A3 report)"
-    )
-)]
 pub fn print(state: &OnboardState) {
     for line in lines(state) {
         println!("{line}");

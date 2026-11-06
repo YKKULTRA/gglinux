@@ -8,7 +8,7 @@
 //!
 //! Each command group has its file: [`mouse`], [`keyboard`] (with the switches),
 //! [`screen`], [`care`], [`parts`], [`clip`], [`profile`], [`gamesense`] and
-//! [`experimental`] and [`actions`]; [`bind`] and [`onboard`] wait for their units.
+//! [`experimental`], [`actions`], [`bind`] and [`onboard`].
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -66,7 +66,12 @@ ggctl bind on|off                       # send them when the keyboard connects, 
 ggctl bind capslock ctrl+a              # up to 4 keys; or media:mute, mouse:4, cpi, wheel:up,
                                         #   pan:left, none, default
 ggctl bind fn+f1 media:mute             # with Fn held (or --layer fn); deep+w … past W's deep press
-ggctl onboard                           # the keyboard's onboard profile slots (not built yet)
+ggctl onboard                           # the keyboard's onboard profile slots, 1 to 5
+ggctl onboard read [N]                  # read slot N (or all five) and save a backup of each
+ggctl onboard load N                    # make the keyboard run slot N
+ggctl onboard write N current           # write gglinux's screen picture and Rapid Tap into slot N
+ggctl onboard restore N <backup file>   # write a backup into slot N (also: write N <file>)
+                                        #   both back the slot up first and put it back on any failure
 ggctl actions                           # actions on the spare keys F13–F24, and what the desktop bound
 ggctl actions set f13 run kitty         # or: type <text>, profile <name>, clip, media playpause|next|
                                         #   previous|stop|mute|volup|voldown; a program's own options
@@ -149,6 +154,7 @@ fn main() -> Result<()> {
         ResponseData::Experimental { experimental } => experimental::print(&experimental),
         ResponseData::Actions { state } => actions::print(&state),
         ResponseData::Bindings { state } => bind::print(&state),
+        ResponseData::Onboard { state } => onboard::print(&state),
         ResponseData::Success => {
             println!("ok");
             // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.
@@ -418,9 +424,8 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_still_to_be_built_say_so_before_connecting() {
-        let e = parse(&args("onboard list")).err().unwrap();
-        assert_eq!(e.to_string(), "not built yet");
+    fn bind_and_onboard_send_their_requests() {
+        assert!(matches!(sends("onboard"), Request::GetOnboard));
         assert!(matches!(sends("bind"), Request::GetBindings));
         assert!(matches!(sends("bind read"), Request::ReadBindings));
     }
