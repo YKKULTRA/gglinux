@@ -1335,7 +1335,8 @@ pub enum Request {
     GetBindings,
     /// Read the keyboard's bindings now, all three layers. Needs [`Feature::KeyboardBindings`].
     ReadBindings,
-    /// Replace the bindings gglinux applies; `enabled` false leaves the keyboard's own.
+    /// Replace the bindings gglinux applies; `enabled` false sends nothing more (what was sent
+    /// stays until the keyboard is unplugged).
     SetBindings {
         bindings: Bindings,
         enabled: bool,

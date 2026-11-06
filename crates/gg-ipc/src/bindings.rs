@@ -71,8 +71,8 @@ pub struct Bindings {
     pub normal: Vec<KeyBinding>,
     pub fn_layer: Vec<KeyBinding>,
     pub second: Vec<KeyBinding>,
-    /// The key that holds the Fn layer, by HID code; `None` leaves the keyboard's own (the
-    /// SteelSeries key, `0xF0`).
+    /// The key that holds the Fn layer, by HID code; `None` is the keyboard's own (the
+    /// SteelSeries key, `0xF0`), sent once if gglinux had moved it.
     pub fn_key: Option<u8>,
 }
 
@@ -142,7 +142,8 @@ impl Bindings {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BindingsState {
-    /// gglinux sends `bindings` whenever the keyboard connects. Off leaves the keyboard's own.
+    /// gglinux sends `bindings` whenever the keyboard connects. Off sends nothing more: what was
+    /// sent stays on the keyboard until it's unplugged.
     pub enabled: bool,
     pub bindings: Bindings,
     /// What the keyboard reported at the last read on this connection, if any.
