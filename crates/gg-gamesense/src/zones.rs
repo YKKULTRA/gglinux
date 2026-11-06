@@ -2,11 +2,11 @@
 //! GameSense zone names → HID codes on the Apex Pro TKL Gen 3, in zone
 //! order: left to right, then top to bottom.
 
-use gg_device_keyboard::layout::ANSI_TKL;
+use gg_device_keyboard::layout::US;
 
 /// Whether the TKL has a key with this HID code.
 pub fn on_board(code: u8) -> bool {
-    ANSI_TKL.iter().any(|k| k.0 == code)
+    US.iter().any(|k| k.0 == code)
 }
 
 /// The keys of a named zone, or a single named key, in zone order. Zones and
@@ -29,7 +29,7 @@ pub fn named(zone: &str) -> Vec<u8> {
 
 /// Keys that pass `keep(code, x, y)`, top row first, left to right within a row.
 fn ordered(keep: impl Fn(u8, f32, f32) -> bool) -> Vec<u8> {
-    let mut keys: Vec<(f32, f32, u8)> = ANSI_TKL
+    let mut keys: Vec<(f32, f32, u8)> = US
         .iter()
         .filter(|&&(c, _, x, y, _)| keep(c, x, y))
         .map(|&(c, _, x, y, _)| (y, x, c))
@@ -59,7 +59,7 @@ fn key(name: &str) -> Option<u8> {
         return (1..=12).contains(&f).then(|| 0x3A + f - 1);
     }
     if name == "win-menu" {
-        return ANSI_TKL.iter().find(|k| k.1 == "Menu").map(|k| k.0); // whatever code the layout gives it
+        return US.iter().find(|k| k.1 == "Menu").map(|k| k.0); // whatever code the layout gives it
     }
     Some(match name {
         "return" => 0x28,
@@ -107,7 +107,7 @@ fn key(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gg_device_keyboard::layout::ANSI_TKL;
+    use gg_device_keyboard::layout::US;
 
     const GROUPS: [&str; 15] = [
         "function-keys",
@@ -167,7 +167,7 @@ mod tests {
             vec![0x52, 0x50, 0x51, 0x4F],
             "↑ first: it's the higher row"
         );
-        assert_eq!(named("all").len(), ANSI_TKL.len());
+        assert_eq!(named("all").len(), US.len());
     }
 
     #[test]
@@ -195,6 +195,9 @@ mod tests {
             "all-macro-keys",
             "logo",
             "keypad-5",
+            "printscreen",
+            "scrolllock",
+            "pause",
             "m0",
             "pound",
             "ss-key",
@@ -215,7 +218,7 @@ mod tests {
         assert_eq!(named("escape"), vec![0x29]);
         assert_eq!(named("l-shift"), vec![0xE1]);
         assert_eq!(named("uparrow"), vec![0x52]);
-        let menu = ANSI_TKL.iter().find(|k| k.1 == "Menu").unwrap().0;
+        let menu = US.iter().find(|k| k.1 == "Menu").unwrap().0;
         assert_eq!(
             named("win-menu"),
             vec![menu],

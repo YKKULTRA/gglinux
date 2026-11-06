@@ -1145,7 +1145,7 @@ mod tests {
         let d = Scratch::new("m11-routing");
         let (event_tx, _) = broadcast::channel(8);
         let fake = FakeTransport::new();
-        let kb = keyboard::spawn_fake(
+        let kb = keyboard::spawn_fake_unasked(
             fake.keyboard(),
             d.0.join("keyboard"),
             event_tx.clone(),

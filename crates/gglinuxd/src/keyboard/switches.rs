@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gg_device_keyboard::layout::ANSI_TKL;
+use gg_device_keyboard::layout::US;
 use gg_device_keyboard::proto::ANALOG_KEYS;
 use gg_device_keyboard::Keyboard;
 use gg_ipc::{Switches, TapMode};
@@ -152,7 +152,8 @@ fn check_analog(switches: &Switches) -> Result<(), String> {
         .chain(switches.second.iter().map(|k| k.code));
     for code in named {
         if !ANALOG_KEYS.contains(&code) {
-            let label = ANSI_TKL
+            // Keys with a fixed switch have the same label on every board.
+            let label = US
                 .iter()
                 .find(|k| k.0 == code)
                 .map_or_else(|| format!("{code:#04x}"), |k| k.1.to_owned());

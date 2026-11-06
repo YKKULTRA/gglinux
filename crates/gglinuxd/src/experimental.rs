@@ -182,7 +182,7 @@ mod tests {
         let path = d.0.join("experimental.json");
         let (event_tx, mut events) = broadcast::channel(16);
         let fake = FakeTransport::new();
-        let kb = keyboard::spawn_fake(
+        let kb = keyboard::spawn_fake_unasked(
             fake.keyboard(),
             d.0.join("nothing-saved-here"),
             event_tx.clone(),
