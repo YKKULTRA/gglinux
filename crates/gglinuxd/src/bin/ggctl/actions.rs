@@ -13,22 +13,10 @@
 //! ```
 //!
 //! A change is read, edited and written back whole ([`Edit::apply`]), as `parts` and
-//! `experimental` are. Until main.rs routes `actions` to [`command`] (at a6-actions'
-//! merge) the command still says "not built yet" ([`action`]).
-#![expect(
-    dead_code,
-    reason = "main.rs routes `ggctl actions` to `command` at a6-actions' merge; this line and `action` go then"
-)]
+//! `experimental` are.
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{Action as Do, ActionBinding, ActionsState};
-
-use crate::Action;
-
-/// What main.rs answers with until it routes to [`command`].
-pub fn action(_rest: &[&str]) -> Result<Action> {
-    bail!("not built yet")
-}
 
 /// What `ggctl actions …` asks for.
 #[derive(Debug, PartialEq, Eq)]

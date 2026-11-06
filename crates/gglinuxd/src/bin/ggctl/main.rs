@@ -8,7 +8,7 @@
 //!
 //! Each command group has its file: [`mouse`], [`keyboard`] (with the switches),
 //! [`screen`], [`care`], [`parts`], [`clip`], [`profile`], [`gamesense`] and
-//! [`experimental`]; [`bind`], [`onboard`] and [`actions`] wait for their units.
+//! [`experimental`] and [`actions`]; [`bind`] and [`onboard`] wait for their units.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -60,7 +60,11 @@ ggctl experimental                      # features not tried on your hardware ye
 ggctl experimental keyboard_onboard on  # turn one on or off, by the name listed
 ggctl bind                              # key bindings (not built yet)
 ggctl onboard                           # the keyboard's onboard profile slots (not built yet)
-ggctl actions                           # actions on the spare keys F13–F24 (not built yet)
+ggctl actions                           # actions on the spare keys F13–F24, and what the desktop bound
+ggctl actions set f13 run kitty         # or: type <text>, profile <name>, clip, media playpause|next|
+                                        #   previous|stop|mute|volup|voldown; a program's own options
+                                        #   in quotes: run \"kitty --single-instance\"
+ggctl actions rm f13
 ";
 
 fn main() -> Result<()> {
@@ -109,6 +113,25 @@ fn main() -> Result<()> {
             experimental.set(feature, on);
             Request::SetExperimental { experimental }
         }
+        Action::EditActions(edit) => {
+            let read = || match send(connect()?, Request::GetActions)? {
+                ResponseData::Actions { state } => Ok(state),
+                _ => bail!("the daemon did not send its actions (is it older than ggctl?)"),
+            };
+            let mut bindings = read()?.bindings;
+            edit.apply(&mut bindings)?;
+            send(
+                connect()?,
+                Request::SetActions {
+                    bindings: bindings.clone(),
+                },
+            )?;
+            println!("ok");
+            if !actions::read_back(&bindings, read)? {
+                println!("note: the daemon doesn't show the change yet");
+            }
+            return Ok(());
+        }
     };
 
     match send(connect()?, request)? {
@@ -117,6 +140,7 @@ fn main() -> Result<()> {
         ResponseData::Parts { parts } => parts::print(&parts),
         ResponseData::Profiles { state } => profile::print(&state),
         ResponseData::Experimental { experimental } => experimental::print(&experimental),
+        ResponseData::Actions { state } => actions::print(&state),
         ResponseData::Success => {
             println!("ok");
             // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.
@@ -155,6 +179,8 @@ enum Action {
     SetPart(Part, bool),
     /// Read the experimental gates, turn one on or off, and send them back.
     SetFeature(Feature, bool),
+    /// Read the actions, change one, and send them back.
+    EditActions(actions::Edit),
 }
 
 fn on_off(word: &str) -> Result<bool> {
@@ -184,7 +210,12 @@ fn parse(args: &[String]) -> Result<Action> {
         Some((&"experimental", rest)) => return experimental::action(rest),
         Some((&"bind", rest)) => return bind::action(rest),
         Some((&"onboard", rest)) => return onboard::action(rest),
-        Some((&"actions", rest)) => return actions::action(rest),
+        Some((&"actions", rest)) => {
+            return Ok(match actions::command(rest)? {
+                actions::Command::List => Action::Send(Request::GetActions),
+                actions::Command::Edit(edit) => Action::EditActions(edit),
+            })
+        }
         Some((other, _)) => {
             bail!("unknown command '{other}' (try: mouse, clip, profile, gamesense, keyboard, switches, screen, parts, experimental, or nothing to watch)")
         }
@@ -287,6 +318,7 @@ fn sends(line: &str) -> Request {
         Action::EditCare(e) => panic!("{line} parsed as a care edit {e:?}"),
         Action::SetPart(p, on) => panic!("{line} parsed as part {p:?} {on}"),
         Action::SetFeature(f, on) => panic!("{line} parsed as experimental {f:?} {on}"),
+        Action::EditActions(e) => panic!("{line} parsed as an actions edit {e:?}"),
     }
 }
 
@@ -371,10 +403,24 @@ mod tests {
 
     #[test]
     fn the_commands_still_to_be_built_say_so_before_connecting() {
-        for line in ["bind", "bind 0x39 ctrl+a", "onboard list", "actions"] {
+        for line in ["bind", "bind 0x39 ctrl+a", "onboard list"] {
             let e = parse(&args(line)).err().unwrap();
             assert_eq!(e.to_string(), "not built yet", "{line}");
         }
+    }
+
+    #[test]
+    fn actions_list_or_read_change_and_write_back() {
+        assert!(matches!(sends("actions"), Request::GetActions));
+        assert!(matches!(
+            parse(&args("actions set f13 run kitty")).unwrap(),
+            Action::EditActions(actions::Edit::Set(_))
+        ));
+        assert!(matches!(
+            parse(&args("actions rm f13")).unwrap(),
+            Action::EditActions(actions::Edit::Remove(0x68))
+        ));
+        assert!(parse(&args("actions set f12 clip")).is_err());
     }
 
     #[test]

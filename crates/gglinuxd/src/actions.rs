@@ -13,10 +13,6 @@
 //! The desktop is asked to bind keys only when the actions change: at start the daemon
 //! binds again the keys it bound last time, which the desktop takes without asking (KDE
 //! shows its dialog only for keys it hasn't confirmed for gglinux before).
-#![expect(
-    dead_code,
-    reason = "main.rs creates the Service and routes to `serve` at a6-actions' merge; this line goes then"
-)]
 
 pub mod portal;
 pub mod run;
@@ -338,19 +334,6 @@ pub async fn serve(req: Request, service: &Service) -> ResponseData {
         },
         _ => ResponseData::Error {
             message: "not an actions request".into(),
-        },
-    }
-}
-
-/// What main.rs answers with until it creates the [`Service`] (at a6-actions' merge,
-/// when this goes): the default state for `get_actions`, "not built yet" for the rest.
-pub async fn handle(req: Request) -> ResponseData {
-    match req {
-        Request::GetActions => ResponseData::Actions {
-            state: ActionsState::default(),
-        },
-        _ => ResponseData::Error {
-            message: "not built yet".into(),
         },
     }
 }

@@ -63,6 +63,8 @@ struct Workers {
     clips: ClipsHandle,
     /// The experimental gates: features not tried on the owner's hardware yet.
     experimental: Arc<experimental::Gates>,
+    /// The actions on the spare keys F13–F24.
+    actions: Arc<actions::Service>,
     /// The parts as saved when this daemon started; the handles of those not running
     /// lead nowhere.
     parts: Parts,
@@ -131,6 +133,21 @@ async fn main() -> Result<()> {
     let (mixed_tx, mixed_rx) = watch::channel::<Option<String>>(None);
     // Kept here while the part that sends on them is off, so clips just hear nothing.
     let (mut game_tx, mut mixed_tx) = (Some(game_tx), Some(mixed_tx));
+    let profiles = match (run.profiles, game_tx.take()) {
+        (true, Some(tx)) => profiles::spawn(event_tx.clone(), keyboard.clone(), tx),
+        (_, tx) => {
+            game_tx = tx;
+            ProfilesHandle::off()
+        }
+    };
+    let clips = if run.clips {
+        clips::spawn(event_tx.clone(), game_rx, mixed_rx)
+    } else {
+        ClipsHandle::off()
+    };
+    // Actions run whichever parts are on; a profile or clip action says so while its
+    // part is off.
+    let actions = actions::spawn(event_tx.clone(), profiles.clone(), clips.clone());
     let workers = Workers {
         mouse: if run.mouse {
             mouse::spawn(event_tx.clone())
@@ -149,18 +166,8 @@ async fn main() -> Result<()> {
                 GamesenseHandle::off()
             }
         },
-        profiles: match (run.profiles, game_tx.take()) {
-            (true, Some(tx)) => profiles::spawn(event_tx.clone(), keyboard.clone(), tx),
-            (_, tx) => {
-                game_tx = tx;
-                ProfilesHandle::off()
-            }
-        },
-        clips: if run.clips {
-            clips::spawn(event_tx.clone(), game_rx, mixed_rx)
-        } else {
-            ClipsHandle::off()
-        },
+        profiles,
+        clips,
         // Sonar tells the keyboard's visualizer and clips where everything playing mixes.
         sonar: match (run.sonar, mixed_tx.take()) {
             (true, Some(tx)) => sonar::spawn(event_tx.clone(), keyboard.clone(), tx),
@@ -172,6 +179,7 @@ async fn main() -> Result<()> {
         },
         keyboard,
         experimental: gates,
+        actions,
         parts,
         restart: Arc::new(Notify::new()),
     };
@@ -695,7 +703,9 @@ async fn dispatch(
         | Request::ReadOnboard { .. }
         | Request::LoadOnboard { .. }
         | Request::WriteOnboard { .. }) => keyboard::onboard::handle(req, &workers.keyboard).await,
-        req @ (Request::GetActions | Request::SetActions { .. }) => actions::handle(req).await,
+        req @ (Request::GetActions | Request::SetActions { .. }) => {
+            actions::serve(req, &workers.actions).await
+        }
     };
     ServerMessage::response(frame.id, result)
 }
@@ -1034,6 +1044,12 @@ mod tests {
     fn workers_with(parts: Parts) -> Workers {
         let (event_tx, _) = broadcast::channel(8);
         Workers {
+            // Never saved by the tests that use these workers; fakes, so nothing runs.
+            actions: Arc::new(actions::testing::Fakes::default().service(
+                std::env::temp_dir().join("gglinuxd-tests-never-written/actions.json"),
+                Err("no typing in tests".into()),
+                event_tx.clone(),
+            )),
             mouse: MouseHandle::off(),
             headset: HeadsetHandle::off(),
             keyboard: KeyboardHandle::off(),
@@ -1188,7 +1204,6 @@ mod tests {
             ("read_onboard", r#"{"slot":null}"#),
             ("load_onboard", r#"{"slot":0}"#),
             ("write_onboard", r#"{"slot":4,"from":{"kind":"current"}}"#),
-            ("set_actions", r#"{"bindings":[]}"#),
         ] {
             match ask(method, params).await {
                 ResponseData::Error { message } => assert_eq!(message, "not built yet", "{method}"),
@@ -1196,6 +1211,20 @@ mod tests {
             }
         }
         assert!(fake.sent().is_empty(), "none of it reached the keyboard");
+        // The actions service answers its own: an empty list is no change, F12 isn't a spare key.
+        assert!(matches!(
+            ask("set_actions", r#"{"bindings":[]}"#).await,
+            ResponseData::Success
+        ));
+        match ask(
+            "set_actions",
+            r#"{"bindings":[{"key":69,"label":"x","action":{"kind":"clip_save"}}]}"#,
+        )
+        .await
+        {
+            ResponseData::Error { message } => assert!(message.contains("F13–F24"), "{message}"),
+            other => panic!("{other:?}"),
+        }
         kb.send::<()>(KeyboardCommand::Shutdown).await.unwrap();
 
         // With the keyboard part off its requests are refused first; the others aren't.
