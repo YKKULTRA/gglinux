@@ -4,7 +4,8 @@
 //! same checked transaction the daemon runs, against memory instead of flash, so a write
 //! takes about as long as on the keyboard. Refused while `keyboard_onboard` is off, as the
 //! daemon refuses. Backups are kept in memory under made-up paths, and a backup is written
-//! back only if it's one of those.
+//! back only if it's one of those. Its slots always check out, so a `recover` is refused
+//! as the daemon refuses it for a slot that checks out.
 //!
 //! Like a device, it lags: the first `get_onboard` after an operation still answers with
 //! the state from before it. The operation's own answer is the state after it.
@@ -12,7 +13,7 @@
 use std::sync::Mutex;
 
 use gg_device_keyboard::onboard::fake::FakeSlots;
-use gg_device_keyboard::onboard::{Image, Timing, SLOTS};
+use gg_device_keyboard::onboard::{Image, Timing, Written, SLOTS};
 use gg_device_keyboard::{oled, Bitmap, Families, Keyboard};
 use gg_ipc::{
     check_slot, Feature, OnboardSlot, OnboardSource, OnboardState, Request, ResponseData, Screen,
@@ -85,7 +86,7 @@ impl Slots {
         for s in slots {
             let image = self
                 .keyboard
-                .read_image(s)
+                .read_image(s, &Timing::KEYBOARD)
                 .map_err(|e| format!("slot {} couldn't be read: {e:#}", s + 1))?;
             self.back_up(s, &image);
             let kept = self.slot(s);
@@ -95,18 +96,22 @@ impl Slots {
         Ok(())
     }
 
+    /// One of the made-up backups, checked.
+    fn backup(&self, path: &str) -> Result<Image, String> {
+        let bytes = self
+            .backups
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, b)| b.clone())
+            .ok_or_else(|| format!("reading {path}: the fake daemon has no such backup"))?;
+        Image::parse(&bytes).map_err(|e| format!("{e:#}"))
+    }
+
     fn write(&mut self, slot: u8, from: OnboardSource, s: &Fake) -> Result<(), String> {
         let replacement = match &from {
             OnboardSource::Current => None,
-            OnboardSource::Backup { path } => {
-                let bytes = self
-                    .backups
-                    .iter()
-                    .find(|(p, _)| p == path)
-                    .map(|(_, b)| b.clone())
-                    .ok_or_else(|| format!("reading {path}: the fake daemon has no such backup"))?;
-                Some(Image::parse(&bytes).map_err(|e| format!("{e:#}"))?)
-            }
+            OnboardSource::Backup { path } => Some(self.backup(path)?),
+            OnboardSource::Recover { path } => return self.recover(slot, path),
         };
         let (switches, screen) = (&s.keyboard.switches, &s.keyboard.screen);
         let mut saved = None;
@@ -130,9 +135,26 @@ impl Slots {
         if let Some(old) = saved {
             self.back_up(slot, &old);
         }
-        result.map_err(|e| e.to_string())?;
+        let written = result.map_err(|e| e.to_string())?;
+        if let Written::Written(check) = written {
+            self.state.note = check.warning();
+        }
         let kept = self.slot(slot);
         kept.name = name;
+        kept.valid = Some(true);
+        Ok(())
+    }
+
+    /// As the daemon does it: refused for a slot that checks out, which all of these do.
+    fn recover(&mut self, slot: u8, path: &str) -> Result<(), String> {
+        let image = self.backup(path)?;
+        let check = self
+            .keyboard
+            .recover_slot(slot, &Timing::KEYBOARD, &image, |raw| Ok(raw.to_vec()))
+            .map_err(|e| e.to_string())?;
+        self.state.note = check.warning();
+        let kept = self.slot(slot);
+        kept.name = Some(image.name());
         kept.valid = Some(true);
         Ok(())
     }
@@ -192,6 +214,7 @@ pub fn handle(req: Request, s: &mut Fake) -> ResponseData {
         return error(message);
     }
     let before = slots.state.clone();
+    slots.state.note = None;
     let result = match req {
         Request::ReadOnboard { slot } => slots.read(slot),
         Request::LoadOnboard { slot } => slots

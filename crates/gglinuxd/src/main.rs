@@ -749,10 +749,42 @@ fn outcome(result: Result<(), String>) -> ResponseData {
     }
 }
 
+/// Wait, at most `longest`, for the keyboard slot writes asked for to end: stopping in the
+/// middle of one can leave the slot erased or half written. Says so in the log. Whether
+/// they ended.
+async fn wait_for_slot_write(keyboard: &KeyboardHandle, longest: Duration) -> bool {
+    let writes = keyboard.slot_writes();
+    if !writes.running() {
+        return true;
+    }
+    info!(
+        "waiting for the keyboard slot write to finish (at most {} s)",
+        longest.as_secs()
+    );
+    let deadline = tokio::time::Instant::now() + longest;
+    while writes.running() {
+        if tokio::time::Instant::now() >= deadline {
+            warn!(
+                "the keyboard slot write didn't finish in {} s; stopping anyway",
+                longest.as_secs()
+            );
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    info!("the keyboard slot write finished");
+    true
+}
+
 /// Leave the devices as their owner expects them — base-station screen dark,
-/// keyboard lighting back on its own profile — waiting at most [`SHUTDOWN_GRACE`].
+/// keyboard lighting back on its own profile — waiting at most [`SHUTDOWN_GRACE`], after
+/// any keyboard slot write has ended (at most [`keyboard::onboard::longest_write`]). A
+/// restart for a change of parts comes through here too.
 async fn shutdown_devices(workers: &Workers) {
     let run = workers.parts.running();
+    if run.keyboard {
+        wait_for_slot_write(&workers.keyboard, keyboard::onboard::longest_write()).await;
+    }
     let all = async {
         tokio::join!(
             async {
@@ -1129,6 +1161,31 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), workers.restart.notified())
             .await
             .expect("a restart is asked for once the answer is out");
+    }
+
+    #[tokio::test]
+    async fn stopping_waits_for_a_keyboard_slot_write_but_not_forever() {
+        let workers = workers_with(Parts::default());
+        // None running: no wait.
+        let start = std::time::Instant::now();
+        assert!(wait_for_slot_write(&workers.keyboard, Duration::from_secs(5)).await);
+        assert!(start.elapsed() < Duration::from_millis(100));
+        // One running: until it ends.
+        let write = workers.keyboard.slot_writes().start();
+        let ends = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(write);
+        });
+        let start = std::time::Instant::now();
+        assert!(wait_for_slot_write(&workers.keyboard, Duration::from_secs(5)).await);
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        ends.await.unwrap();
+        // One that never ends is given up on.
+        let _stuck = workers.keyboard.slot_writes().start();
+        let start = std::time::Instant::now();
+        assert!(!wait_for_slot_write(&workers.keyboard, Duration::from_millis(200)).await);
+        let waited = start.elapsed();
+        assert!(waited >= Duration::from_millis(200) && waited < Duration::from_secs(2));
     }
 
     /// The answer to one request line.

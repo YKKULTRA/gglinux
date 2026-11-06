@@ -272,21 +272,38 @@ Pro generation on Linux. This is the project's one real reverse-engineering effo
 > **Source, adapted:** the same Apex Control reference (CC BY 4.0), "Onboard profiles & the flash
 > filesystem", "Image layout", "CRC", "Writing safely" and "Queries & misc". Its author reports a
 > full slot read, and an erase + 25-chunk write + `B1` + full read-back, as confirmed on one keyboard
-> (fw 1.19.7), first on spare slot 4. gglinux builds them behind `keyboard_onboard` (off by
-> default); none of it has been sent to this keyboard yet.
+> (fw 1.19.7), first on spare slot 4 (0-based: file `0x84`, "Config 5", which ggctl and the app call
+> slot 5). Where the document leaves the shape or timing open, gglinux does what Apex Control's own
+> code does at the same commit (MIT; pinned in `gglinux-audit-2026-11-05/evidence/apexkit-f7db8c5/`,
+> cited `AK:<file>:<line>`), as review R1-onboard found. gglinux builds them behind `keyboard_onboard`
+> (off by default); none of it has been sent to this keyboard yet.
 >
 > - Every setting command above writes RAM only; at power-up the keyboard loads the active slot's
 >   flash image. Slots 0–4 (shown 1–5) are files `0x80 + slot`. Integers are little-endian.
-> - Read a chunk (feature, write then read): request `83 01 <file> <size u16> <offset u32>`; the
->   feature read answers `83 <err> <data…>`. gglinux reads 24 × 500 bytes and the last 324.
+> - Read a chunk (feature, write then read): request `83 01 <file> F4 01 <offset u32>`; the feature
+>   read answers `83 <err> <data…>`. gglinux asks for 25 × 500 bytes at offsets 0, 500 … 12000 and
+>   drops the last chunk's 176 bytes past the image, as Apex Control's code reads (AK
+>   `ApexDevice.swift:214-245`, `OnboardProfile.swift:136-148`). It waits 13 ms between the request
+>   and the read (the feature report still holds the last command's answer until then; AK
+>   `HIDTransport.swift:247-253`) and tries each chunk up to 4 times, 50 ms apart (AK
+>   `ApexDevice.swift:223-237`).
 > - Erase (output → input): `02 01 <file>`; the input report comes when the erase is done (up to
->   6 s). What it holds isn't documented: gglinux only waits for it (it must start with `02`).
-> - Write a chunk (feature): `03 01 <file> <size u16> <offset u32> <data…>`, 500-byte chunks about
->   13 ms apart. gglinux sends the 25th as size 324 at offset 12000, its data padded to 500 bytes
->   with `0xFF` (see the open point below).
-> - Check (output → input): `B1 <slot>`; gglinux reads `B1 00` as good, `B1 <other>` as bad (the
->   reference says only that the firmware CRC-checks the slot).
+>   6 s). What it holds isn't documented: gglinux only waits for it (one that starts with `02`).
+> - Write a chunk (feature): `03 01 <file> F4 01 <offset u32> <data…>`, 500-byte chunks, 13 ms after
+>   each one, the last too. The 25th is sent exactly as Apex Control's code sends it: size 500 at
+>   offset 12000, the image's last 324 bytes, then 176 × `0xFF` (AK `OnboardProfile.swift:155-177`,
+>   pinned by its test `OnboardProfileTests.swift:302-318`). Nothing but `0xFF` goes past byte 12323.
+> - Check (output → input): `B1 <slot>`. The reference says only that the firmware CRC-checks the
+>   slot, and documents no answer. gglinux waits up to 2 s, logs what came, and lets the full
+>   read-back decide, as Apex Control's code does (AK `ApexDevice.swift:274-277`). An answer other
+>   than `B1 00`, or none, is kept as a note in the result until a session on the keyboard shows
+>   what a good answer looks like.
 > - Load (output): `B2 <slot>`, no answer.
+> - The input queue: the kernel keeps every input report the interface sends for the open file.
+>   Before the erase and before `B1`, gglinux throws away the ones nobody read, and while it waits
+>   it skips reports that don't start with the opcode it waits for, so an old or late answer to
+>   something else is never taken for the erase's or the check's (Apex Control waits only for the
+>   report after its own send: AK `HIDTransport.swift:191-197, 259-286`).
 > - Image (profile schema 3, device schema 8, fw ≥ 1.19.0), 12 324 bytes = 12 320-byte body + CRC.
 >   Offsets: 0 schema `3` (u32) · 4 name, 24 bytes ASCII · 28 onboard lighting, 48 (Fn-lit mask at
 >   40) · 76 Fn key, u32 (factory `0xF0`) · 80 normal-layer bindings, 100 × 5 · 580 Fn-layer
@@ -295,27 +312,33 @@ Pro generation on Linux. This is the project's one real reverse-engineering effo
 >   release modes, Rapid Trigger distance, 70 each · 1586 protection ms (u32) + 70 distances ·
 >   1660 second-actuation bindings, 70 × 5 · 2010 screen picture, 640 bytes as `1F 81` · 2650 Rapid
 >   Tap, 10 × `key1, key2, mode | 0x80 both, 0, 0` + the on byte · 2701 padding · 2704 macros, 9 600
->   bytes · 12304 GUID, 16 · 12320 CRC.
+>   bytes · 12304 GUID, 16 · 12320 CRC. A test pins each as a number.
 > - The per-key tables (bindings, actuation, release, distance, protection) are in the firmware's
 >   own key order (`deviceKeyIndexToHID` in ApexKit), which the reference doesn't list. Until
 >   gglinux has it, a write leaves those tables as the slot has them.
 > - CRC: the STM32 CRC unit's CRC-32, polynomial `0x04C11DB7`, init `0xFFFFFFFF`, no reflection,
 >   no final XOR, fed as 32-bit little-endian words over the 12 320 body bytes (the byte-wise
->   equivalent is CRC-32/MPEG-2 with each word's bytes reversed).
+>   equivalent is CRC-32/MPEG-2 with each word's bytes reversed). ApexKit's vectors (`C704DD7B`,
+>   `1DABE74F`, `8DCBFB33`, `908EDE87`; AK `OnboardProfileTests.swift:64-70`) are in the tests.
 > - Writing safely, as gglinux does it (`crates/gg-device-keyboard/src/onboard.rs`,
 >   `Keyboard::write_slot`): read the whole slot and check size, schemas and CRC → save a backup
->   file (`~/.config/gglinux/onboard-backups/slot<N>-<UTC>.bin`, folder 700, file 600) and read it
->   back; it must equal the slot or nothing is erased → change the image in memory and check it the
->   same way → erase → 25 chunks → `B1` → read everything back and compare (once more if the first
->   read differs, as the first read after a change may lag) → on any failure from the erase on,
->   write the old image back the same way and report both. The worker sends nothing else meanwhile,
->   so the lighting stream pauses around the write. An unchanged image isn't written.
->
-> **Open point (settled by the GG capture before the gate is turned on).** The reference writes
-> "25 × 500-byte chunks, last padded `0xFF`", which reads as a 25th chunk of size 500 at offset
-> 12000 (12 500 > 12 324). The allowlist refuses any `03`/`83` running past the image, so gglinux
-> sends size 324 with the same 500 bytes of data after the header. Whether the firmware wants 500
-> there (and whether `B1` cares) is unknown.
+>   file (`~/.config/gglinux/onboard-backups/slot<N>-<UTC>.bin`, folder 700, file 600, synced with
+>   its folder) and read it back; it must equal the slot or nothing is erased → change the image in
+>   memory and check it the same way → erase → 25 chunks → `B1` → read everything back and compare
+>   (once more if the first read differs, as the first read after a change may lag). On any failure
+>   from the erase on, the old image goes back, and that restore never stops once its erase is out:
+>   each send is tried 3 times, an erase that doesn't answer is waited out for its whole 6 s, `B1`
+>   decides nothing, the read-back always runs, and the whole restore is done up to 3 times before
+>   it reports failure. The worker sends nothing else meanwhile, so the lighting stream pauses
+>   around the write; stopping or restarting the daemon waits for a write to end. An unchanged
+>   image isn't written. Most of a write takes about 2 s; with every wait run out, about 37 s.
+> - A slot that doesn't check out any more (a write cut short, a restore that failed) is never
+>   written that way. `ggctl onboard restore N <backup file> --damaged` (its own question first)
+>   puts a backup into it (`Keyboard::recover_slot`): the slot is read and saved raw as
+>   `slot<N>-<UTC>-damaged.bin`, the backup file is checked (size, schemas, CRC), then erase,
+>   25 chunks, `B1` and read-back as a restore does them. It's refused for a slot that checks out,
+>   and for one that holds a whole image with its CRC right but other schemas (other firmware's
+>   layout). A slot that reads bad on a plain read is saved the same way, to look at later.
 
 ### What gglinux sends this keyboard: the allowlist
 

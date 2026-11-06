@@ -168,6 +168,9 @@ impl std::fmt::Debug for Command {
 #[derive(Clone)]
 pub struct Handle {
     tx: Sender<Command>,
+    /// Slot writes asked for and not ended yet, shared by every clone: `main` waits for
+    /// them before it stops the daemon.
+    slot_writes: onboard::Writes,
 }
 
 impl Handle {
@@ -175,7 +178,19 @@ impl Handle {
     /// a wake or a `listen_to` from another part goes nowhere.
     pub fn off() -> Handle {
         let (tx, _) = mpsc::channel();
-        Handle { tx }
+        Handle::on(tx)
+    }
+
+    fn on(tx: Sender<Command>) -> Handle {
+        Handle {
+            tx,
+            slot_writes: onboard::Writes::default(),
+        }
+    }
+
+    /// The onboard slot writes asked for and not ended yet.
+    pub fn slot_writes(&self) -> &onboard::Writes {
+        &self.slot_writes
     }
 
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
@@ -218,7 +233,7 @@ pub fn spawn(
         .name("gg-keyboard".into())
         .spawn(move || worker(rx, readers_tx, event_tx, overlays, experimental))
         .expect("spawn gg-keyboard thread");
-    Handle { tx }
+    Handle::on(tx)
 }
 
 /// A worker on `device`, a keyboard over a fake transport, open from the start, with its
@@ -267,7 +282,7 @@ fn spawn_fake_on(
             run(state, &rx, &event_tx);
         })
         .expect("spawn gg-keyboard-fake thread");
-    Handle { tx }
+    Handle::on(tx)
 }
 
 struct State {

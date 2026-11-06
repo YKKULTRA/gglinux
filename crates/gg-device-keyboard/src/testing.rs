@@ -11,7 +11,12 @@
 //!   keyboard's are. A feature read nobody scripted gets the keyboard's bare
 //!   acknowledgement, `<opcode> 00`; an input read nobody scripted times out. Each output
 //!   report is answered once, as the keyboard sends one input report per query;
-//! - fails the send [`FakeTransport::fail_send`] names: it reaches nothing and isn't kept;
+//! - keeps an input queue, as the kernel does for an open hidraw file: reports put there
+//!   ([`FakeTransport::queue_input`], or [`FakeTransport::queue_input_after`] once a
+//!   command goes out) are read before any answer, so code that takes the next input
+//!   report for its own answer gets an old one, as it would on the device;
+//! - fails the sends [`FakeTransport::fail_send`] and [`FakeTransport::fail_sends`] name:
+//!   they reach nothing and aren't kept; and the reads [`FakeTransport::fail_reads`] names;
 //! - **lags** like the keyboard: a change scripted with [`FakeTransport::change_after`]
 //!   shows only from the second read after the command that makes it. The first read
 //!   still gets the old answer, so code that reads once, straight after a write, and
@@ -19,6 +24,8 @@
 //!
 //! It checks nothing: the allowlist is [`crate::Keyboard`]'s, before the transport.
 
+use std::collections::VecDeque;
+use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, ensure, Result};
@@ -102,12 +109,37 @@ struct Pending {
     reads: u32,
 }
 
+/// Counts from 1, the end left out.
+type Span = (usize, usize);
+
+fn span(range: impl RangeBounds<usize>) -> Span {
+    let start = match range.start_bound() {
+        Bound::Included(&n) => n,
+        Bound::Excluded(&n) => n + 1,
+        Bound::Unbounded => 1,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(&n) => n + 1,
+        Bound::Excluded(&n) => n,
+        Bound::Unbounded => usize::MAX,
+    };
+    (start, end)
+}
+
 #[derive(Default)]
 struct Inner {
     sent: Vec<Sent>,
     /// Sends tried, failed ones too.
     sends: usize,
     fail: Vec<usize>,
+    fail_spans: Vec<Span>,
+    /// Reads tried (feature and input reads together), failed ones too.
+    reads: usize,
+    fail_reads: Vec<Span>,
+    /// Input reports waiting to be read, oldest first.
+    queue: VecDeque<Vec<u8>>,
+    /// Input reports that come in once a command matching the key goes out.
+    queue_after: Vec<(Key, Vec<u8>)>,
     script: Vec<Scripted>,
     changes: Vec<Change>,
     pending: Vec<Pending>,
@@ -182,6 +214,88 @@ impl FakeTransport {
         self
     }
 
+    /// Make every send in `range` fail, counting as [`FakeTransport::fail_send`] does:
+    /// `40..` is a keyboard gone from the 40th send on.
+    pub fn fail_sends(&self, range: impl RangeBounds<usize>) -> &Self {
+        self.lock().fail_spans.push(span(range));
+        self
+    }
+
+    /// Make every read in `range` fail, counting from 1, feature and input reads together
+    /// (each empty read of a drain too).
+    pub fn fail_reads(&self, range: impl RangeBounds<usize>) -> &Self {
+        self.lock().fail_reads.push(span(range));
+        self
+    }
+
+    /// Put an input report in the queue now: one nobody read yet, read before any answer.
+    pub fn queue_input(&self, report: &[u8]) -> &Self {
+        self.lock().queue.push_back(report.to_vec());
+        self
+    }
+
+    /// Once a report matching `command` goes out, `report` comes into the queue, ahead of
+    /// that command's own answer: a late answer to something earlier. Once.
+    pub fn queue_input_after(&self, command: Key, report: &[u8]) -> &Self {
+        self.lock().queue_after.push((command, report.to_vec()));
+        self
+    }
+
+    /// How many input reports wait in the queue.
+    pub fn queued_input(&self) -> usize {
+        self.lock().queue.len()
+    }
+
+    /// The oldest input report in the queue, taken out. For fakes built on this one that
+    /// answer reads themselves: the queue comes before their answers too.
+    pub fn take_queued_input(&self) -> Option<Vec<u8>> {
+        self.lock().queue.pop_front()
+    }
+
+    /// Count a read, and fail it if [`FakeTransport::fail_reads`] names it. This fake's own
+    /// reads do; a fake built on it calls this for each read it answers.
+    pub fn count_read(&self) -> Result<()> {
+        let mut inner = self.lock();
+        inner.reads += 1;
+        let n = inner.reads;
+        if inner.fail_reads.iter().any(|&(a, b)| (a..b).contains(&n)) {
+            bail!("the fake keyboard failed read {n}");
+        }
+        Ok(())
+    }
+
+    /// Answer a feature read as this fake does, without counting it.
+    pub fn feature_reply(&self, buf: &mut [u8]) -> Result<usize> {
+        ensure!(
+            buf.first() == Some(&0),
+            "a feature read needs report id 0 in the buffer's first byte"
+        );
+        let mut inner = self.lock();
+        let reply = match inner.last_feature.clone() {
+            Some(request) => inner
+                .answer(Read::Feature, &request)
+                .unwrap_or_else(|| vec![request[1], 0x00]),
+            None => Vec::new(),
+        };
+        Ok(fill(buf, 1, &reply, proto::FEATURE_REPORT))
+    }
+
+    /// Answer an input read as this fake does (the queue, then the last output report's
+    /// answer), without counting it.
+    pub fn input_reply(&self, buf: &mut [u8]) -> usize {
+        let mut inner = self.lock();
+        if let Some(report) = inner.queue.pop_front() {
+            return fill(buf, 0, &report, proto::INPUT_REPORT);
+        }
+        let Some(request) = inner.last_output.take() else {
+            return 0;
+        };
+        match inner.answer(Read::Input, &request) {
+            Some(reply) => fill(buf, 0, &reply, proto::INPUT_REPORT),
+            None => 0,
+        }
+    }
+
     /// Every report sent so far, in order.
     pub fn sent(&self) -> Vec<Sent> {
         self.lock().sent.clone()
@@ -208,13 +322,18 @@ impl FakeTransport {
 impl Inner {
     fn record(&mut self, kind: Kind, report: &[u8]) -> Result<()> {
         self.sends += 1;
-        if self.fail.contains(&self.sends) {
-            bail!("the fake keyboard failed send {}", self.sends);
+        let n = self.sends;
+        if self.fail.contains(&n) || self.fail_spans.iter().any(|&(a, b)| (a..b).contains(&n)) {
+            bail!("the fake keyboard failed send {n}");
         }
         self.sent.push(Sent {
             kind,
             report: report.to_vec(),
         });
+        if let Some(i) = self.queue_after.iter().position(|(k, _)| k.matches(report)) {
+            let (_, late) = self.queue_after.remove(i);
+            self.queue.push_back(late);
+        }
         for c in self.changes.iter().filter(|c| c.command.matches(report)) {
             self.pending.push(Pending {
                 read: c.read,
@@ -279,18 +398,8 @@ impl Transport for FakeTransport {
     }
 
     fn get_feature(&self, buf: &mut [u8]) -> Result<usize> {
-        ensure!(
-            buf.first() == Some(&0),
-            "a feature read needs report id 0 in the buffer's first byte"
-        );
-        let mut inner = self.lock();
-        let reply = match inner.last_feature.clone() {
-            Some(request) => inner
-                .answer(Read::Feature, &request)
-                .unwrap_or_else(|| vec![request[1], 0x00]),
-            None => Vec::new(),
-        };
-        Ok(fill(buf, 1, &reply, proto::FEATURE_REPORT))
+        self.count_read()?;
+        self.feature_reply(buf)
     }
 
     fn write(&self, report: &[u8]) -> Result<()> {
@@ -298,14 +407,8 @@ impl Transport for FakeTransport {
     }
 
     fn read_timeout(&self, buf: &mut [u8], _ms: i32) -> Result<usize> {
-        let mut inner = self.lock();
-        let Some(request) = inner.last_output.take() else {
-            return Ok(0);
-        };
-        Ok(match inner.answer(Read::Input, &request) {
-            Some(reply) => fill(buf, 0, &reply, proto::INPUT_REPORT),
-            None => 0,
-        })
+        self.count_read()?;
+        Ok(self.input_reply(buf))
     }
 }
 
@@ -442,6 +545,51 @@ mod tests {
         fake.write(&[0, 0x41]).unwrap();
         let ops: Vec<(Kind, u8)> = fake.sent().iter().map(|s| (s.kind, s.report[1])).collect();
         assert_eq!(ops, [(Kind::Feature, 0x4B), (Kind::Output, 0x41)]);
+    }
+
+    #[test]
+    fn sends_and_reads_in_a_range_fail() {
+        let fake = FakeTransport::new();
+        fake.fail_sends(2..4).fail_reads(2..);
+        fake.write(&[0, 0x41]).unwrap();
+        assert!(fake.write(&[0, 0x41]).is_err());
+        assert!(fake.write(&[0, 0x41]).is_err());
+        fake.write(&[0, 0x41]).unwrap();
+        assert_eq!(fake.sent().len(), 2);
+        let mut buf = [0u8; proto::INPUT_REPORT];
+        fake.read_timeout(&mut buf, 0).unwrap();
+        assert!(fake.read_timeout(&mut buf, 0).is_err());
+        let mut feature = vec![0u8; proto::FEATURE_REPORT];
+        assert!(
+            fake.get_feature(&mut feature).is_err(),
+            "reads count together"
+        );
+    }
+
+    #[test]
+    fn queued_input_reports_come_before_any_answer() {
+        let fake = FakeTransport::new();
+        fake.answer_input(Key::op(0x02), &[0x02, 0x00])
+            .queue_input(&[0x90, 0x00])
+            .queue_input_after(Key::op(0x02), &[0xB1, 0x00]);
+        assert_eq!(fake.queued_input(), 1);
+        fake.write(&[0, 0x02, 0x01, 0x84]).unwrap();
+        assert_eq!(
+            fake.queued_input(),
+            2,
+            "the late one came in with the erase"
+        );
+        let mut buf = [0u8; proto::INPUT_REPORT];
+        let mut next = || {
+            let n = fake.read_timeout(&mut buf, 10).unwrap();
+            buf[..n.min(2)].to_vec()
+        };
+        assert_eq!(next(), [0x90, 0x00], "the oldest first");
+        assert_eq!(next(), [0xB1, 0x00]);
+        assert_eq!(next(), [0x02, 0x00], "then the erase's own answer");
+        assert_eq!(next(), Vec::<u8>::new());
+        fake.write(&[0, 0x02, 0x01, 0x84]).unwrap();
+        assert_eq!(fake.queued_input(), 0, "once");
     }
 
     #[test]

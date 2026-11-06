@@ -14,10 +14,11 @@
 
 use std::cell::Cell;
 use std::ffi::CString;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub mod allow;
 pub mod bindings;
@@ -42,6 +43,8 @@ const CONTROL_INTERFACE: i32 = 1;
 const VENDOR_USAGE_PAGE: u16 = 0xffc0;
 
 const READ_TIMEOUT_MS: i32 = 200;
+/// The most input reports [`Keyboard::drain_input`] throws away in one go.
+const DRAIN_MAX: usize = 256;
 
 /// How reports reach the keyboard's control interface. Every report starts with its
 /// report id, 0, as hidapi takes them.
@@ -231,6 +234,71 @@ impl Keyboard {
         Ok((n > 0).then(|| buf[..n.min(buf.len())].to_vec()))
     }
 
+    /// Throw away the input reports waiting to be read: answers nobody read, which the
+    /// next query would otherwise take for its own. Returns how many there were. A read
+    /// error ends it; the next send or read meets that error again.
+    pub fn drain_input(&self) -> usize {
+        let mut buf = [0u8; proto::INPUT_REPORT];
+        let mut dropped = 0;
+        // The kernel keeps at most 64 for an open file; more means they keep coming.
+        while dropped < DRAIN_MAX {
+            match self.transport.read_timeout(&mut buf, 0) {
+                Ok(0) => break,
+                Ok(n) => {
+                    debug!(report = ?&buf[..n.min(4)], "dropped an input report nobody read");
+                    dropped += 1;
+                }
+                Err(e) => {
+                    warn!(error = %e, "couldn't empty the keyboard's input queue");
+                    break;
+                }
+            }
+        }
+        dropped
+    }
+
+    /// Wait until `deadline` for the input report that answers command `op`: the first
+    /// that starts with `op`. Reports that start with anything else answer something
+    /// else, and are skipped. `None` if none came in time.
+    pub fn await_input(&self, op: u8, deadline: Instant) -> Result<Option<Vec<u8>>> {
+        let mut buf = [0u8; proto::INPUT_REPORT];
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let ms = i32::try_from(left.as_millis()).unwrap_or(i32::MAX);
+            let n = self
+                .transport
+                .read_timeout(&mut buf, ms)
+                .with_context(|| format!("reading the answer to keyboard command {op:#04x}"))?;
+            // Nothing within the time left.
+            if n == 0 {
+                return Ok(None);
+            }
+            let report = &buf[..n.min(buf.len())];
+            if report[0] == op {
+                return Ok(Some(report.to_vec()));
+            }
+            debug!(
+                waiting_for = format_args!("{op:#04x}"),
+                report = ?&report[..report.len().min(4)],
+                "skipped an input report that answers something else"
+            );
+        }
+    }
+
+    /// [`Keyboard::exchange_feature`], with a pause between the send and the read: some
+    /// answers aren't ready on a read straight after the request (Apex Control's code waits
+    /// 13 ms after each `83`).
+    pub fn exchange_feature_settled(&self, report: &[u8], settle: Duration) -> Result<Vec<u8>> {
+        self.feature(report)?;
+        std::thread::sleep(settle);
+        let mut buf = vec![0u8; proto::FEATURE_REPORT];
+        let n = self
+            .transport
+            .get_feature(&mut buf)
+            .with_context(|| format!("reading the reply to keyboard command {:#04x}", report[1]))?;
+        Ok(buf.get(1..n.min(buf.len())).unwrap_or_default().to_vec())
+    }
+
     fn feature(&self, report: &[u8]) -> Result<()> {
         self.send(Kind::Feature, report)
     }
@@ -342,6 +410,55 @@ mod tests {
         assert_eq!(&reply[..8], b"\x90\x001.19.7");
         assert_eq!(reply.len(), proto::INPUT_REPORT, "a whole input report");
         assert!(fake.sent().iter().all(|s| s.kind == Sent::Output));
+    }
+
+    #[test]
+    fn draining_throws_away_the_input_reports_nobody_read() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        assert_eq!(kb.drain_input(), 0);
+        fake.queue_input(&[0x90, 0x00]).queue_input(&[0xB1, 0x00]);
+        assert_eq!(kb.drain_input(), 2);
+        assert_eq!(fake.queued_input(), 0);
+        // A read error ends it.
+        fake.queue_input(&[0x90, 0x00]).fail_reads(5..);
+        assert_eq!(kb.drain_input(), 0);
+    }
+
+    #[test]
+    fn awaiting_an_answer_skips_the_ones_for_other_commands() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        let ask = proto::command(proto::OP_FIRMWARE, &[0x00]).unwrap();
+        fake.answer_input(Key::op(0x90), b"\x90\x001.19.7")
+            .queue_input(&[0xF5, 0x00, 0x01])
+            .queue_input(&[0x40, 0x00]);
+        kb.output(&ask).unwrap();
+        let soon = Instant::now() + Duration::from_millis(50);
+        let reply = kb.await_input(0x90, soon).unwrap().unwrap();
+        assert_eq!(&reply[..8], b"\x90\x001.19.7");
+        assert_eq!(fake.queued_input(), 0, "both skipped");
+        // Only others, then nothing: none came.
+        fake.queue_input(&[0x40, 0x00]);
+        assert_eq!(kb.await_input(0x90, soon).unwrap(), None);
+        // A deadline already past still reads what's there.
+        kb.output(&ask).unwrap();
+        let past = Instant::now() - Duration::from_millis(1);
+        assert!(kb.await_input(0x90, past).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_settled_feature_read_waits_between_the_request_and_the_read() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        let init = proto::command(proto::OP_INIT, &[]).unwrap();
+        let start = Instant::now();
+        let reply = kb
+            .exchange_feature_settled(&init, Duration::from_millis(13))
+            .unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(13));
+        assert_eq!(reply[..2], [0x4B, 0x00]);
+        assert_eq!(reply.len(), proto::FEATURE_REPORT - 1);
     }
 
     #[test]

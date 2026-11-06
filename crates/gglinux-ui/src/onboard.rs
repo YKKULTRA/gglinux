@@ -3,7 +3,10 @@
 //! the end of the keyboard card. Each slot shows its name, whether it checks out and its
 //! newest backup, with "Load" and "Write gglinux's settings into this slot…" (which asks
 //! first); "Back up all" reads and saves all five. Everything is greyed, with the reason,
-//! while `keyboard_onboard` is off.
+//! while `keyboard_onboard` is off. A slot that doesn't check out gets the terminal
+//! command that puts its backup back (`ggctl onboard restore N <file> --damaged`, which
+//! asks its own question); the app doesn't do that itself. What the keyboard's own check
+//! answered, when it wasn't `B1 00`, shows as a note.
 //!
 //! The daemon answers each operation with the slots as they are after it, so the panel
 //! never reads them again to see what an operation did.
@@ -20,10 +23,10 @@ use crate::client::{lost_connection, Client, State, TIMEOUT};
 use crate::{sync_rows, AppWindow, Forms, OnboardUi};
 
 /// A write takes about 2 s, but the erase may take up to 6, and a failed one is written
-/// back the same way.
+/// back, up to three times.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Reading all five is 125 chunk reads.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Reading all five is 125 chunk reads, each tried up to four times; as ggctl waits.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the panel keeps between the daemon's answers. Nothing: its state is the daemon's.
 #[derive(Debug, Default)]
@@ -76,6 +79,30 @@ pub fn lines(state: &OnboardState) -> Vec<Line> {
         .collect()
 }
 
+/// What to show for the slots that don't check out: the command that puts each one's
+/// backup back, which the app leaves to a terminal. Empty while every slot checks out.
+pub fn recovery(state: &OnboardState) -> String {
+    let commands: Vec<String> = state
+        .slots
+        .iter()
+        .filter(|s| s.valid == Some(false))
+        .map(|s| {
+            let file = s.backup.as_deref().unwrap_or("<backup file>");
+            format!(
+                "ggctl onboard restore {} {file} --damaged",
+                u16::from(s.index) + 1
+            )
+        })
+        .collect();
+    if commands.is_empty() {
+        return String::new();
+    }
+    format!(
+        "A slot that doesn't check out isn't written from here. If a write to it was cut short, put its backup back from a terminal: {}",
+        commands.join(" · ")
+    )
+}
+
 /// When a backup was made, from its name (`slot<N>-YYYYMMDDTHHMMSSZ.bin`), as
 /// `YYYY-MM-DD HH:MM UTC`.
 fn backup_time(path: &str) -> Option<String> {
@@ -112,8 +139,13 @@ pub fn show(ui: &AppWindow, s: &State) {
         g.set_shown(false);
         return;
     };
+    draw(ui, state, refusal(s.experimental));
+}
+
+/// Draw `state`, the controls refused for `refused` if it's given.
+fn draw(ui: &AppWindow, state: &OnboardState, refused: Option<String>) {
+    let g = ui.global::<OnboardUi>();
     g.set_shown(true);
-    let refused = refusal(s.experimental);
     g.set_enabled(refused.is_none());
     g.set_refused(refused.unwrap_or_default().into());
     let lines = lines(state);
@@ -128,6 +160,49 @@ pub fn show(ui: &AppWindow, s: &State) {
     if let Some(e) = &state.error {
         g.set_error(e.into());
     }
+    g.set_note(
+        state
+            .note
+            .as_deref()
+            .map(sentence)
+            .unwrap_or_default()
+            .into(),
+    );
+    g.set_recovery(recovery(state).into());
+}
+
+/// `text` with its first letter made a capital, to stand alone as a sentence.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// For the `shot` example: slot `slot` (from 0) doesn't check out and the last write got
+/// a note, as the fake daemon's slots never do, drawn with the gate on.
+fn draw_damaged(ui: &AppWindow, slot: i32) {
+    let bad = slot.clamp(0, 4) as u8;
+    let state = OnboardState {
+        slots: (0..ONBOARD_SLOTS)
+            .map(|index| OnboardSlot {
+                index,
+                name: (index != bad).then(|| format!("Config {}", index + 1)),
+                valid: Some(index != bad),
+                backup: Some(format!(
+                    "/home/you/.config/gglinux/onboard-backups/slot{}-20261106T120000Z.bin",
+                    index + 1
+                )),
+            })
+            .collect(),
+        note: Some(
+            "the keyboard's own check of the slot answered 0x01, not 0x00; what that means isn't known yet, and the slot reads back as written, so the write stands"
+                .into(),
+        ),
+        ..OnboardState::default()
+    };
+    draw(ui, &state, None);
 }
 
 /// Answer the panel's buttons.
@@ -188,6 +263,8 @@ pub fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
         // Slot n's write, waiting for its yes; then the yes.
         "onboard.confirm" => g.set_confirm(n),
         "onboard.write" => g.invoke_write(n),
+        // Slot n doesn't check out, and a note: what the fake daemon never shows.
+        "onboard.damaged" => draw_damaged(ui, n),
         // Everything drawn again from what the daemon said last.
         "onboard.redraw" => crate::refresh(ui),
         _ => return false,
@@ -247,6 +324,47 @@ mod tests {
             l[3].note, "backed up 2026-11-05 09:00 UTC",
             "from an earlier run"
         );
+    }
+
+    #[test]
+    fn a_slot_that_doesnt_check_out_shows_the_command_that_puts_its_backup_back() {
+        let state = OnboardState {
+            slots: vec![
+                OnboardSlot {
+                    valid: Some(true),
+                    ..slot(0)
+                },
+                OnboardSlot {
+                    valid: Some(false),
+                    backup: Some("/b/slot2-20261106T143456Z.bin".into()),
+                    ..slot(1)
+                },
+                OnboardSlot {
+                    valid: Some(false),
+                    ..slot(3)
+                },
+            ],
+            ..OnboardState::default()
+        };
+        let text = recovery(&state);
+        assert!(
+            text.contains("ggctl onboard restore 2 /b/slot2-20261106T143456Z.bin --damaged"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ggctl onboard restore 4 <backup file> --damaged"),
+            "{text}"
+        );
+        assert_eq!(recovery(&OnboardState::default()), "");
+    }
+
+    #[test]
+    fn a_note_from_the_daemon_stands_as_a_sentence() {
+        assert_eq!(
+            sentence("the keyboard's own check of the slot didn't answer"),
+            "The keyboard's own check of the slot didn't answer"
+        );
+        assert_eq!(sentence(""), "");
     }
 
     #[test]
