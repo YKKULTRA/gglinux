@@ -98,8 +98,7 @@ const ISO: [Key; 86] = [
 
 /// `board` with some keys' labels changed. Naming a key the board doesn't have stops the
 /// build.
-const fn relabel<const N: usize>(board: [Key; N], labels: &[(u8, &'static str)]) -> [Key; N] {
-    let mut board = board;
+const fn relabel<const N: usize>(mut board: [Key; N], labels: &[(u8, &'static str)]) -> [Key; N] {
     let mut i = 0;
     while i < labels.len() {
         let (code, label) = labels[i];

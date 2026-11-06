@@ -296,6 +296,17 @@ fn the_keys_every_board_shares_sit_where_the_us_board_has_them() {
 }
 
 #[test]
+fn the_iso_boards_differ_only_in_labels() {
+    let shape = |board: &[Key]| -> Vec<(u8, f32, f32, f32)> {
+        board.iter().map(|k| (k.0, k.2, k.3, k.4)).collect()
+    };
+    let uk = shape(for_region(Some(3)));
+    for region in [4, 6, 10, 20] {
+        assert_eq!(shape(for_region(Some(region))), uk, "region {region}");
+    }
+}
+
+#[test]
 fn every_key_but_space_has_a_label() {
     for (name, _, board) in boards() {
         for k in board {
