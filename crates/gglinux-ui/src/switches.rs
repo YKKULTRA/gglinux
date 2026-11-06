@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The Apex Pro TKL Gen 3's switches, in the keyboard card: the actuation
-//! point, own points per key, Rapid Trigger and Rapid Tap.
+//! point, own points per key, the deep-press point, Rapid Trigger and Rapid Tap.
+//! The deep-press point is greyed, with the reason, while `keyboard_bindings` is off
+//! in Settings → Experimental.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use gg_ipc::{KeyActuation, KeyInfo, KeyboardState, Request, Switches, TapMode, TapPair};
+use gg_ipc::{
+    Experimental, Feature, KeyActuation, KeyInfo, KeyboardState, Request, Switches, TapMode,
+    TapPair,
+};
 use slint::{Color, ComponentHandle, Model, SharedString};
 
 use crate::client::{Client, State, TIMEOUT};
@@ -65,6 +70,42 @@ pub fn show(ui: &AppWindow, s: &State, forms: &Forms) {
         return;
     };
     show_switches(ui, kb, &forms.switches.borrow());
+    show_deep(ui, kb, s.experimental.is_some_and(|e| e.keyboard_bindings));
+}
+
+/// The deep-press point: whether it may be set, and which keys have one.
+fn show_deep(ui: &AppWindow, kb: &KeyboardState, gated: bool) {
+    let g = ui.global::<SwitchesUi>();
+    g.set_deep_gated(gated);
+    g.set_deep_refusal(
+        Experimental::default()
+            .refusal(Feature::KeyboardBindings)
+            .unwrap_or_default()
+            .into(),
+    );
+    g.set_deep_keys(deep_keys(kb).into());
+}
+
+/// The keys with a deep-press point, in words.
+fn deep_keys(kb: &KeyboardState) -> String {
+    let keys: Vec<String> = kb
+        .switches
+        .second
+        .iter()
+        .map(|k| {
+            let name = kb
+                .layout
+                .iter()
+                .find(|l| l.code == k.code)
+                .map_or_else(|| format!("{:#04x}", k.code), crate::keyboard::label);
+            format!("{name} at {} mm", mm(k.actuation))
+        })
+        .collect();
+    if keys.is_empty() {
+        "No key has a deep-press point.".into()
+    } else {
+        format!("Deep press: {}.", keys.join(", "))
+    }
 }
 
 fn show_switches(ui: &AppWindow, kb: &KeyboardState, f: &SwitchesForm) {
@@ -175,6 +216,23 @@ pub fn with_own(sw: &Switches, selected: &BTreeSet<u8>, level: Option<u8>) -> Ve
     keys
 }
 
+/// The selected keys get a deep-press point (`Some`), or none.
+pub fn with_second(sw: &Switches, selected: &BTreeSet<u8>, level: Option<u8>) -> Vec<KeyActuation> {
+    let mut keys: Vec<KeyActuation> = sw
+        .second
+        .iter()
+        .filter(|k| !selected.contains(&k.code))
+        .copied()
+        .collect();
+    if let Some(actuation) = level {
+        keys.extend(selected.iter().map(|code| KeyActuation {
+            code: *code,
+            actuation,
+        }));
+    }
+    keys
+}
+
 /// Change Rapid Tap pair `i`: its keys are at `a` and `b` in `analog` (the
 /// adjustable keys, as listed), its mode at `mode` in the modes listed. A place
 /// off a list keeps what the pair had.
@@ -246,6 +304,20 @@ pub fn bind(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
             .upgrade()
             .map_or(15, |ui| ui.global::<SwitchesUi>().get_own_level());
         f([own as i32, 0, 0, 0], level)
+    });
+    let weak = ui.as_weak();
+    let f = switches(Rc::new(|sw, _, form, a, level| {
+        sw.second = with_second(
+            sw,
+            &form.selected,
+            (a[0] != 0).then_some(level.clamp(1, 40) as u8),
+        );
+    }));
+    g.on_set_deep(move |on| {
+        let level = weak
+            .upgrade()
+            .map_or(30, |ui| ui.global::<SwitchesUi>().get_deep_level());
+        f([on as i32, 0, 0, 0], level)
     });
     let f = switches(Rc::new(|sw, _, _, a, _| {
         sw.rapid_trigger.enabled = a[0] != 0
@@ -320,6 +392,8 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
         "switches.own-level" => sw.set_own_level(n),
         "switches.set-own" => sw.invoke_set_own(n != 0),
         "switches.clear-selection" => sw.invoke_clear_selection(),
+        "switches.deep-level" => sw.set_deep_level(n),
+        "switches.set-deep" => sw.invoke_set_deep(n != 0),
         "switches.set-rapid" => sw.invoke_set_rapid(n != 0),
         "switches.rapid-only-selected" => sw.invoke_rapid_only_selected(),
         "switches.set-tap" => sw.invoke_set_tap(n != 0),
@@ -399,6 +473,39 @@ mod tests {
                 actuation: 5
             }]
         );
+    }
+
+    #[test]
+    fn deep_press_points_replace_the_selected_keys_only_and_are_listed() {
+        let mut sw = Switches {
+            second: vec![KeyActuation {
+                code: 0x07,
+                actuation: 25,
+            }],
+            ..Switches::default()
+        };
+        let sel: BTreeSet<u8> = [0x04].into();
+        sw.second = with_second(&sw, &sel, Some(30));
+        assert_eq!(
+            sw.second,
+            [
+                KeyActuation {
+                    code: 0x07,
+                    actuation: 25
+                },
+                KeyActuation {
+                    code: 0x04,
+                    actuation: 30
+                }
+            ]
+        );
+        let mut kb = board(&[], Screen::Keyboard);
+        kb.switches = sw.clone();
+        assert_eq!(deep_keys(&kb), "Deep press: D at 2.5 mm, A at 3.0 mm.");
+        let none: BTreeSet<u8> = [0x04, 0x07].into();
+        assert!(with_second(&sw, &none, None).is_empty());
+        kb.switches.second.clear();
+        assert_eq!(deep_keys(&kb), "No key has a deep-press point.");
     }
 
     #[test]

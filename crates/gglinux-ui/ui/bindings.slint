@@ -1,12 +1,132 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Key bindings for the Apex Pro TKL Gen 3: a panel in the keyboard card, after
-// the switches (placed in app.slint). Not built yet, so it stays hidden.
+// the switches (placed in app.slint). What each key does on its own, while Fn
+// is held and past its deep-press point; the key that holds Fn. Greyed, with the
+// reason, while Settings → Experimental has key bindings off.
+
+import { Theme } from "theme.slint";
+import { Hint, ErrorLine, Toggle, Button, Segmented, Row, Unit, Head, Board, Key } from "widgets.slint";
+import { KeyboardUi, Opt, SubTitle } from "keyboard.slint";
+import { Pick } from "devices.slint";
 
 export global BindingsUi {
     /// Show the panel: in the keyboard card after the switches, with a divider
     /// above it. Off, it takes no room.
     in property <bool> shown: false;
+    /// The experimental gate is on: the controls work.
+    in property <bool> gated;
+    /// Why they don't while it's off: the contract's sentence.
+    in property <string> refusal;
+    /// gglinux sends the bindings when the keyboard connects.
+    in property <bool> enabled;
+    /// 0 normal, 1 with Fn held, 2 deep press.
+    in property <int> layer;
+    in property <[Key]> keys;
+    /// The picked key's name and layer; "" for none.
+    in property <string> picked;
+    /// What the picked key does now, in words.
+    in property <string> now;
+    /// The picked key runs one of the keyboard's own shortcuts here: kept as it is.
+    in property <bool> own-shortcut;
+    /// The editor's values for the picked key. Two-way: a pick lands here.
+    in-out property <int> kind;
+    in-out property <bool> ctrl;
+    in-out property <bool> shift;
+    in-out property <bool> alt;
+    in-out property <bool> super-key;
+    in-out property <int> usage;
+    in-out property <int> media;
+    in-out property <int> button;
+    in property <[string]> usage-names;
+    in property <[string]> fn-keys;
+    in property <int> fn-key;
+    in property <string> read-summary;
+    /// Why the keyboard didn't take them, as the daemon says.
+    in property <string> failed;
+    in property <bool> busy;
+    in property <string> error;
+    out property <[string]> layers: ["Normal", "With Fn held", "Deep press"];
+    out property <[string]> kinds: ["Default", "Keys", "Media key", "Mouse button", "CPI button", "Wheel up", "Wheel down", "Scroll left", "Scroll right", "Nothing"];
+    out property <[string]> media-names: ["Play/pause", "Next track", "Previous track", "Mute", "Volume up", "Volume down"];
+    out property <[string]> buttons: ["1 (left)", "2 (right)", "3 (middle)", "4 (back)", "5 (forward)", "6", "7", "8"];
+    callback set-enabled(bool);
+    callback pick-layer(int);
+    callback key-clicked(int);
+    callback apply();
+    callback read();
+    callback set-fn-key(int);
+    /// Turn the gate on or off: for the shot example's steps only.
+    callback shot-gate(bool);
 }
 
-/// What the panel shows: nothing yet. Its gaps come from where it's placed.
-export component BindingsPanel { }
+export component BindingsPanel {
+    property <bool> can: BindingsUi.gated && !BindingsUi.busy;
+    VerticalLayout {
+        Head { text: "KEY BINDINGS"; state: "experimental"; }
+        Opt { shown: !BindingsUi.gated; Hint { text: BindingsUi.refusal; } }
+        Opt { Toggle { text: "gglinux sets the key bindings (off: the keyboard keeps its own)"; checked: BindingsUi.enabled; enabled: root.can; toggled(v) => { BindingsUi.set-enabled(v); } } }
+        Opt { Hint { text: "The keyboard keeps these in memory, so gglinux sends them again each time it connects. The keyboard's own Fn shortcuts (brightness, media, the screen menu) are always kept."; } }
+        Opt { shown: BindingsUi.enabled; gap: 14px; VerticalLayout {
+            HorizontalLayout {
+                alignment: start;
+                Segmented { options: BindingsUi.layers; current: BindingsUi.layer; enabled: root.can; picked(i) => { BindingsUi.pick-layer(i); } }
+            }
+            Opt { gap: 12px; Board { keys: BindingsUi.keys; cols: KeyboardUi.cols; rows: KeyboardUi.rows; clicked(i) => { BindingsUi.key-clicked(i); } } }
+            Opt { Hint { text: BindingsUi.layer == 2 ? "Click a key to choose what it does when pressed past its deep-press point (set the point under Switches). Grey keys have fixed switches." : "Click a key to choose what it does. Outlined keys have a binding of gglinux's; grey keys can't be bound."; } }
+            Opt { shown: BindingsUi.picked != ""; gap: 14px; VerticalLayout {
+                SubTitle { text: BindingsUi.picked; }
+                Opt { Hint { text: BindingsUi.now; } }
+                Opt { shown: BindingsUi.own-shortcut; Hint { text: "gglinux keeps it as it is: it can't be made again once erased."; } }
+                Opt { shown: !BindingsUi.own-shortcut; Row {
+                    label: "Does";
+                    Pick { model: BindingsUi.kinds; index: BindingsUi.kind; enabled: root.can; busy: BindingsUi.busy; picked(i) => { BindingsUi.kind = i; } }
+                    Rectangle { horizontal-stretch: 1; }
+                } }
+                Opt { shown: !BindingsUi.own-shortcut && BindingsUi.kind == 1; Row {
+                    label: "Keys";
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        Toggle { horizontal-stretch: 0; text: "Ctrl"; checked: BindingsUi.ctrl; enabled: root.can; toggled(v) => { BindingsUi.ctrl = v; } }
+                        Toggle { horizontal-stretch: 0; text: "Shift"; checked: BindingsUi.shift; enabled: root.can; toggled(v) => { BindingsUi.shift = v; } }
+                        Toggle { horizontal-stretch: 0; text: "Alt"; checked: BindingsUi.alt; enabled: root.can; toggled(v) => { BindingsUi.alt = v; } }
+                        Toggle { horizontal-stretch: 0; text: "Super"; checked: BindingsUi.super-key; enabled: root.can; toggled(v) => { BindingsUi.super-key = v; } }
+                        Pick { min-width: 140px; model: BindingsUi.usage-names; index: BindingsUi.usage; enabled: root.can; busy: BindingsUi.busy; picked(i) => { BindingsUi.usage = i; } }
+                    }
+                } }
+                Opt { shown: !BindingsUi.own-shortcut && BindingsUi.kind == 2; Row {
+                    label: "Media key";
+                    Pick { model: BindingsUi.media-names; index: BindingsUi.media; enabled: root.can; busy: BindingsUi.busy; picked(i) => { BindingsUi.media = i; } }
+                    Rectangle { horizontal-stretch: 1; }
+                } }
+                Opt { shown: !BindingsUi.own-shortcut && BindingsUi.kind == 3; Row {
+                    label: "Button";
+                    Pick { model: BindingsUi.buttons; index: BindingsUi.button; enabled: root.can; busy: BindingsUi.busy; picked(i) => { BindingsUi.button = i; } }
+                    Rectangle { horizontal-stretch: 1; }
+                } }
+                Opt { shown: !BindingsUi.own-shortcut && BindingsUi.kind == 3; Hint { text: "A mouse button from the keyboard hasn't been seen to click on this keyboard yet."; } }
+                Opt { shown: !BindingsUi.own-shortcut; HorizontalLayout {
+                    alignment: start;
+                    Button { text: "Apply"; primary: true; enabled: root.can; clicked => { BindingsUi.apply(); } }
+                } }
+            } }
+            Opt { gap: 16px; Row {
+                label: "Fn key";
+                Pick { model: BindingsUi.fn-keys; index: BindingsUi.fn-key; enabled: root.can; busy: BindingsUi.busy; picked(i) => { BindingsUi.set-fn-key(i); } }
+                Rectangle { horizontal-stretch: 1; }
+            } }
+            Opt { Hint { text: "The key you hold for the Fn layer. Choosing one also sends which keys light while it's held."; } }
+        } }
+        Opt { gap: 12px; HorizontalLayout {
+            spacing: 10px;
+            Hint { text: BindingsUi.read-summary; vertical-alignment: center; }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                Button { text: "Read from the keyboard"; small: true; enabled: root.can; clicked => { BindingsUi.read(); } }
+            }
+        } }
+        Opt { shown: BindingsUi.failed != ""; ErrorLine { text: "The keyboard didn't take the key bindings: " + BindingsUi.failed; } }
+        Opt { shown: BindingsUi.error != ""; ErrorLine { text: BindingsUi.error; } }
+    }
+}
