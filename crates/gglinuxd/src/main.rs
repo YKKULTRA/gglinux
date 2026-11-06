@@ -23,8 +23,10 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, watch, Notify};
 use tracing::{debug, error, info, warn};
 
+mod actions;
 mod clips;
 mod clock;
+mod experimental;
 mod gamesense;
 mod headset;
 mod keyboard;
@@ -59,6 +61,8 @@ struct Workers {
     gamesense: GamesenseHandle,
     profiles: ProfilesHandle,
     clips: ClipsHandle,
+    /// The experimental gates: features not tried on the owner's hardware yet.
+    experimental: Arc<experimental::Gates>,
     /// The parts as saved when this daemon started; the handles of those not running
     /// lead nowhere.
     parts: Parts,
@@ -102,16 +106,25 @@ async fn main() -> Result<()> {
     for part in Part::ALL.into_iter().filter(|&p| !run.on(p)) {
         info!(part = part.label(), "turned off; not started");
     }
+    // The experimental gates, before the keyboard worker: it starts with them.
+    let experimental_path = experimental::path();
+    let gates_now = experimental::load(&experimental_path);
     // GameSense's registry exists before the keyboard worker, which draws it.
     let engine = run.gamesense.then(gamesense::Engine::load);
     let keyboard = if run.keyboard {
         let overlays = engine.iter().map(|e| e.overlay()).collect();
-        let keyboard = keyboard::spawn(event_tx.clone(), overlays);
+        let keyboard = keyboard::spawn(event_tx.clone(), overlays, gates_now);
         presence::spawn(keyboard.clone());
         keyboard
     } else {
         KeyboardHandle::off()
     };
+    let gates = Arc::new(experimental::Gates::new(
+        experimental_path,
+        gates_now,
+        event_tx.clone(),
+        keyboard.clone(),
+    ));
     // The game from the profiles' rules that's running now; games-only clips follow it.
     let (game_tx, game_rx) = watch::channel::<Option<String>>(None);
     // Where everything playing mixes, from Sonar; clips' desktop audio follows it.
@@ -158,6 +171,7 @@ async fn main() -> Result<()> {
             }
         },
         keyboard,
+        experimental: gates,
         parts,
         restart: Arc::new(Notify::new()),
     };
@@ -669,20 +683,19 @@ async fn dispatch(
                 .send::<()>(|reply| ClipsCommand::Delete { name, reply })
                 .await,
         ),
-        // M11 contract: answered by the units that build them.
-        Request::GetExperimental
-        | Request::SetExperimental { .. }
-        | Request::GetBindings
-        | Request::ReadBindings
-        | Request::SetBindings { .. }
-        | Request::GetOnboard
+        req @ (Request::GetExperimental | Request::SetExperimental { .. }) => {
+            experimental::handle(req, &workers.experimental)
+        }
+        // The keyboard's own modules answer these; while the keyboard part is off they
+        // were refused above.
+        req @ (Request::GetBindings | Request::ReadBindings | Request::SetBindings { .. }) => {
+            keyboard::bindings::handle(req, &workers.keyboard).await
+        }
+        req @ (Request::GetOnboard
         | Request::ReadOnboard { .. }
         | Request::LoadOnboard { .. }
-        | Request::WriteOnboard { .. }
-        | Request::GetActions
-        | Request::SetActions { .. } => ResponseData::Error {
-            message: "not built yet".into(),
-        },
+        | Request::WriteOnboard { .. }) => keyboard::onboard::handle(req, &workers.keyboard).await,
+        req @ (Request::GetActions | Request::SetActions { .. }) => actions::handle(req).await,
     };
     ServerMessage::response(frame.id, result)
 }
@@ -778,16 +791,16 @@ async fn write_message(
     Ok(())
 }
 
+/// Private folders for tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod scratch {
     use std::path::PathBuf;
 
-    /// A new private folder for one test's socket, removed when the test ends.
-    struct Scratch(PathBuf);
+    /// A new private folder for one test, removed when the test ends.
+    pub struct Scratch(pub PathBuf);
 
     impl Scratch {
-        fn new(tag: &str) -> Self {
+        pub fn new(tag: &str) -> Self {
             use std::hash::BuildHasher;
             use std::os::unix::fs::DirBuilderExt;
             let random = std::collections::hash_map::RandomState::new().hash_one(tag);
@@ -805,6 +818,14 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scratch::Scratch;
+    use gg_device_keyboard::testing::FakeTransport;
+    use gg_ipc::Experimental;
 
     #[tokio::test]
     async fn a_second_daemon_leaves_the_running_ones_socket_alone() {
@@ -1011,6 +1032,7 @@ mod tests {
     }
 
     fn workers_with(parts: Parts) -> Workers {
+        let (event_tx, _) = broadcast::channel(8);
         Workers {
             mouse: MouseHandle::off(),
             headset: HeadsetHandle::off(),
@@ -1019,6 +1041,13 @@ mod tests {
             gamesense: GamesenseHandle::off(),
             profiles: ProfilesHandle::off(),
             clips: ClipsHandle::off(),
+            // Never saved by the tests that use these workers.
+            experimental: Arc::new(experimental::Gates::new(
+                std::env::temp_dir().join("gglinuxd-tests-never-written/experimental.json"),
+                Experimental::default(),
+                event_tx,
+                KeyboardHandle::off(),
+            )),
             parts,
             restart: Arc::new(Notify::new()),
         }
@@ -1084,6 +1113,117 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), workers.restart.notified())
             .await
             .expect("a restart is asked for once the answer is out");
+    }
+
+    /// The answer to one request line.
+    async fn answer(line: &str, workers: &Workers) -> ResponseData {
+        let (_tx, snapshot) = watch::channel(Vec::new());
+        match dispatch(line, &snapshot, workers).await {
+            ServerMessage::Response { result, .. } => result,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_m11_requests_reach_their_modules_and_the_keyboards_wait_for_its_part() {
+        let d = Scratch::new("m11-routing");
+        let (event_tx, _) = broadcast::channel(8);
+        let fake = FakeTransport::new();
+        let kb = keyboard::spawn_fake(
+            fake.keyboard(),
+            d.0.join("keyboard"),
+            event_tx.clone(),
+            Experimental::default(),
+        );
+        let workers = Workers {
+            experimental: Arc::new(experimental::Gates::new(
+                d.0.join("experimental.json"),
+                Experimental::default(),
+                event_tx,
+                kb.clone(),
+            )),
+            keyboard: kb.clone(),
+            ..workers_with(Parts::default())
+        };
+        let ask = |method: &str, params: &str| {
+            let line = match params {
+                "" => format!(r#"{{"id":1,"req":{{"method":"{method}"}}}}"#),
+                p => format!(r#"{{"id":1,"req":{{"method":"{method}","params":{p}}}}}"#),
+            };
+            let workers = &workers;
+            async move { answer(&line, workers).await }
+        };
+
+        assert!(matches!(
+            ask("get_bindings", "").await,
+            ResponseData::Bindings { state } if state == gg_ipc::BindingsState::default()
+        ));
+        assert!(matches!(
+            ask("get_onboard", "").await,
+            ResponseData::Onboard { state } if state == gg_ipc::OnboardState::default()
+        ));
+        assert!(matches!(
+            ask("get_actions", "").await,
+            ResponseData::Actions { state } if state == gg_ipc::ActionsState::default()
+        ));
+        assert!(matches!(
+            ask("get_experimental", "").await,
+            ResponseData::Experimental { experimental } if experimental == Experimental::default()
+        ));
+        assert!(matches!(
+            ask(
+                "set_experimental",
+                r#"{"experimental":{"keyboard_onboard":true}}"#
+            )
+            .await,
+            ResponseData::Success
+        ));
+        assert!(matches!(
+            ask("get_experimental", "").await,
+            ResponseData::Experimental { experimental } if experimental.keyboard_onboard
+        ));
+        for (method, params) in [
+            ("read_bindings", ""),
+            ("set_bindings", r#"{"bindings":{},"enabled":true}"#),
+            ("read_onboard", r#"{"slot":null}"#),
+            ("load_onboard", r#"{"slot":0}"#),
+            ("write_onboard", r#"{"slot":4,"from":{"kind":"current"}}"#),
+            ("set_actions", r#"{"bindings":[]}"#),
+        ] {
+            match ask(method, params).await {
+                ResponseData::Error { message } => assert_eq!(message, "not built yet", "{method}"),
+                other => panic!("{method}: {other:?}"),
+            }
+        }
+        assert!(fake.sent().is_empty(), "none of it reached the keyboard");
+        kb.send::<()>(KeyboardCommand::Shutdown).await.unwrap();
+
+        // With the keyboard part off its requests are refused first; the others aren't.
+        let off = workers_with(Parts {
+            keyboard: false,
+            ..Parts::default()
+        });
+        for method in ["get_bindings", "get_onboard"] {
+            match answer(
+                &format!(r#"{{"id":2,"req":{{"method":"{method}"}}}}"#),
+                &off,
+            )
+            .await
+            {
+                ResponseData::Error { message } => {
+                    assert!(message.contains("turned off in Settings"), "{message}")
+                }
+                other => panic!("{method}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            answer(r#"{"id":3,"req":{"method":"get_actions"}}"#, &off).await,
+            ResponseData::Actions { .. }
+        ));
+        assert!(matches!(
+            answer(r#"{"id":4,"req":{"method":"get_experimental"}}"#, &off).await,
+            ResponseData::Experimental { .. }
+        ));
     }
 
     #[tokio::test]
