@@ -7,7 +7,11 @@
 //! read made on this connection: the keyboard's own bindings, with the user's on top
 //! (`gg_device_keyboard::bindings::merge`). The keyboard's own shortcuts on the Fn layer
 //! are kept byte for byte. Only the layers that differ from what the keyboard holds are
-//! written, and the Fn key and its lit keys only when an Fn key is chosen.
+//! written, and the Fn key and its lit keys only when an Fn key is chosen, or once when
+//! it goes back to the keyboard's own (the SteelSeries key). A read that looks blank is
+//! never written over. After an onboard slot is loaded ([`on_slot_loaded`]) the next
+//! change reads again first. Turning the bindings off sends nothing: what was sent stays
+//! on the keyboard until it's unplugged.
 //!
 //! Everything here that talks to the keyboard waits for `keyboard_bindings`: a request
 //! is refused with [`gg_ipc::Experimental::refusal`] while it's off, and the open
@@ -50,14 +54,21 @@ struct Saved {
 pub struct Store {
     state: BindingsState,
     path: PathBuf,
-    /// The keyboard's own bindings: the first read on this connection, made before
-    /// gglinux wrote anything. Every write starts from it.
+    /// The keyboard's own bindings: the first read on this connection (or since a slot
+    /// was loaded), made before gglinux wrote anything. Every write starts from it.
     base: Option<Layers>,
+    /// A slot was just loaded: the next read asks for each layer twice and keeps the
+    /// second answer, since the first may still show the slot the keyboard ran before.
+    loaded: bool,
     /// What gglinux last wrote on each layer on this connection.
     written: [Option<Vec<Block>>; 3],
     /// The Fn key and its lit keys as last sent on this connection.
     fn_sent: Option<(u8, [u8; 32])>,
 }
+
+/// A normal layer with fewer keys typing themselves than this is taken for a bad read: a
+/// quarter of its 91. The source's resting state has every one of them doing so.
+const FEW_SELF_MAPS: usize = 91 / 4;
 
 impl Store {
     /// The saved bindings in `config_dir`, read when the worker starts. An unreadable
@@ -74,6 +85,7 @@ impl Store {
             },
             path,
             base: None,
+            loaded: false,
             written: Default::default(),
             fn_sent: None,
         }
@@ -87,14 +99,20 @@ impl Store {
         super::save(&self.path, &saved, "key binding");
     }
 
-    /// Read all three layers; the first read on a connection becomes [`Store::base`].
+    /// Read all three layers; the first read on a connection becomes [`Store::base`],
+    /// unless it looks like a bad read ([`check_normal`]).
     fn read(&mut self, device: &Keyboard) -> Result<(), String> {
         let mut layers: Layers = Default::default();
         for (blocks, (_, layer)) in layers.iter_mut().zip(LAYERS) {
+            if self.loaded {
+                device.read_bindings(layer).map_err(|e| format!("{e:#}"))?;
+            }
             *blocks = device.read_bindings(layer).map_err(|e| format!("{e:#}"))?;
         }
+        self.loaded = false;
         self.state.read = Some(decode(&layers));
         if self.base.is_none() {
+            check_normal(&layers[0])?;
             self.base = Some(layers);
         }
         Ok(())
@@ -107,8 +125,11 @@ impl Store {
         };
         let mut out: Layers = Default::default();
         for (i, (layer, kl)) in LAYERS.into_iter().enumerate() {
-            out[i] =
-                kb::merge(kl, &base[i], &changes(new, old, layer)).map_err(|e| e.to_string())?;
+            let changes = changes(new, old, layer);
+            if layer == Layer::Fn && !changes.is_empty() {
+                check_fn(&base[i])?;
+            }
+            out[i] = kb::merge(kl, &base[i], &changes).map_err(|e| e.to_string())?;
         }
         Ok(out)
     }
@@ -131,15 +152,18 @@ impl Store {
                 self.written[i] = Some(merged[i].clone());
             }
         }
-        if let Some(key) = self.state.bindings.fn_key {
-            let mask = kb::fn_mask(&merged[1]);
-            if self.fn_sent != Some((key, mask)) {
-                device
-                    .set_fn_key(key)
-                    .and_then(|()| device.set_fn_mask(&mask))
-                    .map_err(|e| format!("{e:#}"))?;
-                self.fn_sent = Some((key, mask));
-            }
+        let mask = kb::fn_mask(&merged[1]);
+        // Back to the keyboard's own Fn key: the SteelSeries key, once, as gglinux moved it.
+        let fn_key = match self.state.bindings.fn_key {
+            Some(key) => (self.fn_sent != Some((key, mask))).then_some(key),
+            None => self.fn_sent.map(|_| kb::STOCK_FN_KEY),
+        };
+        if let Some(key) = fn_key {
+            device
+                .set_fn_key(key)
+                .and_then(|()| device.set_fn_mask(&mask))
+                .map_err(|e| format!("{e:#}"))?;
+            self.fn_sent = self.state.bindings.fn_key.map(|key| (key, mask));
         }
         Ok(())
     }
@@ -181,11 +205,59 @@ impl Store {
     /// A keyboard that (re)connects has its own bindings: nothing read or written yet.
     fn forget(&mut self) {
         self.base = None;
+        self.loaded = false;
         self.written = Default::default();
         self.fn_sent = None;
         self.state.read = None;
         self.state.error = None;
     }
+
+    /// The keyboard runs a slot it just loaded, with that slot's bindings, Fn key and lit
+    /// keys: what was read and written before is gone, and the next change reads again.
+    fn slot_loaded(&mut self) {
+        self.forget();
+        self.loaded = true;
+    }
+}
+
+/// Whether a normal layer read back looks like the keyboard's: a blank-looking one (a bad
+/// read, or a wrong key list) would have every other key written as doing nothing.
+fn check_normal(blocks: &[Block]) -> Result<(), String> {
+    let own = blocks
+        .iter()
+        .filter(|b| **b == Block::default_for(kb::Layer::Normal, b.code))
+        .count();
+    if own < FEW_SELF_MAPS {
+        return Err(format!(
+            "the keyboard's normal layer reads back with only {own} of its {} keys typing \
+             themselves, which looks like a bad read, so gglinux wrote nothing. Unplug the \
+             keyboard, plug it back in and try again; if this keeps happening, please report it",
+            blocks.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Whether an Fn layer read back still has the keyboard's own shortcuts: a write over one
+/// without them would make the loss stay on every connect.
+fn check_fn(blocks: &[Block]) -> Result<(), String> {
+    if !blocks.iter().any(|b| b.function == kb::FIRMWARE) {
+        return Err(
+            "the keyboard's Fn layer reads back without any of its own shortcuts (brightness, \
+             media, the screen menu), so gglinux won't write the Fn layer over it. Unplug the \
+             keyboard and plug it back in, which loads its own Fn layer again, then try again"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// The keyboard just ran an onboard slot (`B2`): the bindings read before are the old
+/// slot's.
+pub fn on_slot_loaded(store: &mut Store, event_tx: &broadcast::Sender<Event>) {
+    let before = store.state.clone();
+    store.slot_loaded();
+    publish(store, &before, event_tx);
 }
 
 /// The keyboard worker's commands for the bindings.
@@ -370,7 +442,8 @@ fn change(action: &KeyAction) -> Change {
 }
 
 /// What a block does, as the contract says it; `None` for what it has no word for (a
-/// host-assisted function, or one the source doesn't name). The write keeps those as read.
+/// host-assisted function, one the source doesn't name, or function `51` sending no key,
+/// which the contract refuses as `keys: []`). The write keeps those as read.
 fn key_action(action: Action) -> Option<KeyAction> {
     Some(match action {
         Action::Unbound => KeyAction::Unbound,
@@ -380,6 +453,7 @@ fn key_action(action: Action) -> Option<KeyAction> {
         Action::WheelDown => KeyAction::WheelDown,
         Action::PanLeft => KeyAction::PanLeft,
         Action::PanRight => KeyAction::PanRight,
+        Action::Keys(codes) if codes.is_empty() => return None,
         Action::Keys(codes) => KeyAction::Keys { codes },
         Action::Consumer(usage) => KeyAction::Consumer { usage },
         Action::Firmware(raw) => KeyAction::Firmware { raw },
@@ -410,9 +484,10 @@ fn decode(layers: &Layers) -> Bindings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keyboard::spawn_fake;
+    use crate::keyboard::{onboard, spawn_fake};
     use crate::scratch::Scratch;
     use gg_device_keyboard::bindings::{read_request, write_report, FIRMWARE, STOCK_FN_LAYER};
+    use gg_device_keyboard::proto::ANALOG_KEYS;
     use gg_device_keyboard::testing::{FakeTransport, Key, Kind, Read};
 
     const CAPS: u8 = 0x39;
@@ -767,6 +842,435 @@ mod tests {
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn back_to_the_keyboards_own_fn_key_sends_the_steelseries_key_once() {
+        let d = Scratch::new("bindings-fn-key-back");
+        let fake = stock_keyboard();
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        let with_fn_key = |fn_key| Request::SetBindings {
+            bindings: Bindings {
+                fn_key,
+                ..Bindings::default()
+            },
+            enabled: true,
+        };
+        let mask = kb::fn_mask(&stock(kb::Layer::Fn));
+        assert!(matches!(
+            handle(with_fn_key(Some(0xE7)), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(
+            sent_ops(&fake),
+            [
+                READS[0],
+                READS[1],
+                READS[2],
+                (Kind::Output, 0x35, 0xE7),
+                (Kind::Output, 0x3C, mask[0]),
+            ]
+        );
+
+        // "The keyboard's own" again: the SteelSeries key holds Fn, with the same lit keys.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(with_fn_key(None), &kb).await,
+            ResponseData::Success
+        ));
+        let sent = fake.sent();
+        assert_eq!(
+            sent_ops(&fake),
+            [(Kind::Output, 0x35, 0xF0), (Kind::Output, 0x3C, mask[0])]
+        );
+        assert_eq!(sent[0].report, kb::fn_key_report(0xF0).unwrap());
+        assert_eq!(sent[1].report, kb::fn_mask_report(&mask));
+
+        // Once: the keyboard has its own again.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(with_fn_key(None), &kb).await,
+            ResponseData::Success
+        ));
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_fn_key_and_mask_go_again_only_when_one_of_them_changes() {
+        let d = Scratch::new("bindings-fn-mask-again");
+        let fake = stock_keyboard();
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        let ask = |normal: Vec<KeyBinding>, fn_layer: Vec<KeyBinding>| Request::SetBindings {
+            bindings: Bindings {
+                normal,
+                fn_layer,
+                fn_key: Some(0xE7),
+                ..Bindings::default()
+            },
+            enabled: true,
+        };
+        let caps = || vec![bind(CAPS, ctrl_a())];
+        let f1_mutes = || vec![bind(0x3A, KeyAction::Consumer { usage: 226 })];
+        assert!(matches!(
+            handle(ask(vec![], vec![]), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(fake.sent().len(), 5, "{:?}", sent_ops(&fake));
+
+        // A normal-layer change leaves the Fn key and its mask as they are.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(ask(caps(), vec![]), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00)]);
+
+        // An Fn-layer change changes the mask: the Fn key and the new mask go again.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(ask(caps(), f1_mutes()), &kb).await,
+            ResponseData::Success
+        ));
+        let sent = fake.sent();
+        assert_eq!(
+            sent_ops(&fake),
+            [
+                (Kind::Feature, 0x36, 0x01),
+                (Kind::Output, 0x35, 0xE7),
+                (Kind::Output, 0x3C, 0x00),
+            ]
+        );
+        assert_eq!(sent[2].report[2 + 0x3A / 8] & (1 << (0x3A & 7)), 1 << 2);
+
+        // The same again: nothing.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(ask(caps(), f1_mutes()), &kb).await,
+            ResponseData::Success
+        ));
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_write_that_fails_half_way_keeps_what_went_through_and_sends_the_rest_next_time() {
+        let d = Scratch::new("bindings-half-way");
+        let fake = stock_keyboard();
+        // Sends 1 to 3 are the reads, 4 the normal layer: the Fn layer's fails.
+        fake.fail_send(5);
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        let both = || Request::SetBindings {
+            bindings: Bindings {
+                normal: vec![bind(CAPS, ctrl_a())],
+                fn_layer: vec![bind(0x3A, KeyAction::Consumer { usage: 226 })],
+                ..Bindings::default()
+            },
+            enabled: true,
+        };
+        match handle(both(), &kb).await {
+            ResponseData::Error { message } => assert!(message.contains("0x36"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            sent_ops(&fake),
+            [READS[0], READS[1], READS[2], (Kind::Feature, 0x36, 0x00)]
+        );
+        let state = get(&kb).await;
+        assert!(state.error.unwrap().contains("0x36"));
+        assert_eq!(state.bindings.fn_layer.len(), 1, "saved before sending");
+
+        // Asked again, only the Fn layer goes: the normal layer is on the keyboard.
+        fake.clear_sent();
+        assert!(matches!(handle(both(), &kb).await, ResponseData::Success));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x01)]);
+        assert_eq!(get(&kb).await.error, None);
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn saved_bindings_a_keyboard_wont_read_back_on_connect_are_reported_and_not_written() {
+        let d = Scratch::new("bindings-connect-fails");
+        let saved = r#"{"enabled":true,"bindings":{"normal":[{"code":57,"action":{"kind":"keys","codes":[224,4]}}]}}"#;
+        std::fs::write(d.0.join("bindings.json"), saved).unwrap();
+        let fake = FakeTransport::new(); // answers `B6 00`: no bindings
+        let (tx, mut rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        let state = settle(&kb).await;
+        assert_eq!(sent_ops(&fake), [READS[0]], "nothing written");
+        assert!(state.error.unwrap().contains("normal layer"));
+        assert!(state.read.is_none());
+        assert!(bindings_event(&mut rx).unwrap().error.is_some());
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deep_press_binding_writes_layer_2_whole() {
+        let d = Scratch::new("bindings-layer-2");
+        let fake = stock_keyboard();
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        let deep_w_types_a = Request::SetBindings {
+            bindings: Bindings {
+                second: vec![bind(0x1A, KeyAction::Keys { codes: vec![0x04] })],
+                ..Bindings::default()
+            },
+            enabled: true,
+        };
+        assert!(matches!(
+            handle(deep_w_types_a, &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(
+            sent_ops(&fake),
+            [READS[0], READS[1], READS[2], (Kind::Feature, 0x36, 0x02)]
+        );
+        let write = &fake.sent()[3].report;
+        assert_eq!(write[3], 68, "every adjustable key");
+        let at = ANALOG_KEYS.iter().position(|&c| c == 0x1A).unwrap();
+        for (i, &code) in ANALOG_KEYS.iter().enumerate() {
+            let block = &write[4 + i * 6..10 + i * 6];
+            if i == at {
+                assert_eq!(block, [0x1A, 0x51, 0x04, 0, 0, 0]);
+            } else {
+                assert_eq!(block, [code, 0, 0, 0, 0, 0], "{code:#04x}");
+            }
+        }
+        assert!(write[4 + 68 * 6..].iter().all(|&b| b == 0));
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_the_gate_on_bindings_turned_off_are_saved_and_nothing_is_sent() {
+        let d = Scratch::new("bindings-on-but-off");
+        let fake = stock_keyboard();
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        assert!(matches!(
+            handle(set(vec![bind(CAPS, ctrl_a())], false), &kb).await,
+            ResponseData::Success
+        ));
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        let state = get(&kb).await;
+        assert!(!state.enabled && state.read.is_none());
+        assert_eq!(state.bindings.normal, [bind(CAPS, ctrl_a())]);
+        let saved = std::fs::read_to_string(d.0.join("bindings.json")).unwrap();
+        assert!(saved.contains("\"enabled\": false"), "{saved}");
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    /// Gates on for the bindings and the onboard slots.
+    fn with_onboard() -> Experimental {
+        Experimental {
+            keyboard_onboard: true,
+            ..gate_on()
+        }
+    }
+
+    #[tokio::test]
+    async fn after_a_slot_load_the_next_change_reads_the_slots_bindings_first() {
+        let d = Scratch::new("bindings-slot-load");
+        let fake = stock_keyboard();
+        // Slot 2 has Q typing A. The keyboard shows it from the second read after the
+        // load: the first still shows the slot it ran before.
+        let mut slot = stock(kb::Layer::Normal);
+        slot.iter_mut().find(|b| b.code == 0x14).unwrap().codes = [0x04, 0, 0, 0];
+        fake.change_after(
+            Key::op(0xB2),
+            Read::Feature,
+            Key::sub(0xB6, 0x00),
+            &reply(kb::Layer::Normal, &slot),
+        );
+        let (tx, mut rx) = broadcast::channel(64);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, with_onboard());
+        settle(&kb).await;
+        assert!(matches!(
+            handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
+            ResponseData::Success
+        ));
+
+        fake.clear_sent();
+        while rx.try_recv().is_ok() {}
+        let loaded = kb
+            .send(|reply| Command::Onboard(onboard::Cmd::Load { slot: 2, reply }))
+            .await
+            .unwrap();
+        assert_eq!(loaded.active, Some(2));
+        assert_eq!(sent_ops(&fake), [(Kind::Output, 0xB2, 0x02)]);
+        let state = get(&kb).await;
+        assert!(state.read.is_none(), "the last read was the old slot's");
+        assert!(bindings_event(&mut rx).unwrap().read.is_none());
+
+        // The next change reads all three layers again, each twice, and writes over the
+        // slot's own: Q keeps typing A.
+        fake.clear_sent();
+        let both = set(vec![bind(CAPS, ctrl_a()), bind(0x05, KeyAction::Cpi)], true);
+        assert!(matches!(handle(both, &kb).await, ResponseData::Success));
+        assert_eq!(
+            sent_ops(&fake),
+            [
+                READS[0],
+                READS[0],
+                READS[1],
+                READS[1],
+                READS[2],
+                READS[2],
+                (Kind::Feature, 0x36, 0x00)
+            ]
+        );
+        let mut want = slot.clone();
+        for b in want.iter_mut() {
+            match b.code {
+                CAPS => *b = Block::new(CAPS, &Action::Keys(vec![0xE0, 0x04])).unwrap(),
+                0x05 => *b = Block::new(0x05, &Action::Cpi).unwrap(),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            fake.sent()[6].report,
+            write_report(kb::Layer::Normal, &want).unwrap()
+        );
+        let read = get(&kb).await.read.unwrap();
+        assert_eq!(
+            read.normal,
+            [bind(0x14, KeyAction::Keys { codes: vec![0x04] })]
+        );
+
+        // Once settled, a change reads nothing more.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00)]);
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_slot_load_that_fails_keeps_the_read() {
+        let d = Scratch::new("bindings-slot-load-fails");
+        let fake = stock_keyboard();
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, with_onboard());
+        settle(&kb).await;
+        assert!(matches!(
+            handle(Request::ReadBindings, &kb).await,
+            ResponseData::Bindings { .. }
+        ));
+        fake.fail_send(4); // three reads, then the load
+        let loaded = kb
+            .send(|reply| Command::Onboard(onboard::Cmd::Load { slot: 1, reply }))
+            .await;
+        assert!(loaded.is_err());
+        assert!(get(&kb).await.read.is_some());
+        fake.clear_sent();
+        assert!(matches!(
+            handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(
+            sent_ops(&fake),
+            [(Kind::Feature, 0x36, 0x00)],
+            "no new read"
+        );
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    /// Every key on `layer` doing nothing (`<key> 00 00 00 00 00`).
+    fn blank(layer: kb::Layer) -> Vec<Block> {
+        layer
+            .keys()
+            .iter()
+            .map(|&code| Block::default_for(kb::Layer::Fn, code))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_normal_layer_read_with_almost_no_key_typing_itself_is_refused_and_read_again() {
+        let d = Scratch::new("bindings-blank-normal");
+        let fake = stock_keyboard();
+        fake.answer_feature(
+            Key::sub(0xB6, 0x00),
+            &reply(kb::Layer::Normal, &blank(kb::Layer::Normal)),
+        );
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        match handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await {
+            ResponseData::Error { message } => {
+                assert!(
+                    message.contains("0 of its 91 keys") && message.contains("Unplug"),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(sent_ops(&fake), READS, "read, nothing written");
+        assert!(!d.0.join("bindings.json").exists(), "nothing saved");
+
+        // Not kept as the keyboard's own: a good read later is.
+        fake.answer_feature(
+            Key::sub(0xB6, 0x00),
+            &reply(kb::Layer::Normal, &stock(kb::Layer::Normal)),
+        );
+        fake.clear_sent();
+        assert!(matches!(
+            handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(
+            sent_ops(&fake),
+            [READS[0], READS[1], READS[2], (Kind::Feature, 0x36, 0x00)]
+        );
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_fn_layer_read_without_the_keyboards_shortcuts_takes_no_fn_change() {
+        let d = Scratch::new("bindings-blank-fn");
+        let fake = stock_keyboard();
+        fake.answer_feature(
+            Key::sub(0xB6, 0x01),
+            &reply(kb::Layer::Fn, &blank(kb::Layer::Fn)),
+        );
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        let fn_f1_mutes = Request::SetBindings {
+            bindings: Bindings {
+                fn_layer: vec![bind(0x3A, KeyAction::Consumer { usage: 226 })],
+                ..Bindings::default()
+            },
+            enabled: true,
+        };
+        match handle(fn_f1_mutes, &kb).await {
+            ResponseData::Error { message } => {
+                assert!(
+                    message.contains("without any of its own shortcuts")
+                        && message.contains("Unplug"),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(sent_ops(&fake), READS, "read, nothing written");
+
+        // The normal layer can still change.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00)]);
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
     #[test]
     fn bindings_must_name_keys_this_keyboard_has_on_that_layer() {
         let with = |layer: Layer, code: u8| {
@@ -810,8 +1314,18 @@ mod tests {
             function: 0x72,
             codes: [1, 2, 3, 4],
         };
+        // Function 51 sending no key: nothing the contract can say (it refuses `keys: []`).
+        layers[0][2] = Block {
+            code: 0x06,
+            function: kb::KEYBOARD,
+            codes: [0; 4],
+        };
         let b = decode(&layers);
-        assert_eq!(b.normal, [bind(CAPS, ctrl_a())], "the 0x72 one has no word");
+        assert_eq!(
+            b.normal,
+            [bind(CAPS, ctrl_a())],
+            "the 0x72 one and the empty 51 one have no word"
+        );
         assert_eq!(b.second, [bind(0x04, KeyAction::Mouse { button: 4 })]);
         assert_eq!(b.fn_layer.len(), 9);
         assert_eq!(b.fn_key, None, "the Fn key can't be read back");

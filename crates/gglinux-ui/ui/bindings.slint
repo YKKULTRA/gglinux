@@ -64,8 +64,8 @@ export component BindingsPanel {
     VerticalLayout {
         Head { text: "KEY BINDINGS"; state: "experimental"; }
         Opt { shown: !BindingsUi.gated; Hint { text: BindingsUi.refusal; } }
-        Opt { Toggle { text: "gglinux sets the key bindings (off: the keyboard keeps its own)"; checked: BindingsUi.enabled; enabled: root.can; toggled(v) => { BindingsUi.set-enabled(v); } } }
-        Opt { Hint { text: "The keyboard keeps these in memory, so gglinux sends them again each time it connects. The keyboard's own Fn shortcuts (brightness, media, the screen menu) are always kept."; } }
+        Opt { Toggle { text: "gglinux sets the key bindings (off: it sends none)"; checked: BindingsUi.enabled; enabled: root.can; toggled(v) => { BindingsUi.set-enabled(v); } } }
+        Opt { Hint { text: "The keyboard keeps these in memory, so gglinux sends them again each time it connects. Turning this off undoes nothing: what was sent stays until you unplug the keyboard. The keyboard's own Fn shortcuts (brightness, media, the screen menu) are always kept."; } }
         Opt { shown: BindingsUi.enabled; gap: 14px; VerticalLayout {
             HorizontalLayout {
                 alignment: start;

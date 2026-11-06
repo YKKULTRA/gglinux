@@ -810,6 +810,28 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 event_tx,
             )
         }
+        Command::Onboard(onboard::Cmd::Load { slot, reply }) => {
+            // The keyboard runs the slot's own bindings and switches once it loads: the
+            // bindings are read again before the next write, gglinux's switches go again.
+            let (tx, mut rx) = oneshot::channel();
+            let cmd = onboard::Cmd::Load { slot, reply: tx };
+            let device = state.device.as_ref();
+            onboard::on_command(
+                cmd,
+                &mut state.onboard,
+                device,
+                &state.experimental,
+                event_tx,
+            );
+            let answer = rx
+                .try_recv()
+                .unwrap_or_else(|_| Err("the load didn't answer".into()));
+            if answer.is_ok() {
+                bindings::on_slot_loaded(&mut state.bindings, event_tx);
+                state.switches.forget();
+            }
+            let _ = reply.send(answer);
+        }
         Command::Onboard(cmd) => onboard::on_command(
             cmd,
             &mut state.onboard,
