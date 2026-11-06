@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The Apex Pro TKL Gen 3's onboard profile slots: a panel at the end of the
+// keyboard card (placed in app.slint). Not built yet, so it stays hidden.
+
+export global OnboardUi {
+    /// Show the panel: at the end of the keyboard card, with a divider above
+    /// it. Off, it takes no room.
+    in property <bool> shown: false;
+}
+
+/// What the panel shows: nothing yet. Its gaps come from where it's placed.
+export component OnboardPanel { }

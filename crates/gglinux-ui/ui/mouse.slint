@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The Rival 3 Wireless Gen 2 panel on the Engine page.
+
+import { Theme } from "theme.slint";
+import { Card, Hint, ErrorLine, Toggle, Button, Segmented, PanelHead, Battery, Row, Head, Divider } from "widgets.slint";
+import { NumberBox, Pick } from "devices.slint";
+
+export global MouseUi {
+    in property <bool> known;
+    in property <bool> connected;
+    /// -1: not known (the mouse reports nothing while asleep).
+    in property <int> battery: -1;
+    in property <bool> charging;
+    /// What this daemon wrote this session, or "".
+    in property <string> applied;
+    in property <[int]> stages: [800, 1600];
+    in property <int> active;
+    in property <int> polling: 1000;
+    /// Per button, its place in `actions`, or -1 for a key set elsewhere.
+    in property <[int]> buttons: [0, 1, 2, 3, 4, 5];
+    /// Per button, that key's name, or "".
+    in property <[string]> button-keys: ["", "", "", "", "", ""];
+    in-out property <bool> persist;
+    in property <string> busy;
+    in property <string> error;
+    out property <[int]> rates: [125, 250, 500, 1000];
+    out property <[string]> button-names: ["Left", "Right", "Middle", "Back", "Forward", "DPI"];
+    out property <[string]> actions: [
+        "Left click", "Right click", "Middle click", "Back", "Forward", "Cycle DPI",
+        "Scroll up", "Scroll down", "Play / pause", "Next track", "Previous track",
+        "Mute", "Volume up", "Volume down", "Disabled",
+    ];
+    /// While typing: the number as it stands.
+    callback edit-stage(int, int);
+    /// Done typing: the number, snapped to the mouse's steps.
+    callback set-stage(int, int);
+    callback add-stage();
+    callback remove-stage(int);
+    callback pick-stage(int);
+    callback pick-polling(int);
+    callback pick-button(int, int);
+    callback factory-buttons();
+    callback apply-dpi();
+    callback apply-polling();
+    callback apply-buttons();
+    callback save();
+}
+
+/// The mouse can't be read: say so, and what this session wrote.
+component Caveat inherits Rectangle {
+    in property <string> applied;
+    background: Theme.surface-2;
+    border-radius: 8px;
+    VerticalLayout {
+        padding-left: 11px;
+        padding-right: 11px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 2px;
+        Hint { text: "This mouse has no way to report its settings back, so nothing here is read from the hardware."; }
+        HorizontalLayout {
+            spacing: root.applied != "" ? 5px : 0;
+            Hint {
+                text: root.applied != "" ? "Applied this session:" : "Nothing has been written this session: the mouse is running its onboard configuration.";
+                wrap: root.applied != "" ? no-wrap : word-wrap;
+                horizontal-stretch: root.applied != "" ? 0 : 1;
+            }
+            Text {
+                text: root.applied != "" ? root.applied + "." : "";
+                color: Theme.text;
+                font-size: Theme.small;
+                wrap: word-wrap;
+                horizontal-stretch: root.applied != "" ? 1 : 0;
+                max-width: root.applied != "" ? 100000px : 0px;
+            }
+        }
+    }
+}
+
+export component MousePanel inherits Card {
+    PanelHead {
+        icon: @image-url("icons/mouse.svg");
+        title: "Rival 3 Wireless Gen 2";
+        meta: MouseUi.battery >= 0 ? (MouseUi.charging ? "·  charging" : "·  on battery")
+            : MouseUi.connected ? "battery unknown: the mouse reports nothing while asleep"
+            : "not connected";
+        if MouseUi.battery >= 0 : Battery { level: MouseUi.battery; }
+    }
+    Caveat { applied: MouseUi.applied; }
+    Divider { }
+    Head {
+        text: "DPI STAGES";
+        Button { text: "Add stage"; small: true; enabled: MouseUi.stages.length < 5; clicked => { MouseUi.add-stage(); } }
+    }
+    for dpi[i] in MouseUi.stages : HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        TouchArea {
+            width: 46px;
+            mouse-cursor: pointer;
+            clicked => { MouseUi.pick-stage(i); }
+            Rectangle {
+                width: 30px;
+                height: 26px;
+                x: 0;
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: i == MouseUi.active ? Theme.accent : Theme.line;
+                background: i == MouseUi.active ? Theme.accent.with-alpha(0.16) : Theme.surface-2;
+                Text { text: i + 1; color: i == MouseUi.active ? Theme.accent : Theme.text-dim; font-weight: 600; }
+            }
+        }
+        NumberBox {
+            width: 130px;
+            minimum: 100;
+            maximum: 18000;
+            step: 100;
+            value: dpi;
+            edited(v) => { MouseUi.edit-stage(i, v); }
+            committed(v) => { MouseUi.set-stage(i, v); }
+        }
+        Text { text: "dpi"; color: Theme.text-dim; vertical-alignment: center; }
+        Button { text: "×"; small: true; enabled: MouseUi.stages.length > 1; clicked => { MouseUi.remove-stage(i); } }
+    }
+    Hint { text: "The highlighted stage is the one the mouse switches to; click a number to pick it."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "dpi" ? "Applying…" : "Apply DPI"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-dpi(); } }
+    }
+    Divider { }
+    Head { text: "POLLING RATE"; }
+    HorizontalLayout {
+        alignment: start;
+        Segmented {
+            options: ["125 Hz", "250 Hz", "500 Hz", "1000 Hz"];
+            current: MouseUi.polling == 125 ? 0 : MouseUi.polling == 250 ? 1 : MouseUi.polling == 500 ? 2 : MouseUi.polling == 1000 ? 3 : -1;
+            picked(i) => { MouseUi.pick-polling(MouseUi.rates[i]); }
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "polling" ? "Applying…" : "Apply polling rate"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-polling(); } }
+    }
+    Divider { }
+    Head {
+        text: "BUTTONS";
+        Button { text: "Reset to factory"; small: true; clicked => { MouseUi.factory-buttons(); } }
+    }
+    for name[i] in MouseUi.button-names : Row {
+        label: name;
+        Pick {
+            width: 220px;
+            model: MouseUi.actions;
+            index: MouseUi.buttons[i];
+            picked(a) => { MouseUi.pick-button(i, a); }
+        }
+        // A key set elsewhere (with ggctl) isn't in the menu; it's kept as it is.
+        Text {
+            text: MouseUi.button-keys[i] != "" ? "key " + MouseUi.button-keys[i] : "";
+            color: Theme.text-dim;
+            font-size: Theme.small;
+            vertical-alignment: center;
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "buttons" ? "Applying…" : "Apply buttons"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-buttons(); } }
+    }
+    Divider { }
+    Toggle { text: "Write to onboard memory as well"; checked: MouseUi.persist; toggled(v) => { MouseUi.persist = v; } }
+    Hint { text: "Without this, settings are lost when the mouse sleeps. With it, they survive, and overwrite what was stored, which cannot be recovered."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "save" ? "Saving…" : "Save current settings to mouse"; enabled: MouseUi.busy == ""; clicked => { MouseUi.save(); } }
+    }
+    ErrorLine { text: MouseUi.error; }
+}

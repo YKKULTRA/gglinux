@@ -9,13 +9,20 @@
 
 slint::include_modules!();
 
+pub mod actions;
+pub mod bindings;
 pub mod client;
 pub mod engine;
 pub mod eq;
+pub mod experimental;
 pub mod keyboard;
+pub mod mouse;
+pub mod onboard;
 pub mod pages;
+pub mod screen;
 pub mod shell;
 pub mod sonar;
+pub mod switches;
 pub mod system;
 
 use std::cell::RefCell;
@@ -27,26 +34,38 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use client::{Changed, Client, State};
 
-/// The panels' working copies.
+/// The panels' working copies: one for each module that draws a panel.
 #[derive(Default)]
 pub struct Forms {
-    pub mouse: Rc<RefCell<engine::MouseForm>>,
+    pub mouse: Rc<RefCell<mouse::MouseForm>>,
     pub headset: Rc<RefCell<engine::HeadsetForm>>,
     pub keyboard: RefCell<keyboard::KeyboardForm>,
+    pub switches: RefCell<switches::SwitchesForm>,
+    pub screen: RefCell<screen::ScreenForm>,
+    pub bindings: RefCell<bindings::BindingsForm>,
+    pub onboard: RefCell<onboard::OnboardForm>,
     pub sonar: Rc<RefCell<sonar::SonarForm>>,
     pub parts: Rc<RefCell<pages::PartsForm>>,
+    pub actions: RefCell<actions::ActionsForm>,
+    pub experimental: RefCell<experimental::ExperimentalForm>,
 }
 
 impl Forms {
     /// Start every working copy afresh. The old app drew its panels anew when
     /// the daemon came back, and a copy made against a daemon process that's gone
-    /// would show settings the new one never applied.
+    /// would show settings the new one never applied. Each module resets its own.
     fn reset(&self) {
-        *self.mouse.borrow_mut() = Default::default();
-        *self.headset.borrow_mut() = Default::default();
-        *self.keyboard.borrow_mut() = Default::default();
+        mouse::reset(self);
+        engine::reset(self);
+        keyboard::reset(self);
+        switches::reset(self);
+        screen::reset(self);
+        bindings::reset(self);
+        onboard::reset(self);
         *self.sonar.borrow_mut() = Default::default();
         *self.parts.borrow_mut() = Default::default();
+        actions::reset(self);
+        experimental::reset(self);
     }
 }
 
@@ -112,15 +131,21 @@ pub fn start(ui: &AppWindow) -> Client {
 /// Answer the window's callbacks.
 pub fn wire(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     engine::bind_devices(ui, client);
-    engine::bind_mouse(ui, client, forms.mouse.clone());
+    mouse::bind_mouse(ui, client, forms.mouse.clone());
     engine::bind_headset(ui, client, forms.headset.clone());
     keyboard::bind(ui, client, forms);
+    switches::bind(ui, client, forms);
+    screen::bind(ui, client, forms);
+    bindings::bind(ui, client, forms);
+    onboard::bind(ui, client, forms);
     sonar::bind(ui, client, forms.sonar.clone());
     pages::bind_games(ui, client);
     pages::bind_moments(ui, client);
     pages::bind_parts(ui, client, forms.parts.clone());
     pages::bind_profiles(ui, client);
     pages::bind_settings(ui, client);
+    actions::bind(ui, client, forms);
+    experimental::bind(ui, client, forms);
     // Start at login and backups work without the daemon.
     pages::show_settings(ui);
 }
@@ -156,15 +181,22 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
             pages::show_parts(ui, s, &forms.parts);
         }
         Changed::Devices => engine::show_devices(ui, s),
-        Changed::Mouse => engine::show_mouse(ui, s, &forms.mouse),
+        Changed::Mouse => mouse::show_mouse(ui, s, &forms.mouse),
         Changed::Headset => engine::show_headset(ui, s, &forms.headset),
-        Changed::Keyboard => keyboard::show(ui, s, &forms),
+        // One card, three panels.
+        Changed::Keyboard => {
+            keyboard::show(ui, s, &forms);
+            switches::show(ui, s, &forms);
+            screen::show(ui, s, &forms);
+        }
         Changed::Sonar => sonar::show(ui, s, &forms.sonar),
         Changed::Gamesense => pages::show_games(ui, s),
         Changed::Profiles => pages::show_profiles(ui, s),
         Changed::Clips => pages::show_moments(ui, s),
-        // Shown by the M11 panels; nothing shows them yet.
-        Changed::Experimental | Changed::Bindings | Changed::Onboard | Changed::Actions => {}
+        Changed::Experimental => experimental::show(ui, s),
+        Changed::Bindings => bindings::show(ui, s),
+        Changed::Onboard => onboard::show(ui, s),
+        Changed::Actions => actions::show(ui, s),
     }
 }
 
@@ -234,9 +266,16 @@ pub fn poke(ui: &AppWindow, step: &str) {
     let n: i32 = arg.parse().unwrap_or(0);
     // Each page module answers for its own steps.
     let known = engine::poke(ui, name, n)
+        || mouse::poke(ui, name, n)
         || keyboard::poke(ui, name, n)
+        || switches::poke(ui, name, n)
+        || screen::poke(ui, name, n)
+        || bindings::poke(ui, name, n)
+        || onboard::poke(ui, name, n)
         || sonar::poke(ui, name, n)
-        || pages::poke(ui, name, n);
+        || pages::poke(ui, name, n)
+        || actions::poke(ui, name, n)
+        || experimental::poke(ui, name, n);
     if !known {
         match name {
             "page" => ui.global::<Gg>().set_page(match n {
@@ -274,6 +313,22 @@ mod tests {
         assert_eq!(first.iter().collect::<Vec<_>>(), [1, 5, 6, 7]);
         sync_rows(ModelRc::default(), vec![9], |m| replaced = Some(m));
         assert_eq!(replaced.unwrap().iter().collect::<Vec<_>>(), [9]);
+    }
+
+    #[test]
+    fn a_lost_connection_starts_every_working_copy_afresh() {
+        let forms = Forms::default();
+        forms.mouse.borrow_mut().add_stage();
+        forms.headset.borrow_mut().pick_preset(4);
+        forms.keyboard.borrow_mut().toggle_light(0x04);
+        forms.switches.borrow_mut().selected.insert(0x04);
+        forms.screen.borrow_mut().picked = Some(1);
+        forms.reset();
+        assert_eq!(*forms.mouse.borrow(), mouse::MouseForm::default());
+        assert_eq!(*forms.headset.borrow(), engine::HeadsetForm::default());
+        assert!(forms.keyboard.borrow().light_selected.is_empty());
+        assert!(forms.switches.borrow().selected.is_empty());
+        assert_eq!(forms.screen.borrow().picked, None);
     }
 
     #[test]

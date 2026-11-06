@@ -1,20 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// The gglinux window: a sidebar of pages, and the page.
+// The gglinux window: a sidebar of pages, and the page. The Engine page's
+// device panels and keyboard card are put together here from their own files.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { NavItem, Card, Title, Hint, Code, Shown } from "widgets.slint";
-import { EngineUi, DeviceList, DevicePanels } from "devices.slint";
-import { KeyboardPanel } from "keyboard.slint";
+import { NavItem, Card, Title, Hint, Code, Shown, PanelHead, Divider } from "widgets.slint";
+import { EngineUi, DeviceList, HeadsetPanel } from "devices.slint";
+import { MousePanel } from "mouse.slint";
+import { KeyboardUi, LightingPanel, Opt } from "keyboard.slint";
+import { SwitchesPanel } from "switches.slint";
+import { BindingsUi, BindingsPanel } from "bindings.slint";
+import { ScreenPanel } from "screen.slint";
+import { OnboardUi, OnboardPanel } from "onboard.slint";
 import { SonarPanel } from "sonar.slint";
 import { GamesPanel, MomentsPanel, PartsPanel, ProfilesPanel, SettingsPanel } from "pages.slint";
+import { ActionsUi, ActionsPanel } from "actions.slint";
+import { ExperimentalUi, ExperimentalPanel } from "experimental.slint";
 
 export { Theme, EngineUi }
-export { MouseUi, HeadsetUi } from "devices.slint";
-export { KeyboardUi, SwitchesUi, ScreenUi, TapRow } from "keyboard.slint";
+export { HeadsetUi } from "devices.slint";
+export { MouseUi } from "mouse.slint";
+export { KeyboardUi } from "keyboard.slint";
+export { SwitchesUi, TapRow } from "switches.slint";
+export { ScreenUi } from "screen.slint";
+export { BindingsUi } from "bindings.slint";
+export { OnboardUi } from "onboard.slint";
 export { Key } from "widgets.slint";
 export { SonarUi, SonarChannel, SonarApp, EqHandle } from "sonar.slint";
 export { GamesUi, Game, MomentsUi, Clip, PartsUi, PartRow, ProfilesUi, RuleRow, SettingsUi } from "pages.slint";
+export { ActionsUi } from "actions.slint";
+export { ExperimentalUi } from "experimental.slint";
 
 export enum Page { engine, sonar, games, moments, settings }
 
@@ -64,6 +79,72 @@ component Offline inherits Card {
     if root.how : Hint { text: "Start the daemon, and this fills in by itself:"; }
     if root.how : Code { text: "systemctl --user enable --now gglinuxd"; }
     if root.how : Hint { text: "The app reconnects on its own; there's no need to restart it."; }
+}
+
+/// The mouse and headset panels: side by side once both fit at a readable
+/// width, else one above the other. Each is capped as in the old app, since a
+/// column of short rows stretched wide leaves each label far from its control.
+/// Here rather than in devices.slint, as mouse.slint uses that file's boxes.
+component DevicePanels {
+    property <length> gap: 18px;
+    property <length> cap: 560px;
+    property <bool> side: EngineUi.mouse && EngineUi.headset && root.width >= 2 * 420px + root.gap;
+    property <length> lane: root.side ? min(root.cap, (root.width - root.gap) / 2) : min(root.cap, root.width);
+    m := Shown {
+        x: 0;
+        y: 0;
+        width: root.lane;
+        shown: EngineUi.mouse;
+        MousePanel { }
+    }
+    h := Shown {
+        x: root.side ? root.lane + root.gap : 0;
+        y: root.side ? 0 : m.height;
+        width: root.lane;
+        shown: EngineUi.headset;
+        HeadsetPanel { }
+    }
+    height: root.side ? max(m.height, h.height) : m.height + h.height;
+}
+
+/// The Apex Pro TKL Gen 3's card: the lighting, the switches, key bindings,
+/// the screen and the onboard slots. Put together here, so each panel's file
+/// may use the keyboard's own (keyboard.slint) without the files importing
+/// each other.
+component KeyboardPanel inherits Card {
+    PanelHead {
+        icon: @image-url("icons/keyboard.svg");
+        title: "Apex Pro TKL Gen 3";
+        meta: KeyboardUi.connected ? "connected" : "not connected";
+    }
+    Shown { shown: KeyboardUi.known; gap: 0; VerticalLayout {
+        padding-top: 4px;
+        spacing: 16px;
+        Divider { }
+        LightingPanel { }
+        Divider { }
+        // No spacing in these two: a hidden panel takes no room and leaves no
+        // gap. Shown, it gets a divider and the card's 16 px around it.
+        VerticalLayout {
+            spacing: 0;
+            SwitchesPanel { }
+            Opt { shown: BindingsUi.shown; gap: 16px; VerticalLayout {
+                spacing: 16px;
+                Divider { }
+                BindingsPanel { }
+            } }
+        }
+        Divider { }
+        VerticalLayout {
+            spacing: 0;
+            ScreenPanel { }
+            Opt { shown: OnboardUi.shown; gap: 16px; VerticalLayout {
+                spacing: 16px;
+                Divider { }
+                OnboardPanel { }
+            } }
+        }
+    } }
 }
 
 component EnginePage {
@@ -184,6 +265,8 @@ export component AppWindow inherits Window {
                 Shown { shown: Gg.connected && Gg.page == Page.games; GamesPanel { max-width: 760px; } }
                 Shown { shown: Gg.connected && Gg.page == Page.moments; MomentsPanel { max-width: 760px; } }
                 Shown { shown: Gg.connected && Gg.page == Page.settings; PartsPanel { max-width: 760px; } }
+                Shown { shown: Gg.connected && Gg.page == Page.settings && ActionsUi.shown; ActionsPanel { max-width: 760px; } }
+                Shown { shown: Gg.connected && Gg.page == Page.settings && ExperimentalUi.shown; ExperimentalPanel { max-width: 760px; } }
                 Shown { shown: Gg.connected && Gg.page == Page.settings && Gg.parts.profiles; ProfilesPanel { max-width: 760px; } }
                 // Outside the guard: starting at login and backups work without the daemon.
                 Shown { shown: Gg.page == Page.settings; SettingsPanel { max-width: 760px; showing: Gg.page == Page.settings; } }
