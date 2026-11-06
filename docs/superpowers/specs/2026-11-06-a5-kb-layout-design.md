@@ -28,6 +28,13 @@ GameSense zones name Print Screen/Pause through it, and those files belong to th
 the daemon and the fake take `for_region`, those tests move and `ANSI_TKL` goes. The report
 lists the exact changes.
 
+The daemon doesn't read the region byte yet (`Keyboard::region()` exists but nothing calls
+it). Reading it when the keyboard opens is one `F5` query, a read with no side effects
+(`f5 00 01` on the owner's keyboard, PROTOCOLS.md 3a); it does mean a fresh install sends the
+keyboard that one query, where three daemon tests now say "nothing". Moving
+`MicMuteLight::default().key` off Pause (`0x48`) is needed too: the Gen 3 board has no Pause,
+so the daemon would refuse every lighting change while the saved mute key is `0x48`.
+
 ## Protocol source
 
 Apex Control, `docs/PROTOCOL.md` at commit `f7db8c5` (CC BY 4.0), local copy
