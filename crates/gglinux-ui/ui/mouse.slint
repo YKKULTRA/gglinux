@@ -2,8 +2,9 @@
 // The Rival 3 Wireless Gen 2 panel on the Engine page.
 
 import { Theme } from "theme.slint";
-import { Card, Hint, ErrorLine, Toggle, Button, Segmented, PanelHead, Battery, Row, Head, Divider } from "widgets.slint";
+import { Card, Hint, ErrorLine, Toggle, Button, Segmented, PanelHead, Battery, Row, Head, Divider, Shown } from "widgets.slint";
 import { NumberBox, Pick } from "devices.slint";
+import { LineEdit, ListView } from "std-widgets.slint";
 
 export global MouseUi {
     in property <bool> known;
@@ -13,27 +14,53 @@ export global MouseUi {
     in property <bool> charging;
     /// What this daemon wrote this session, or "".
     in property <string> applied;
+    /// Each stage's X (with X and Y together, its one number).
     in property <[int]> stages: [800, 1600];
+    /// Each stage's Y, in the same order.
+    in property <[int]> stages-y: [800, 1600];
+    /// X and Y are set apart: two boxes per stage.
+    in property <bool> split;
     in property <int> active;
     in property <int> polling: 1000;
-    /// Per button, its place in `actions`, or -1 for a key set elsewhere.
+    /// Per button, its place in `actions`, or -1 for a name set elsewhere that
+    /// the menu doesn't offer.
     in property <[int]> buttons: [0, 1, 2, 3, 4, 5];
-    /// Per button, that key's name, or "".
+    /// Per button, the line under it: the key it's bound to ("Key: F13"), a
+    /// name set elsewhere, or "".
     in property <[string]> button-keys: ["", "", "", "", "", ""];
+    /// The button whose key list is open, or -1.
+    in property <int> key-button: -1;
+    /// The open list is the media keys, not the keyboard's.
+    in property <bool> key-media;
+    /// The open list's labels, as the search leaves them.
+    in property <[string]> key-choices;
+    /// The label of that button's key now, marked in the list, or "".
+    in property <string> key-current;
+    /// The search typed above the list.
+    in-out property <string> key-filter;
     in-out property <bool> persist;
     in property <string> busy;
     in property <string> error;
     out property <[int]> rates: [125, 250, 500, 1000];
     out property <[string]> button-names: ["Left", "Right", "Middle", "Back", "Forward", "DPI"];
+    /// The last two open a list to pick from (mouse.rs: KEY_ITEM, MEDIA_ITEM).
     out property <[string]> actions: [
         "Left click", "Right click", "Middle click", "Back", "Forward", "Cycle DPI",
         "Scroll up", "Scroll down", "Play / pause", "Next track", "Previous track",
-        "Mute", "Volume up", "Volume down", "Disabled",
+        "Mute", "Volume up", "Volume down", "Disabled", "Keyboard key…", "Media key…",
     ];
-    /// While typing: the number as it stands.
+    /// While typing: the number as it stands. With X and Y together it sets both.
     callback edit-stage(int, int);
     /// Done typing: the number, snapped to the mouse's steps.
     callback set-stage(int, int);
+    /// The same two for a stage's Y, while X and Y are apart.
+    callback edit-stage-y(int, int);
+    callback set-stage-y(int, int);
+    callback set-split(bool);
+    /// A key from the open list, by its place in `key-choices`.
+    callback pick-key(int);
+    callback filter-keys(string);
+    callback close-keys();
     callback add-stage();
     callback remove-stage(int);
     callback pick-stage(int);
@@ -77,6 +104,96 @@ component Caveat inherits Rectangle {
     }
 }
 
+/// One axis of a stage while X and Y are apart: its letter, then its box.
+component AxisBox {
+    in property <string> axis;
+    in property <int> value;
+    callback edited(int);
+    callback committed(int);
+    HorizontalLayout {
+        spacing: 6px;
+        Text { text: root.axis; color: Theme.text-dim; vertical-alignment: center; }
+        // A SpinBox is never narrower than 128 px.
+        NumberBox {
+            width: 128px;
+            minimum: 100;
+            maximum: 18000;
+            step: 100;
+            value: root.value;
+            edited(v) => { root.edited(v); }
+            committed(v) => { root.committed(v); }
+        }
+    }
+}
+
+/// The list a button's key is picked from, with a search above it.
+component KeyPicker inherits Rectangle {
+    in property <bool> open;
+    in property <string> title;
+    in property <string> example;
+    in property <[string]> choices;
+    /// The button's key now, marked in the list.
+    in property <string> current;
+    in-out property <string> filter;
+    callback filtered(string);
+    callback chosen(int);
+    callback cancelled();
+    background: Theme.surface-2;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    // Typing can start as soon as it opens.
+    changed open => {
+        if self.open {
+            search.focus();
+        }
+    }
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        HorizontalLayout {
+            Text { text: root.title; color: Theme.text; font-size: Theme.small; font-weight: 600; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Cancel"; small: true; clicked => { root.cancelled(); } }
+        }
+        search := LineEdit {
+            placeholder-text: "Search, e.g. " + root.example;
+            text <=> root.filter;
+            edited(t) => { root.filtered(t); }
+            // Enter takes the first match.
+            accepted => {
+                if root.choices.length > 0 {
+                    root.chosen(0);
+                }
+            }
+        }
+        ListView {
+            height: 168px;
+            for label[j] in root.choices : TouchArea {
+                height: 28px;
+                mouse-cursor: pointer;
+                clicked => { root.chosen(j); }
+                Rectangle {
+                    border-radius: 6px;
+                    background: parent.has-hover ? Theme.accent.with-alpha(0.16) : label == root.current ? Theme.line : transparent;
+                    Text {
+                        x: 8px;
+                        text: label;
+                        color: label == root.current ? Theme.accent : Theme.text;
+                        font-size: Theme.font;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        Text {
+            text: root.choices.length == 0 ? "No key matches that." : "Click a key, or press Enter for the first one.";
+            color: Theme.text-dim;
+            font-size: Theme.small;
+        }
+    }
+}
+
 export component MousePanel inherits Card {
     PanelHead {
         icon: @image-url("icons/mouse.svg");
@@ -90,13 +207,25 @@ export component MousePanel inherits Card {
     Divider { }
     Head {
         text: "DPI STAGES";
-        Button { text: "Add stage"; small: true; enabled: MouseUi.stages.length < 5; clicked => { MouseUi.add-stage(); } }
+        HorizontalLayout {
+            spacing: 14px;
+            horizontal-stretch: 0;
+            Toggle {
+                text: "Separate X and Y";
+                label-color: Theme.text-dim;
+                checked: MouseUi.split;
+                toggled(v) => { MouseUi.set-split(v); }
+            }
+            Button { text: "Add stage"; small: true; enabled: MouseUi.stages.length < 5; clicked => { MouseUi.add-stage(); } }
+        }
     }
     for dpi[i] in MouseUi.stages : HorizontalLayout {
         spacing: 10px;
         alignment: start;
+        // Two boxes need the room: the narrowest card side by side has about
+        // 388 px, and the row takes 370 apart.
         TouchArea {
-            width: 46px;
+            width: MouseUi.split ? 30px : 46px;
             mouse-cursor: pointer;
             clicked => { MouseUi.pick-stage(i); }
             Rectangle {
@@ -110,7 +239,8 @@ export component MousePanel inherits Card {
                 Text { text: i + 1; color: i == MouseUi.active ? Theme.accent : Theme.text-dim; font-weight: 600; }
             }
         }
-        NumberBox {
+        // Together, one box sets both axes; apart, a box for each.
+        if !MouseUi.split : NumberBox {
             width: 130px;
             minimum: 100;
             maximum: 18000;
@@ -119,10 +249,25 @@ export component MousePanel inherits Card {
             edited(v) => { MouseUi.edit-stage(i, v); }
             committed(v) => { MouseUi.set-stage(i, v); }
         }
-        Text { text: "dpi"; color: Theme.text-dim; vertical-alignment: center; }
+        if MouseUi.split : AxisBox {
+            axis: "X";
+            value: dpi;
+            edited(v) => { MouseUi.edit-stage(i, v); }
+            committed(v) => { MouseUi.set-stage(i, v); }
+        }
+        if MouseUi.split : AxisBox {
+            axis: "Y";
+            value: MouseUi.stages-y[i];
+            edited(v) => { MouseUi.edit-stage-y(i, v); }
+            committed(v) => { MouseUi.set-stage-y(i, v); }
+        }
+        if !MouseUi.split : Text { text: "dpi"; color: Theme.text-dim; vertical-alignment: center; }
         Button { text: "×"; small: true; enabled: MouseUi.stages.length > 1; clicked => { MouseUi.remove-stage(i); } }
     }
-    Hint { text: "The highlighted stage is the one the mouse switches to; click a number to pick it."; }
+    Hint {
+        text: MouseUi.split ? "The highlighted stage is the one the mouse switches to; click a number to pick it. X is side to side, Y is up and down."
+            : "The highlighted stage is the one the mouse switches to; click a number to pick it.";
+    }
     HorizontalLayout {
         alignment: start;
         Button { text: MouseUi.busy == "dpi" ? "Applying…" : "Apply DPI"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-dpi(); } }
@@ -146,20 +291,48 @@ export component MousePanel inherits Card {
         text: "BUTTONS";
         Button { text: "Reset to factory"; small: true; clicked => { MouseUi.factory-buttons(); } }
     }
-    for name[i] in MouseUi.button-names : Row {
-        label: name;
-        Pick {
-            width: 220px;
-            model: MouseUi.actions;
-            index: MouseUi.buttons[i];
-            picked(a) => { MouseUi.pick-button(i, a); }
+    // Each row brings its own optional lines, so `spacing: 0` inside it: hidden,
+    // they take no room.
+    for name[i] in MouseUi.button-names : VerticalLayout {
+        spacing: 0;
+        Row {
+            label: name;
+            Pick {
+                width: 220px;
+                model: MouseUi.actions;
+                index: MouseUi.buttons[i];
+                picked(a) => { MouseUi.pick-button(i, a); }
+            }
         }
-        // A key set elsewhere (with ggctl) isn't in the menu; it's kept as it is.
-        Text {
-            text: MouseUi.button-keys[i] != "" ? "key " + MouseUi.button-keys[i] : "";
-            color: Theme.text-dim;
-            font-size: Theme.small;
-            vertical-alignment: center;
+        // The key it's bound to, or a name set elsewhere (with ggctl) that the
+        // menu doesn't offer, kept as it is. Under the menu, where it has room.
+        Shown {
+            shown: MouseUi.button-keys[i] != "";
+            gap: 0;
+            HorizontalLayout {
+                padding-left: 122px;
+                padding-top: 4px;
+                Text { text: MouseUi.button-keys[i]; color: Theme.text-dim; font-size: Theme.small; }
+            }
+        }
+        Shown {
+            shown: MouseUi.key-button == i;
+            gap: 0;
+            HorizontalLayout {
+                padding-left: 122px;
+                padding-top: 8px;
+                KeyPicker {
+                    open: MouseUi.key-button == i;
+                    title: (MouseUi.key-media ? "Media key for " : "Keyboard key for ") + name;
+                    example: MouseUi.key-media ? "volume" : "F13";
+                    choices: MouseUi.key-choices;
+                    current: MouseUi.key-current;
+                    filter <=> MouseUi.key-filter;
+                    filtered(t) => { MouseUi.filter-keys(t); }
+                    chosen(j) => { MouseUi.pick-key(j); }
+                    cancelled => { MouseUi.close-keys(); }
+                }
+            }
         }
     }
     HorizontalLayout {
