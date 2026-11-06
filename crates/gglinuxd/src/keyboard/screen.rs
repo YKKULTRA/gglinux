@@ -13,19 +13,26 @@
 //! What a screen setting draws comes from a [`ScreenSource`]. [`ScreenState`] keeps one
 //! for the setting in force (none for the keyboard's own screen, which gglinux leaves
 //! alone), asks it for the picture each time the worker's loop comes round, and asks it
-//! when the picture next changes by itself, so the loop wakes in time. Screen care is
-//! applied on top, to every source alike: the shift moves the source's picture, and
-//! resting shows a dark screen without asking the source at all.
+//! when the picture next changes by itself, so the loop wakes in time and sleeps until
+//! then. Screen care is applied on top, to every source alike: the shift moves the
+//! source's picture, and resting shows a dark screen without asking the source at all
+//! (nor waking the loop for it).
 //!
-//! Today's sources: [`Still`] for text and pictures (and, until their unit builds them,
-//! the first frame of an animation and the system monitor's title), and [`ClockFace`].
-//! A new kind of screen is a new source, picked in [`source_for`]: an animation player
-//! that steps through its frames and says when the next one is due, the system monitor
-//! that redraws its readings every couple of seconds, and in M12 a GameSense screen
-//! handler. A source fed from outside the worker (GameSense) needs a command that hands
-//! it in; it implements the same trait.
+//! The sources, picked in [`source_for`]:
+//! - [`Still`] for text and pictures;
+//! - [`ClockFace`], which wakes the loop each second;
+//! - [`anim::Animation`], each picture for its delay, looping, timed by [`Now::instant`];
+//! - [`sysmon::Monitor`], the System Monitor's readings, read and drawn once a second
+//!   (the graphics card's under the rule in [`gpu`]: a sleeping card is never woken).
+//!
+//! A new kind of screen is a new source. One fed from outside the worker (M12's
+//! GameSense screen handlers) needs a command that hands it in, and implements the same
+//! trait: `frame` gives the picture for a moment (cheaply: it's asked every loop, and an
+//! unchanged picture isn't sent again until the refresh), `next_due` says when it next
+//! changes by itself.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gg_device_keyboard::{oled, Bitmap, Keyboard};
@@ -33,6 +40,10 @@ use gg_ipc::{Screen, ScreenCare};
 use tracing::{debug, warn};
 
 use crate::clock::is_older_than;
+
+mod anim;
+mod gpu;
+mod sysmon;
 
 /// How often an unchanged screen picture is sent again, in case the keyboard's own menus
 /// (the volume roller, the media button) drew over it.
@@ -52,14 +63,16 @@ pub trait ScreenSource: Send {
     fn next_due(&self, now: &Now) -> Option<Duration>;
 }
 
-/// The moment a picture is drawn for, by each clock a source may want. A source that
-/// times its own frames (an animation) adds the monotonic `Instant` it needs here.
+/// The moment a picture is drawn for, by each clock a source may want.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Now {
     /// Since the Unix epoch: what follows the wall clock (a clock's next second, the shift).
     pub since_epoch: Duration,
     /// The local time, for a clock face.
     pub local: LocalTime,
+    /// The monotonic clock, for what times itself (an animation's pictures, how long
+    /// since the graphics card was last asked): it doesn't jump with the wall clock.
+    pub instant: Instant,
 }
 
 impl Now {
@@ -70,6 +83,7 @@ impl Now {
         Now {
             since_epoch,
             local: local_time(since_epoch.as_secs()),
+            instant: Instant::now(),
         }
     }
 }
@@ -106,7 +120,7 @@ fn local_time(unix_secs: u64) -> LocalTime {
     }
 }
 
-/// A picture that stays as it is: text, a picture, a placeholder.
+/// A picture that stays as it is: text, or a picture.
 pub struct Still(pub Bitmap);
 
 impl ScreenSource for Still {
@@ -150,14 +164,14 @@ pub fn source_for(screen: &Screen) -> Option<Box<dyn ScreenSource>> {
             date: *date,
         }),
         Screen::Image { pixels } => Box::new(Still(Bitmap::from_rows(pixels).unwrap_or_default())),
-        // Placeholders until the screen unit (M11 A4) draws these properly.
-        Screen::Animation { frames, .. } => Box::new(Still(
-            frames
-                .first()
-                .map(|f| Bitmap::from_rows(f).unwrap_or_default())
-                .unwrap_or_default(),
+        Screen::Animation { frames, delays_ms } => {
+            Box::new(anim::Animation::new(frames, delays_ms))
+        }
+        Screen::Monitor { items } => Box::new(sysmon::Monitor::new(
+            items,
+            sysmon::Roots::system(),
+            Arc::new(gpu::System),
         )),
-        Screen::Monitor { .. } => Box::new(Still(oled::text("System Monitor"))),
     })
 }
 
@@ -228,9 +242,10 @@ impl ScreenState {
         changed
     }
 
-    /// How long the loop may sleep before the picture changes by itself.
+    /// How long the loop may sleep before the picture changes by itself. Resting, it
+    /// doesn't: the dark screen changes only with a command (somebody's back).
     pub fn wait(&self, connected: bool) -> Option<Duration> {
-        if !connected {
+        if !connected || resting(&self.setting, &self.care, self.away) {
             return None;
         }
         self.source.as_ref()?.next_due(&Now::current())
@@ -376,7 +391,11 @@ fn shift_at(unix_secs: u64) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyboard::{spawn_fake, Command};
+    use crate::scratch::Scratch;
     use gg_device_keyboard::testing::{FakeTransport, Kind};
+    use gg_ipc::{Experimental, MonitorItem};
+    use tokio::sync::broadcast;
 
     fn at(hour: u8, minute: u8, second: u8) -> Now {
         Now {
@@ -389,7 +408,15 @@ mod tests {
                 day: 29,
                 month: 9,
             },
+            instant: Instant::now(),
         }
+    }
+
+    /// A picture with only pixel (`x`, `y`) lit.
+    fn lit(x: usize, y: usize) -> Vec<u8> {
+        let mut rows = vec![0u8; Screen::IMAGE_BYTES];
+        rows[y * 16 + x / 8] = 0x80 >> (x % 8);
+        rows
     }
 
     fn picture(screen: &Screen, now: &Now) -> Option<Bitmap> {
@@ -462,27 +489,134 @@ mod tests {
     }
 
     #[test]
-    fn text_and_the_placeholders_are_still_pictures_and_only_the_clock_wakes_the_loop() {
+    fn text_and_pictures_never_wake_the_loop_and_an_animation_and_the_monitor_do() {
         let now = at(1, 2, 3);
         let text = Screen::Text { text: "GG".into() };
         assert_eq!(picture(&text, &now), Some(oled::text("GG")));
-        let monitor = Screen::Monitor {
-            items: vec![gg_ipc::MonitorItem::Cpu],
-        };
-        assert_eq!(picture(&monitor, &now), Some(oled::text("System Monitor")));
-        let mut first = vec![0u8; 640];
-        first[0] = 0x80;
-        let animation = Screen::Animation {
-            frames: vec![first.clone(), vec![0u8; 640]],
-            delays_ms: vec![100, 100],
-        };
-        assert_eq!(picture(&animation, &now), Bitmap::from_rows(&first).ok());
-        for still in [text, monitor, animation] {
+        let image = Screen::Image { pixels: lit(0, 0) };
+        for still in [text, image] {
             assert_eq!(
                 source_for(&still).unwrap().next_due(&now),
                 None,
                 "{still:?}"
             );
+        }
+        let animation = Screen::Animation {
+            frames: vec![lit(0, 0), lit(1, 0)],
+            delays_ms: vec![100, 100],
+        };
+        let mut a = source_for(&animation).unwrap();
+        assert_eq!(
+            a.frame(&now),
+            Bitmap::from_rows(&lit(0, 0)).ok(),
+            "the first picture"
+        );
+        assert!(a
+            .next_due(&now)
+            .is_some_and(|d| d <= Duration::from_millis(102)));
+        // The monitor's source is only made here: drawing it would read this computer.
+        let clock_only = Screen::Monitor {
+            items: vec![MonitorItem::Clock],
+        };
+        let monitor = source_for(&clock_only).unwrap();
+        assert!(monitor
+            .next_due(&now)
+            .is_some_and(|d| d <= Duration::from_millis(1005)));
+    }
+
+    #[test]
+    fn screen_care_moves_and_darkens_every_picture_of_an_animation() {
+        let mut screen = bare(Screen::Animation {
+            frames: vec![lit(10, 10), lit(20, 12)],
+            delays_ms: vec![100, 100],
+        });
+        let base = Instant::now();
+        let step = 7 * SHIFT_EVERY;
+        let when = |ms: u64| Now {
+            since_epoch: Duration::from_secs(step),
+            instant: base + Duration::from_millis(ms),
+            ..at(0, 0, 0)
+        };
+        let (dx, dy) = shift_at(step);
+        assert_ne!((dx, dy), (0, 0));
+        let moved = |x: usize, y: usize| Bitmap::from_rows(&lit(x, y)).unwrap().shifted(dx, dy);
+        assert_eq!(screen.frame(&when(0)), Some(moved(10, 10)));
+        assert_eq!(screen.frame(&when(150)), Some(moved(20, 12)));
+        assert_eq!(screen.frame(&when(250)), Some(moved(10, 10)), "round again");
+
+        screen.care.shift = false;
+        assert_eq!(
+            screen.frame(&when(350)),
+            Bitmap::from_rows(&lit(20, 12)).ok()
+        );
+
+        screen.set_away(true);
+        for ms in [400, 500, 600] {
+            assert!(
+                screen.frame(&when(ms)).unwrap().is_dark(),
+                "dark at {ms} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resting_screen_doesn_t_wake_the_loop() {
+        let mut screen = bare(Screen::Animation {
+            frames: vec![lit(0, 0), lit(1, 0)],
+            delays_ms: vec![100, 100],
+        });
+        assert!(screen.wait(true).is_some());
+        screen.set_away(true);
+        assert_eq!(screen.wait(true), None, "dark until somebody's back");
+        screen.care.dark_when_away = false;
+        assert!(screen.wait(true).is_some(), "care off: it plays on");
+    }
+
+    #[tokio::test]
+    async fn an_animation_at_100_ms_goes_out_at_ten_pictures_a_second_at_most() {
+        let fake = FakeTransport::new();
+        let d = Scratch::new("anim-rate");
+        let (event_tx, _) = broadcast::channel(64);
+        let kb = spawn_fake(
+            fake.keyboard(),
+            d.0.clone(),
+            event_tx,
+            Experimental::default(),
+        );
+        let screen = Screen::Animation {
+            // Well inside the screen, so the shift never moves one off it: two dark
+            // pictures in a row would go out as one.
+            frames: (0..10).map(|i| lit(10 + 4 * i, 20)).collect(),
+            delays_ms: vec![100; 10],
+        };
+        kb.send(|reply| Command::SetScreen { screen, reply })
+            .await
+            .unwrap();
+        let start = Instant::now();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let sent = fake.sent();
+        let secs = start.elapsed().as_secs_f64();
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+        let frames: Vec<_> = sent
+            .iter()
+            .filter(|s| s.report[1..3] == [0x1F, 0x81])
+            .collect();
+        let bytes: usize = frames.iter().map(|s| s.report.len()).sum();
+        eprintln!(
+            "animation at 100 ms: {} pictures in {secs:.2} s = {:.2} a second, {:.0} bytes a second",
+            frames.len(),
+            frames.len() as f64 / secs,
+            bytes as f64 / secs
+        );
+        assert_eq!(frames.len(), sent.len(), "nothing but pictures");
+        assert!(
+            frames.len() <= 32,
+            "never faster than the delays: {}",
+            frames.len()
+        );
+        assert!(frames.len() >= 15, "and not far behind: {}", frames.len());
+        for pair in frames.windows(2) {
+            assert_ne!(pair[0].report, pair[1].report, "each picture goes out once");
         }
     }
 
