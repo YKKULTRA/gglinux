@@ -51,6 +51,8 @@ ggctl screen keyboard                   # hand the screen back to the keyboard's
 ggctl screen clock [seconds] [12h] [date]
 ggctl screen text Hello|world           # up to 5 lines of 16 characters; | starts a line
 ggctl screen image picture.pbm          # a 128x40 PBM (P1 or P4)
+ggctl screen gif animation.gif          # up to 256 pictures, each for its delay (0.1 to 10 s)
+ggctl screen monitor cpu,temp,ram,clock # 1 to 4 of: cpu, temp, ram, gpu, gpu-temp, clock
 ggctl screen care shift|away|own on|off # burn-in care: move the picture; dark while away;
                                         #   the keyboard's own screen dark while away too
 ggctl parts                             # which parts of gglinux run
@@ -58,7 +60,12 @@ ggctl parts sonar off                   # turn a part off or on (keyboard, heads
                                         #   sonar, gamesense, profiles, clips); restarts the daemon
 ggctl experimental                      # features not tried on your hardware yet: on or off
 ggctl experimental keyboard_onboard on  # turn one on or off, by the name listed
-ggctl bind                              # key bindings (not built yet)
+ggctl bind                              # key bindings gglinux sends, and the keyboard's as last read
+ggctl bind read                         # read the keyboard's bindings back (all three layers)
+ggctl bind on|off                       # send them when the keyboard connects, or leave its own
+ggctl bind capslock ctrl+a              # up to 4 keys; or media:mute, mouse:4, cpi, wheel:up,
+                                        #   pan:left, none, default
+ggctl bind fn+f1 media:mute             # with Fn held (or --layer fn); deep+w … past W's deep press
 ggctl onboard                           # the keyboard's onboard profile slots (not built yet)
 ggctl actions                           # actions on the spare keys F13–F24, and what the desktop bound
 ggctl actions set f13 run kitty         # or: type <text>, profile <name>, clip, media playpause|next|
@@ -141,6 +148,7 @@ fn main() -> Result<()> {
         ResponseData::Profiles { state } => profile::print(&state),
         ResponseData::Experimental { experimental } => experimental::print(&experimental),
         ResponseData::Actions { state } => actions::print(&state),
+        ResponseData::Bindings { state } => bind::print(&state),
         ResponseData::Success => {
             println!("ok");
             // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.
@@ -237,6 +245,14 @@ fn positional(args: &[String]) -> Result<Vec<&str>> {
             }
             "--save" => {}
             a if a.starts_with("--select=") => {}
+            // `ggctl bind`'s layer, which bind.rs reads from the words.
+            "--layer" => {
+                words.push(a);
+                if let Some(v) = args.next() {
+                    words.push(v);
+                }
+            }
+            a if a.starts_with("--layer=") => words.push(a),
             a if a.starts_with("--") => {
                 bail!("unknown option '{a}' (try: --save, --select N, --help)")
             }
@@ -403,10 +419,10 @@ mod tests {
 
     #[test]
     fn the_commands_still_to_be_built_say_so_before_connecting() {
-        for line in ["bind", "bind 0x39 ctrl+a", "onboard list"] {
-            let e = parse(&args(line)).err().unwrap();
-            assert_eq!(e.to_string(), "not built yet", "{line}");
-        }
+        let e = parse(&args("onboard list")).err().unwrap();
+        assert_eq!(e.to_string(), "not built yet");
+        assert!(matches!(sends("bind"), Request::GetBindings));
+        assert!(matches!(sends("bind read"), Request::ReadBindings));
     }
 
     #[test]

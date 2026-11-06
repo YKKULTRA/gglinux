@@ -426,11 +426,12 @@ pub fn file_path(uri: &str) -> Option<PathBuf> {
 
 pub async fn pick_picture() -> Result<Option<PathBuf>, String> {
     pick_file(
-        "A picture for the keyboard's screen",
+        "A picture or animation for the keyboard's screen",
         (
             "Pictures",
             &[
                 "image/png",
+                "image/apng",
                 "image/jpeg",
                 "image/gif",
                 "image/webp",

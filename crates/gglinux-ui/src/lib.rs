@@ -188,12 +188,18 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
             keyboard::show(ui, s, &forms);
             switches::show(ui, s, &forms);
             screen::show(ui, s, &forms);
+            bindings::show(ui, s);
         }
         Changed::Sonar => sonar::show(ui, s, &forms.sonar),
         Changed::Gamesense => pages::show_games(ui, s),
         Changed::Profiles => pages::show_profiles(ui, s),
         Changed::Clips => pages::show_moments(ui, s),
-        Changed::Experimental => experimental::show(ui, s),
+        Changed::Experimental => {
+            experimental::show(ui, s);
+            // Panels whose controls are greyed while their gate is off.
+            bindings::show(ui, s);
+            switches::show(ui, s, &forms);
+        }
         Changed::Bindings => bindings::show(ui, s),
         Changed::Onboard => onboard::show(ui, s),
         Changed::Actions => actions::show(ui, s),

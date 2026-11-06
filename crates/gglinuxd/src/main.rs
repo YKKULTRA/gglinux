@@ -1199,14 +1199,25 @@ mod tests {
             ResponseData::Experimental { experimental } if experimental.keyboard_onboard
         ));
         for (method, params) in [
-            ("read_bindings", ""),
-            ("set_bindings", r#"{"bindings":{},"enabled":true}"#),
             ("read_onboard", r#"{"slot":null}"#),
             ("load_onboard", r#"{"slot":0}"#),
             ("write_onboard", r#"{"slot":4,"from":{"kind":"current"}}"#),
         ] {
             match ask(method, params).await {
                 ResponseData::Error { message } => assert_eq!(message, "not built yet", "{method}"),
+                other => panic!("{method}: {other:?}"),
+            }
+        }
+        // Bindings are built: with only keyboard_onboard on, they're refused by their own gate.
+        for (method, params) in [
+            ("read_bindings", ""),
+            ("set_bindings", r#"{"bindings":{},"enabled":true}"#),
+        ] {
+            match ask(method, params).await {
+                ResponseData::Error { message } => assert!(
+                    message.contains("hasn't been tried on your hardware yet"),
+                    "{method}: {message}"
+                ),
                 other => panic!("{method}: {other:?}"),
             }
         }

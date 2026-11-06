@@ -413,13 +413,6 @@ fn print_layers(b: &gg_ipc::Bindings, indent: &str) {
 }
 
 /// `ggctl bind`'s answer.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "main prints a bindings answer with this once it routes `ResponseData::Bindings` here"
-    )
-)]
 pub fn print(state: &BindingsState) {
     println!(
         "bindings: {}",

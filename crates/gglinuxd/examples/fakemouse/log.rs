@@ -98,6 +98,14 @@ pub fn describe(req: &Request) -> String {
             settings.protect, settings.lit_seconds, settings.brightness
         ),
         Request::SetHeadset { change } => format!("set_headset {change:?}"),
+        // An animation's pictures would fill the log: say how many instead.
+        Request::SetScreen {
+            screen: gg_ipc::Screen::Animation { frames, delays_ms },
+        } => format!(
+            "set_screen animation of {} pictures, {} ms a round",
+            frames.len(),
+            delays_ms.iter().map(|&d| u64::from(d)).sum::<u64>()
+        ),
         // Everything else with its params as they go over the wire.
         other => match serde_json::to_value(other)
             .ok()
