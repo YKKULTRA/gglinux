@@ -12,6 +12,10 @@
 //! RAM, so they're sent once each time it connects. All off by default: a fresh
 //! install never touches the keyboard.
 //!
+//! The board drawn follows the keyboard's region (US, ISO or JIS). It's asked once a
+//! connection, the first time gglinux takes the keyboard anyway ([`read_region`]), so
+//! a fresh install still sends nothing; the US board is drawn until then.
+//!
 //! This file keeps the loop, the lighting, opening and closing the keyboard and the
 //! routing of [`Command`]s. The screen is [`screen`] (with its [`screen::ScreenSource`]s)
 //! and the switches [`switches`]. Key bindings and the onboard slots each have a module
@@ -37,12 +41,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gg_device_keyboard::layout::ANSI_TKL;
+use gg_device_keyboard::layout::{for_region, Key, REGIONS};
 use gg_device_keyboard::proto::ANALOG_KEYS;
 use gg_device_keyboard::{Families, Keyboard, Rgb};
 use gg_ipc::{
-    Effect, Event, Experimental, KeyInfo, KeyboardState, Lighting, ReactiveStatus, Screen,
-    ScreenCare, Switches,
+    Effect, Event, Experimental, KeyInfo, KeyboardState, Lighting, MicMuteLight, ReactiveStatus,
+    Screen, ScreenCare, Switches,
 };
 use hidapi::HidApi;
 use serde::{de::DeserializeOwned, Serialize};
@@ -218,13 +222,39 @@ pub fn spawn(
 }
 
 /// A worker on `device`, a keyboard over a fake transport, open from the start, with its
-/// settings in `config_dir` and no device list: it never opens anything else.
+/// settings in `config_dir` and no device list: it never opens anything else. The
+/// keyboard counts as asked its region already, with no answer (the US board), so a test
+/// sees only the reports of what it tests; [`spawn_fake_unasked`] opens it as a real one
+/// opens.
 #[cfg(test)]
 pub fn spawn_fake(
     device: Keyboard,
     config_dir: PathBuf,
     event_tx: broadcast::Sender<Event>,
     experimental: Experimental,
+) -> Handle {
+    spawn_fake_on(device, config_dir, event_tx, experimental, Some(None))
+}
+
+/// [`spawn_fake`] on a keyboard not asked its region yet, as every real one opens: it's
+/// asked the first time gglinux takes it.
+#[cfg(test)]
+pub fn spawn_fake_unasked(
+    device: Keyboard,
+    config_dir: PathBuf,
+    event_tx: broadcast::Sender<Event>,
+    experimental: Experimental,
+) -> Handle {
+    spawn_fake_on(device, config_dir, event_tx, experimental, None)
+}
+
+#[cfg(test)]
+fn spawn_fake_on(
+    device: Keyboard,
+    config_dir: PathBuf,
+    event_tx: broadcast::Sender<Event>,
+    experimental: Experimental,
+    region: Option<Option<u8>>,
 ) -> Handle {
     let (tx, rx) = mpsc::channel();
     let worker_tx = tx.clone();
@@ -233,6 +263,7 @@ pub fn spawn_fake(
         .spawn(move || {
             let mut state = State::new(None, &config_dir, worker_tx, Vec::new(), experimental);
             connected(&mut state, device);
+            state.region = region;
             run(state, &rx, &event_tx);
         })
         .expect("spawn gg-keyboard-fake thread");
@@ -284,6 +315,9 @@ struct State {
     /// The keyboard opened since the last loop: `on_connect` is due once its switches
     /// have gone out again.
     just_opened: bool,
+    /// The open keyboard's region byte, once it's been asked on this connection
+    /// (`Some(None)`: it didn't say). See [`read_region`].
+    region: Option<Option<u8>>,
 }
 
 impl State {
@@ -301,9 +335,9 @@ impl State {
             taken: false,
             last_open_attempt: None,
             last_frame: None,
-            lighting: load(&settings_path, "lighting"),
+            lighting: on_board(load(&settings_path, "lighting"), None),
             settings_path,
-            positions: effects::positions(),
+            positions: effects::positions(board(None)),
             started: Instant::now(),
             published: None,
             tx,
@@ -326,6 +360,7 @@ impl State {
             onboard: onboard::Store::load(config_dir),
             experimental,
             just_opened: false,
+            region: None,
         }
     }
 }
@@ -393,6 +428,8 @@ fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Ev
         ) {
             hand_back(&mut state);
         }
+        // Before anything below sends: lighting, switches, bindings, the screen.
+        read_region(&mut state, event_tx);
         render(&mut state);
         state.switches.sync(state.device.as_ref());
         if std::mem::take(&mut state.just_opened) {
@@ -494,15 +531,97 @@ fn mic_color(mic: Option<(u8, gg_ipc::Rgb)>, code: u8) -> Option<Rgb> {
     })
 }
 
+/// The board drawn for `region` as [`State::region`] keeps it: the keyboard's own once
+/// it's been asked, US until then.
+fn board(region: Option<Option<u8>>) -> &'static [Key] {
+    for_region(region.flatten())
+}
+
+/// Whether the keyboard has a key with this code: on its own board once its region has
+/// been asked, on any of the boards until then, so a key saved on an ISO board isn't
+/// lost before the keyboard is asked.
+fn has_key(region: Option<Option<u8>>, code: u8) -> bool {
+    let on = |board: &[Key]| board.iter().any(|k| k.0 == code);
+    match region {
+        Some(region) => on(for_region(region)),
+        None => REGIONS.iter().any(|&(_, r)| on(for_region(Some(r)))),
+    }
+}
+
 /// Settings that name keys must name keys this keyboard has.
-fn check_keys(lighting: &Lighting) -> Result<(), String> {
+fn check_keys(lighting: &Lighting, region: Option<Option<u8>>) -> Result<(), String> {
     let key = lighting.mic_mute.key;
-    if !ANSI_TKL.iter().any(|k| k.0 == key) {
+    if !has_key(region, key) {
         return Err(format!(
             "the mic-mute key {key:#04x} is not on this keyboard"
         ));
     }
     Ok(())
+}
+
+/// `lighting` with its mute light on the default key if the keyboard lacks the saved one:
+/// older settings have Pause, which this keyboard doesn't have, and a change would
+/// otherwise be refused for it.
+fn on_board(mut lighting: Lighting, region: Option<Option<u8>>) -> Lighting {
+    if check_keys(&lighting, region).is_err() {
+        lighting.mic_mute.key = MicMuteLight::default().key;
+    }
+    lighting
+}
+
+/// Whether gglinux sends the open keyboard anything of its own now: its lighting or an
+/// overlay's, switches that are on, a screen of gglinux's, or key bindings that are on
+/// with their gate. The onboard slots' reads and writes don't count.
+fn takes_keyboard(state: &mut State, event_tx: &broadcast::Sender<Event>) -> bool {
+    drawing(state.lighting.enabled, !state.layers.is_empty())
+        || state.switches.settings().enabled
+        || !matches!(state.screen.setting(), Screen::Keyboard)
+        || (state.experimental.keyboard_bindings && bindings_on(state, event_tx))
+}
+
+/// Whether the key bindings are on, asked through the bindings module's own `Get`, as
+/// `main` asks.
+fn bindings_on(state: &mut State, event_tx: &broadcast::Sender<Event>) -> bool {
+    let (reply, mut answer) = oneshot::channel();
+    bindings::on_command(
+        bindings::Cmd::Get(reply),
+        &mut state.bindings,
+        None,
+        &state.experimental,
+        event_tx,
+    );
+    answer
+        .try_recv()
+        .is_ok_and(|got| got.is_ok_and(|b| b.enabled))
+}
+
+/// Ask the open keyboard its region the first time gglinux takes it on this connection
+/// ([`takes_keyboard`]), before anything else is sent. Until then nothing is, not even
+/// this question.
+fn read_region(state: &mut State, event_tx: &broadcast::Sender<Event>) {
+    if state.region.is_none() && state.device.is_some() && takes_keyboard(state, event_tx) {
+        ask_region(state);
+    }
+}
+
+/// Ask the open keyboard its region, if it hasn't been asked on this connection: the
+/// board drawn, where the effects find each key and the mute key follow it. A keyboard
+/// that doesn't answer gets the US board, and isn't asked again until it reconnects.
+fn ask_region(state: &mut State) {
+    let Some(device) = state.device.as_ref() else {
+        return;
+    };
+    if state.region.is_some() {
+        return;
+    }
+    let region = device.region().unwrap_or_else(|e| {
+        debug!(error = %format!("{e:#}"), "the keyboard did not say its region");
+        None
+    });
+    info!(?region, "keyboard region read");
+    state.region = Some(region);
+    state.positions = effects::positions(board(state.region));
+    state.lighting = on_board(std::mem::take(&mut state.lighting), state.region);
 }
 
 /// Run the visualizer's audio capture exactly while it's drawn.
@@ -619,13 +738,20 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
         Command::SetAway { away, reply } => {
             if state.screen.set_away(away) {
                 // Now, not at the next loop: sleep may be next.
+                read_region(state, event_tx);
                 state.screen.render(state.device.as_ref());
                 publish(state, event_tx);
             }
             let _ = reply.send(Ok(()));
         }
         Command::SetLighting { lighting, reply } => {
-            if let Err(message) = lighting.validate().and_then(|()| check_keys(&lighting)) {
+            let checked = lighting.validate().and_then(|()| {
+                if lighting.enabled {
+                    ask_region(state); // lighting that's on takes the keyboard
+                }
+                check_keys(&lighting, state.region)
+            });
+            if let Err(message) = checked {
                 let _ = reply.send(Err(message));
                 return true;
             }
@@ -670,13 +796,20 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             state.reactive = ReactiveStatus::Off;
             state.last_reader_attempt = Some(Instant::now()); // retry after REOPEN_INTERVAL
         }
-        Command::Bindings(cmd) => bindings::on_command(
-            cmd,
-            &mut state.bindings,
-            state.device.as_ref(),
-            &state.experimental,
-            event_tx,
-        ),
+        Command::Bindings(cmd) => {
+            if state.experimental.keyboard_bindings
+                && matches!(cmd, bindings::Cmd::Set { enabled: true, .. })
+            {
+                ask_region(state); // bindings that are on take the keyboard
+            }
+            bindings::on_command(
+                cmd,
+                &mut state.bindings,
+                state.device.as_ref(),
+                &state.experimental,
+                event_tx,
+            )
+        }
         Command::Onboard(cmd) => onboard::on_command(
             cmd,
             &mut state.onboard,
@@ -745,6 +878,8 @@ fn try_open(state: &mut State) {
 /// families the experimental gates allow.
 fn connected(state: &mut State, keyboard: Keyboard) {
     keyboard.set_families(families(&state.experimental));
+    state.region = None; // asked again: this may be another keyboard
+    state.positions = effects::positions(board(None));
     state.device = Some(keyboard);
     forget_device(state);
     state.last_frame = None;
@@ -841,7 +976,7 @@ fn hand_back(state: &mut State) {
 fn snapshot(state: &State) -> KeyboardState {
     KeyboardState {
         connected: state.device.is_some(),
-        layout: ANSI_TKL
+        layout: board(state.region)
             .iter()
             .map(|&(code, label, x, y, w)| KeyInfo {
                 code,
@@ -903,7 +1038,9 @@ fn save<T: Serialize>(path: &Path, settings: &T, what: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gg_device_keyboard::testing::FakeTransport;
+    use crate::scratch::Scratch;
+    use gg_device_keyboard::proto;
+    use gg_device_keyboard::testing::{FakeTransport, Kind};
     use gg_ipc::{Effect, Reactive};
 
     fn lighting(enabled: bool, reactive: bool, effect: Effect) -> Lighting {
@@ -1081,9 +1218,42 @@ mod tests {
     #[test]
     fn a_mute_key_must_be_on_the_keyboard() {
         let mut l = lighting(true, false, Effect::Static);
-        assert!(check_keys(&l).is_ok());
+        assert!(check_keys(&l, None).is_ok());
         l.mic_mute.key = 0x59; // keypad 1: not on a TKL
-        assert!(check_keys(&l).is_err());
+        assert!(check_keys(&l, None).is_err());
+        l.mic_mute.key = 0x48; // Pause: not on this one
+        assert!(check_keys(&l, None).is_err());
+        l.mic_mute.key = 0x64; // beside left Shift, on ISO boards
+        assert!(
+            check_keys(&l, None).is_ok(),
+            "not asked yet: any board's key"
+        );
+        assert!(check_keys(&l, Some(Some(4))).is_ok(), "German");
+        assert!(check_keys(&l, Some(Some(1))).is_err(), "US");
+        assert!(check_keys(&l, Some(None)).is_err(), "no answer: US");
+    }
+
+    #[test]
+    fn a_saved_mute_key_the_board_lacks_moves_to_the_default() {
+        let mut l = lighting(true, false, Effect::Static);
+        l.mic_mute.key = 0x48; // Pause, older settings' default
+        assert_eq!(on_board(l.clone(), None).mic_mute.key, 0xFB);
+        l.mic_mute.key = 0x64; // ISO only
+        assert_eq!(
+            on_board(l.clone(), Some(None)).mic_mute.key,
+            0xFB,
+            "not on US"
+        );
+        assert_eq!(
+            on_board(l.clone(), Some(Some(4))).mic_mute.key,
+            0x64,
+            "kept on German"
+        );
+        assert_eq!(
+            on_board(l, None).mic_mute.key,
+            0x64,
+            "kept until it's asked"
+        );
     }
 
     /// A state with no device list and its settings in a folder that isn't there: every
@@ -1165,7 +1335,7 @@ mod tests {
     async fn a_worker_on_a_fresh_install_sends_the_keyboard_nothing_and_answers_the_units() {
         let fake = FakeTransport::new();
         let (event_tx, _) = broadcast::channel(8);
-        let kb = spawn_fake(
+        let kb = spawn_fake_unasked(
             fake.keyboard(),
             nowhere(),
             event_tx,
@@ -1189,6 +1359,271 @@ mod tests {
             fake.sent().is_empty(),
             "lighting, switches and screen are all off by default: {:?}",
             fake.sent()
+        );
+    }
+
+    /// The colour a direct lighting frame gives `code`.
+    fn frame_color(frame: &[u8], code: u8) -> Rgb {
+        let i = proto::KEYS.iter().position(|&c| c == code).unwrap();
+        let at = 3 + i * 4;
+        assert_eq!(frame[at], code);
+        Rgb {
+            r: frame[at + 1],
+            g: frame[at + 2],
+            b: frame[at + 3],
+        }
+    }
+
+    /// A keyboard whose region is `region`.
+    fn keyboard_of(region: u8) -> FakeTransport {
+        let fake = FakeTransport::new();
+        fake.answer_input(
+            gg_device_keyboard::testing::Key::op(proto::OP_REGION),
+            &[0xF5, 0x00, region],
+        );
+        fake
+    }
+
+    /// How often a worker with these saved settings, and `setup` done to it, asks a
+    /// German keyboard its region over two loops, and what it keeps of the answer.
+    fn region_queries(
+        saved: &[(&str, &str)],
+        experimental: Experimental,
+        setup: impl FnOnce(&mut State),
+    ) -> (usize, Option<Option<u8>>) {
+        let d = Scratch::new("keyboard-takes");
+        for (name, json) in saved {
+            std::fs::write(d.0.join(name), json).unwrap();
+        }
+        let fake = keyboard_of(4);
+        let mut state = State::new(None, &d.0, mpsc::channel().0, Vec::new(), experimental);
+        connected(&mut state, fake.keyboard());
+        setup(&mut state);
+        let (event_tx, _) = broadcast::channel(8);
+        read_region(&mut state, &event_tx);
+        read_region(&mut state, &event_tx);
+        let sent = fake.sent();
+        assert!(
+            sent.iter().all(|s| s.report[1] == proto::OP_REGION),
+            "nothing but the question: {sent:?}"
+        );
+        (sent.len(), state.region)
+    }
+
+    #[test]
+    fn the_region_is_asked_once_and_only_when_gglinux_takes_the_keyboard_anyway() {
+        let off = Experimental::default();
+        let bindings_gate = Experimental {
+            keyboard_bindings: true,
+            ..off
+        };
+        let every_gate = Experimental {
+            keyboard_onboard: true,
+            ..bindings_gate
+        };
+        let bindings_on = [("bindings.json", r#"{"enabled": true}"#)];
+        let not_asked = (0, None);
+        assert_eq!(
+            region_queries(&[], off, |_| {}),
+            not_asked,
+            "a fresh install"
+        );
+        assert_eq!(
+            region_queries(&[], every_gate, |_| {}),
+            not_asked,
+            "gates alone, the onboard slots' too"
+        );
+        assert_eq!(
+            region_queries(&bindings_on, off, |_| {}),
+            not_asked,
+            "bindings on, their gate off: nothing goes out"
+        );
+
+        let german = (1, Some(Some(4)));
+        let lit = |s: &mut State| s.lighting.enabled = true;
+        assert_eq!(region_queries(&[], off, lit), german, "lighting");
+        let painted = |s: &mut State| s.layers = vec![Layer::from([(0x04, Rgb::default())])];
+        assert_eq!(
+            region_queries(&[], off, painted),
+            german,
+            "a game's overlay"
+        );
+        let switches = |s: &mut State| {
+            let on = Switches {
+                enabled: true,
+                ..Switches::default()
+            };
+            s.switches.set(on).unwrap()
+        };
+        assert_eq!(region_queries(&[], off, switches), german, "switches");
+        let text = |s: &mut State| {
+            let hello = Screen::Text {
+                text: "hello".into(),
+            };
+            s.screen.set(hello).unwrap()
+        };
+        assert_eq!(
+            region_queries(&[], off, text),
+            german,
+            "a screen of gglinux's"
+        );
+        assert_eq!(
+            region_queries(&bindings_on, bindings_gate, |_| {}),
+            german,
+            "bindings on with their gate"
+        );
+    }
+
+    #[test]
+    fn each_connection_is_asked_again_and_the_mute_key_follows_the_board() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut state = bare_state();
+        state.lighting.enabled = true;
+        state.lighting.mic_mute.key = 0x64; // saved on an ISO board
+        for (fake, region) in [
+            (keyboard_of(4), Some(4)),
+            (keyboard_of(1), Some(1)),
+            (FakeTransport::new(), None), // no answer
+        ] {
+            connected(&mut state, fake.keyboard());
+            assert_eq!(state.region, None, "not asked yet");
+            read_region(&mut state, &event_tx);
+            read_region(&mut state, &event_tx);
+            assert_eq!(state.region, Some(region));
+            assert_eq!(fake.sent().len(), 1, "asked once: {region:?}");
+            assert_eq!(state.positions, effects::positions(for_region(region)));
+            if region == Some(4) {
+                assert_eq!(state.lighting.mic_mute.key, 0x64, "kept on German");
+            }
+        }
+        assert_eq!(state.lighting.mic_mute.key, 0xFB, "moved on the US board");
+        assert!(!state.positions.contains_key(&0x64));
+    }
+
+    #[test]
+    fn lighting_turned_on_is_checked_against_the_keyboard_s_own_board() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut state = bare_state();
+        let fake = keyboard_of(1);
+        connected(&mut state, fake.keyboard());
+        let mut iso_key = lighting(true, false, Effect::Static);
+        iso_key.mic_mute.key = 0x64;
+        let (reply, mut answer) = oneshot::channel();
+        handle(
+            Command::SetLighting {
+                lighting: iso_key,
+                reply,
+            },
+            &mut state,
+            &event_tx,
+        );
+        let refused = answer.try_recv().unwrap().unwrap_err();
+        assert_eq!(refused, "the mic-mute key 0x64 is not on this keyboard");
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].report[1], proto::OP_REGION, "asked first");
+    }
+
+    #[test]
+    fn bindings_turned_on_with_their_gate_ask_the_region_before_they_go_out() {
+        let d = Scratch::new("keyboard-bindings-region");
+        let (event_tx, _) = broadcast::channel(8);
+        let gate = Experimental {
+            keyboard_bindings: true,
+            ..Experimental::default()
+        };
+        let mut state = State::new(None, &d.0, mpsc::channel().0, Vec::new(), gate);
+        let fake = keyboard_of(4);
+        connected(&mut state, fake.keyboard());
+        let (reply, _answer) = oneshot::channel();
+        let set = bindings::Cmd::Set {
+            bindings: gg_ipc::Bindings::default(),
+            enabled: true,
+            reply,
+        };
+        handle(Command::Bindings(set), &mut state, &event_tx);
+        let sent = fake.sent();
+        assert_eq!(sent[0].report[1], proto::OP_REGION, "asked first: {sent:?}");
+        assert!(sent.len() > 1, "then the bindings' own reports");
+        assert_eq!(state.region, Some(Some(4)));
+    }
+
+    fn label_of(layout: &[KeyInfo], code: u8) -> &str {
+        &layout.iter().find(|k| k.code == code).unwrap().label
+    }
+
+    #[tokio::test]
+    async fn once_lighting_is_on_the_region_is_asked_first_and_picks_the_board() {
+        let d = Scratch::new("keyboard-region");
+        let fake = FakeTransport::new();
+        fake.answer_input(
+            gg_device_keyboard::testing::Key::op(proto::OP_REGION),
+            &[0xF5, 0x00, 0x04], // German
+        );
+        let (event_tx, _) = broadcast::channel(8);
+        let kb = spawn_fake_unasked(
+            fake.keyboard(),
+            d.0.clone(),
+            event_tx,
+            Experimental::default(),
+        );
+        let before = kb.send(Command::GetState).await.unwrap().layout;
+        assert_eq!(
+            label_of(&before, 0x1C),
+            "Y",
+            "the US board until it's asked"
+        );
+        assert!(before.iter().all(|k| k.code != 0x48), "no Pause");
+        assert!(
+            fake.sent().is_empty(),
+            "not asked while gglinux leaves it alone"
+        );
+
+        let wave = Lighting {
+            enabled: true,
+            effect: Effect::Wave { period_s: 60.0 },
+            ..Lighting::default()
+        };
+        kb.send(|reply| Command::SetLighting {
+            lighting: wave,
+            reply,
+        })
+        .await
+        .unwrap();
+        let layout = kb.send(Command::GetState).await.unwrap().layout;
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+
+        let sent = fake.sent();
+        assert_eq!(
+            (sent[0].kind, &sent[0].report),
+            (
+                Kind::Output,
+                &proto::command(proto::OP_REGION, &[]).unwrap()
+            ),
+            "the region query goes first"
+        );
+        let asked = sent.iter().filter(|s| s.report[1] == proto::OP_REGION);
+        assert_eq!(asked.count(), 1, "once");
+        assert_eq!(label_of(&layout, 0x1C), "Z", "German: QWERTZ");
+        assert_eq!(
+            label_of(&layout, 0x64),
+            "<",
+            "the ISO key beside left Shift"
+        );
+        // The wave's colours run along the board: on the German board 0x64 sits between
+        // 1 and Q, so its colour does too (this early in the wave, green grows with x).
+        let frame = &sent
+            .iter()
+            .find(|s| s.report[1] == proto::OP_DIRECT)
+            .unwrap()
+            .report;
+        let green = |code| frame_color(frame, code).g;
+        assert!(
+            green(0x1E) < green(0x64) && green(0x64) < green(0x14),
+            "the effects know where 0x64 is: {} {} {}",
+            green(0x1E),
+            green(0x64),
+            green(0x14)
         );
     }
 }

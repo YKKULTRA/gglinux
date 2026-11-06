@@ -55,8 +55,8 @@ pub fn for_region(region: Option<u8>) -> &'static [Key] {
 }
 
 /// The old generic US TKL drawing, with Print Screen, Scroll Lock and Pause, which this
-/// board doesn't have. The daemon's lighting effects, GameSense zones and their tests still
-/// use it; once they take [`for_region`]'s board, it goes.
+/// board doesn't have. Nothing draws it any more: only the key-binding messages still take
+/// their key names from it (the daemon's and the fake's); once they use [`US`], it goes.
 pub const ANSI_TKL: [(u8, &str, f32, f32, f32); 87] = [
     (0x29, "Esc", 0.0, 0.0, 1.0),
     (0x3A, "F1", 2.0, 0.0, 1.0),

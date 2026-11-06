@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 
-use gg_device_keyboard::layout::{ANSI_TKL, WIDTH};
+use gg_device_keyboard::layout::{Key, WIDTH};
 use gg_device_keyboard::Rgb;
 use gg_ipc::{Effect, Lighting, Reactive, ReactiveMode};
 
@@ -31,9 +31,9 @@ pub struct Hit {
     pub t: f64,
 }
 
-/// The centre of every key on the board.
-pub fn positions() -> HashMap<u8, Pos> {
-    ANSI_TKL
+/// The centre of every key on `board`.
+pub fn positions(board: &[Key]) -> HashMap<u8, Pos> {
+    board
         .iter()
         .map(|&(code, _, x, y, w)| {
             (
@@ -215,6 +215,7 @@ fn scale(c: Rgb, k: f32) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gg_device_keyboard::layout::US;
     use gg_ipc::{KeyColor, Reactive, ReactiveMode};
 
     const RED: gg_ipc::Rgb = gg_ipc::Rgb { r: 255, g: 0, b: 0 };
@@ -247,7 +248,7 @@ mod tests {
             }],
             ..lit(Effect::Static)
         };
-        let p = positions();
+        let p = positions(&US);
         assert_eq!(
             color(&l, &p, 0x0A, 5.0, &[], &[]),
             Rgb { r: 255, g: 0, b: 0 }
@@ -266,7 +267,7 @@ mod tests {
             color: RED,
             period_s: 2.0,
         });
-        let p = positions();
+        let p = positions(&US);
         assert_eq!(color(&l, &p, 0x04, 0.0, &[], &[]), Rgb::default());
         assert_eq!(
             color(&l, &p, 0x04, 1.0, &[], &[]),
@@ -276,14 +277,30 @@ mod tests {
     }
 
     #[test]
+    fn every_key_of_the_board_given_has_a_place() {
+        let us = positions(&US);
+        assert_eq!(us.len(), US.len());
+        assert!(
+            us.contains_key(&0xFB) && !us.contains_key(&0x48),
+            "no Pause"
+        );
+        let de = positions(&gg_device_keyboard::layout::DE);
+        assert!(
+            de.contains_key(&0x64) && !us.contains_key(&0x64),
+            "the ISO key"
+        );
+        assert_eq!(us[&0x29], de[&0x29], "Esc is where it is on every board");
+    }
+
+    #[test]
     fn the_wave_moves_across_the_keyboard() {
         let l = lit(Effect::Wave { period_s: 4.0 });
-        let p = positions();
+        let p = positions(&US);
         let esc = color(&l, &p, 0x29, 0.0, &[], &[]);
         assert_ne!(
             esc,
-            color(&l, &p, 0x48, 0.0, &[], &[]),
-            "Esc and Pause differ"
+            color(&l, &p, 0xFB, 0.0, &[], &[]),
+            "Esc and the screen button differ"
         );
         assert_ne!(color(&l, &p, 0x29, 1.0, &[], &[]), esc, "and it moves");
     }
@@ -291,16 +308,16 @@ mod tests {
     #[test]
     fn spectrum_is_one_colour_for_every_key() {
         let l = lit(Effect::Spectrum { period_s: 6.0 });
-        let p = positions();
+        let p = positions(&US);
         assert_eq!(
             color(&l, &p, 0x29, 1.5, &[], &[]),
-            color(&l, &p, 0x48, 1.5, &[], &[])
+            color(&l, &p, 0xFB, 1.5, &[], &[])
         );
     }
 
     #[test]
     fn brightness_scales_every_effect() {
-        let p = positions();
+        let p = positions(&US);
         let off = Lighting {
             brightness: 0,
             ..lit(Effect::Spectrum { period_s: 6.0 })
@@ -343,7 +360,7 @@ mod tests {
     #[test]
     fn fade_lights_the_pressed_key_and_fades_back() {
         let l = reactive(ReactiveMode::Fade, 0.6);
-        let p = positions();
+        let p = positions(&US);
         let hits = [Hit { code: 0x04, t: 1.0 }];
         assert_eq!(
             color(&l, &p, 0x04, 1.0, &hits, &[]),
@@ -376,22 +393,22 @@ mod tests {
     #[test]
     fn ripple_starts_on_the_pressed_key_and_reaches_far_keys_later() {
         let l = reactive(ReactiveMode::Ripple, 1.0);
-        let p = positions();
+        let p = positions(&US);
         let hits = [Hit { code: 0x29, t: 0.0 }]; // Esc
         let w = |code, t| reactive_weight(&l.reactive, &p, code, t, &hits);
         assert_eq!(w(0x29, 0.0), 1.0);
         assert_eq!(w(0x3A, 0.0), 0.0, "F1 is dark at the moment of the press");
-        let far = dist(&p, 0x29, 0x48) / RIPPLE_SPEED; // Pause
-        assert!(far > 0.5, "Pause is far from Esc");
-        assert_eq!(w(0x48, 0.1), 0.0, "not reached yet");
-        assert!(w(0x48, f64::from(far)) > 0.1, "reached later");
-        assert_eq!(w(0x48, 1.0), 0.0, "gone after the duration");
+        let far = dist(&p, 0x29, 0xFB) / RIPPLE_SPEED; // the screen button
+        assert!(far > 0.5, "the screen button is far from Esc");
+        assert_eq!(w(0xFB, 0.1), 0.0, "not reached yet");
+        assert!(w(0xFB, f64::from(far)) > 0.1, "reached later");
+        assert_eq!(w(0xFB, 1.0), 0.0, "gone after the duration");
     }
 
     #[test]
     fn the_strongest_press_wins_and_nothing_overflows() {
         let l = reactive(ReactiveMode::Fade, 0.6);
-        let p = positions();
+        let p = positions(&US);
         let hits = [Hit { code: 0x04, t: 0.0 }, Hit { code: 0x04, t: 0.3 }];
         assert_eq!(reactive_weight(&l.reactive, &p, 0x04, 0.3, &hits), 1.0);
         assert_eq!(
@@ -412,7 +429,7 @@ mod tests {
             color: RED,
         }];
         l.reactive.color = BLUE;
-        let p = positions();
+        let p = positions(&US);
         let hits = [Hit { code: 0x04, t: 0.0 }];
         assert_eq!(
             color(&l, &p, 0x04, 0.5, &hits, &[]),
@@ -432,7 +449,7 @@ mod tests {
     #[test]
     fn reactive_off_ignores_presses_and_unknown_keys_are_harmless() {
         let mut l = reactive(ReactiveMode::Ripple, 1.0);
-        let p = positions();
+        let p = positions(&US);
         let unknown = [Hit { code: 0x7F, t: 0.0 }]; // not on the TKL
         assert_eq!(color(&l, &p, 0x29, 0.0, &unknown, &[]), Rgb::default());
         l.reactive.enabled = false;
@@ -444,7 +461,7 @@ mod tests {
 
     #[test]
     fn a_bad_duration_lights_nothing() {
-        let p = positions();
+        let p = positions(&US);
         let hits = [Hit { code: 0x04, t: 0.0 }];
         for d in [0.0, -1.0, f32::NAN, f32::INFINITY] {
             for mode in [ReactiveMode::Fade, ReactiveMode::Ripple] {
@@ -462,7 +479,7 @@ mod tests {
     #[test]
     fn effects_stay_smooth_after_weeks_of_uptime() {
         let month = 30.0 * 24.0 * 3600.0; // seconds since the daemon started
-        let p = positions();
+        let p = positions(&US);
         let l = reactive(ReactiveMode::Fade, 0.6);
         let hits = [Hit {
             code: 0x04,
@@ -521,7 +538,7 @@ mod tests {
 
     #[test]
     fn the_visualizer_lights_bars_from_the_bottom_green_to_red() {
-        let p = positions();
+        let p = positions(&US);
         let low = [0.2; 18];
         let space = color(&viz(1.0), &p, 0x2C, 0.0, &[], &low);
         assert_eq!(
@@ -549,7 +566,7 @@ mod tests {
 
     #[test]
     fn columns_are_bands_and_sensitivity_scales_the_bars() {
-        let p = positions();
+        let p = positions(&US);
         let mut bands = [0.0; 18];
         bands[0] = 1.0; // only the leftmost band
         assert_ne!(
@@ -558,9 +575,9 @@ mod tests {
             "Esc is in band 0"
         );
         assert_eq!(
-            color(&viz(1.0), &p, 0x48, 0.0, &[], &bands),
+            color(&viz(1.0), &p, 0xFB, 0.0, &[], &bands),
             Rgb::default(),
-            "Pause is in band 17"
+            "the screen button is in band 17"
         );
         let quiet = [0.1; 18];
         assert_eq!(

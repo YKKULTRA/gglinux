@@ -520,7 +520,7 @@ impl Default for MicMuteLight {
     fn default() -> Self {
         MicMuteLight {
             enabled: false,
-            key: 0x48,
+            key: 0xFB,
             color: Rgb { r: 255, g: 0, b: 0 },
         }
     }
@@ -2243,11 +2243,11 @@ mod tests {
     }
 
     #[test]
-    fn the_mic_mute_light_defaults_off_on_pause_in_red_and_old_files_still_load() {
+    fn the_mic_mute_light_defaults_off_on_the_screen_button_in_red_and_old_files_still_load() {
         let d = MicMuteLight::default();
         assert_eq!(
             (d.enabled, d.key, d.color),
-            (false, 0x48, Rgb { r: 255, g: 0, b: 0 })
+            (false, 0xFB, Rgb { r: 255, g: 0, b: 0 })
         );
         let old = r#"{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}"#;
         assert_eq!(serde_json::from_str::<Lighting>(old).unwrap().mic_mute, d);

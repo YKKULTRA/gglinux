@@ -184,7 +184,7 @@ fn run(files: &[(File, Kind)], stop: &AtomicBool, tx: &Sender<Command>) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gg_device_keyboard::layout::ANSI_TKL;
+    use gg_device_keyboard::layout::US;
     use std::io::Write;
     use std::os::fd::FromRawFd;
     use std::os::unix::fs::PermissionsExt;
@@ -259,7 +259,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let _reader = Reader::spawn(vec![(ours, Kind::Boot)], tx);
         kb.write_all(&[0, 0, 0x65, 0, 0, 0, 0, 0]).unwrap(); // Menu types Application, 0x65
-        let menu = ANSI_TKL.iter().find(|k| k.1 == "Menu").unwrap().0;
+        let menu = US.iter().find(|k| k.1 == "Menu").unwrap().0;
         assert_eq!(code(next(&rx)), menu, "a press the lighting can find");
     }
 

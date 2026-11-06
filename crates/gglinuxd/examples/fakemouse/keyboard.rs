@@ -2,7 +2,7 @@
 //! The fake Apex Pro TKL Gen 3: the keyboard state, lighting and switches as last set. Its
 //! screen, key bindings and onboard slots each have their own module.
 
-use gg_device_keyboard::layout::ANSI_TKL;
+use gg_device_keyboard::layout::US;
 use gg_ipc::{KeyInfo, KeyboardState, Lighting, ReactiveStatus, Request, ResponseData};
 
 use crate::{keyboard_bindings, keyboard_onboard, keyboard_screen, Fake};
@@ -50,7 +50,7 @@ pub fn handle(req: Request, s: &mut Fake) -> ResponseData {
 pub fn fake_keyboard() -> KeyboardState {
     KeyboardState {
         connected: true,
-        layout: ANSI_TKL
+        layout: US
             .iter()
             .map(|&(code, label, x, y, w)| KeyInfo {
                 code,
@@ -80,7 +80,22 @@ mod tests {
     fn the_fake_keyboard_has_every_key_the_daemon_sends_for_drawing() {
         // The Keyboard panel draws, paints and picks the mic-mute key from this.
         let layout = fake_keyboard().layout;
-        assert_eq!(layout.len(), ANSI_TKL.len());
+        assert_eq!(layout.len(), US.len());
         assert!(layout.iter().any(|k| k.label == "Esc"), "{layout:?}");
+    }
+
+    #[test]
+    fn the_fake_keyboard_is_the_us_gen_3_board_with_its_mute_key_on_it() {
+        let kb = fake_keyboard();
+        assert!(
+            kb.layout.iter().all(|k| !(0x46..=0x48).contains(&k.code)),
+            "no Print Screen, Scroll Lock or Pause"
+        );
+        assert!(
+            kb.layout.iter().any(|k| k.code == 0xFB),
+            "the screen button"
+        );
+        let mute = kb.lighting.mic_mute.key;
+        assert!(kb.layout.iter().any(|k| k.code == mute), "{mute:#04x}");
     }
 }
