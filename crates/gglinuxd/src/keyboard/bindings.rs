@@ -19,8 +19,8 @@ use gg_device_keyboard::bindings::{self as kb, Action, Block, Change};
 use gg_device_keyboard::layout::ANSI_TKL;
 use gg_device_keyboard::Keyboard;
 use gg_ipc::{
-    Bindings, BindingsState, Event, Experimental, Feature, KeyAction, KeyBinding, Layer,
-    Request, ResponseData,
+    Bindings, BindingsState, Event, Experimental, Feature, KeyAction, KeyBinding, Layer, Request,
+    ResponseData,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -91,9 +91,7 @@ impl Store {
     fn read(&mut self, device: &Keyboard) -> Result<(), String> {
         let mut layers: Layers = Default::default();
         for (blocks, (_, layer)) in layers.iter_mut().zip(LAYERS) {
-            *blocks = device
-                .read_bindings(layer)
-                .map_err(|e| format!("{e:#}"))?;
+            *blocks = device.read_bindings(layer).map_err(|e| format!("{e:#}"))?;
         }
         self.state.read = Some(decode(&layers));
         if self.base.is_none() {
@@ -109,8 +107,8 @@ impl Store {
         };
         let mut out: Layers = Default::default();
         for (i, (layer, kl)) in LAYERS.into_iter().enumerate() {
-            out[i] = kb::merge(kl, &base[i], &changes(new, old, layer))
-                .map_err(|e| e.to_string())?;
+            out[i] =
+                kb::merge(kl, &base[i], &changes(new, old, layer)).map_err(|e| e.to_string())?;
         }
         Ok(out)
     }
@@ -226,7 +224,9 @@ pub fn on_command(
         }
         Cmd::Read(reply) => {
             let result = gate(exp).and_then(|()| connected(device)).and_then(|d| {
-                store.read(d).inspect_err(|e| store.state.error = Some(e.clone()))
+                store
+                    .read(d)
+                    .inspect_err(|e| store.state.error = Some(e.clone()))
             });
             let _ = reply.send(result.map(|()| store.state.clone()));
         }
@@ -333,9 +333,7 @@ fn check(bindings: &Bindings) -> Result<(), String> {
         }
     }
     match bindings.fn_key {
-        Some(k) if !kb::KEYS.contains(&k) => {
-            Err(format!("{} can't hold the Fn layer", label(k)))
-        }
+        Some(k) if !kb::KEYS.contains(&k) => Err(format!("{} can't hold the Fn layer", label(k))),
         _ => Ok(()),
     }
 }
@@ -575,7 +573,10 @@ mod tests {
             write_report(kb::Layer::Normal, &caps_layer()).unwrap()
         );
         let at = kb::KEYS.iter().position(|&c| c == CAPS).unwrap();
-        assert_eq!(write[4 + at * 6..10 + at * 6], [0x39, 0x51, 0xE0, 0x04, 0, 0]);
+        assert_eq!(
+            write[4 + at * 6..10 + at * 6],
+            [0x39, 0x51, 0xE0, 0x04, 0, 0]
+        );
 
         let state = get(&kb).await;
         assert!(state.enabled);
@@ -589,7 +590,10 @@ mod tests {
             .iter()
             .all(|b| matches!(b.action, KeyAction::Firmware { .. })));
         let saved = std::fs::read_to_string(d.0.join("bindings.json")).unwrap();
-        assert!(saved.contains("\"enabled\": true") && saved.contains("57"), "{saved}");
+        assert!(
+            saved.contains("\"enabled\": true") && saved.contains("57"),
+            "{saved}"
+        );
         assert!(bindings_event(&mut rx).unwrap().enabled);
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
@@ -630,13 +634,25 @@ mod tests {
             if block.code == 0x3A {
                 assert_eq!(sent, [0x3A, 0x61, 0xE2, 0x00, 0, 0]);
             } else {
-                assert_eq!(sent, block.bytes(), "key {:#04x} kept byte for byte", block.code);
+                assert_eq!(
+                    sent,
+                    block.bytes(),
+                    "key {:#04x} kept byte for byte",
+                    block.code
+                );
             }
         }
         let mut fn_layer = stock(kb::Layer::Fn);
-        fn_layer.iter_mut().find(|b| b.code == 0x3A).unwrap().function = 0x61;
+        fn_layer
+            .iter_mut()
+            .find(|b| b.code == 0x3A)
+            .unwrap()
+            .function = 0x61;
         assert_eq!(fake.sent()[5].report[2..34], kb::fn_mask(&fn_layer));
-        assert_eq!(fake.sent()[5].report[2 + 0x3A / 8] & (1 << (0x3A & 7)), 1 << 2);
+        assert_eq!(
+            fake.sent()[5].report[2 + 0x3A / 8] & (1 << (0x3A & 7)),
+            1 << 2
+        );
 
         // A change to one of the shortcuts is refused, and saves and sends nothing.
         let n = fake.sent().len();
@@ -648,7 +664,9 @@ mod tests {
             enabled: true,
         };
         match handle(f9_off, &kb).await {
-            ResponseData::Error { message } => assert!(message.contains("own shortcuts"), "{message}"),
+            ResponseData::Error { message } => {
+                assert!(message.contains("own shortcuts"), "{message}")
+            }
             other => panic!("{other:?}"),
         }
         assert_eq!(fake.sent().len(), n);
@@ -808,10 +826,7 @@ mod tests {
         };
         assert_eq!(
             changes(&new, &old, Layer::Normal),
-            [
-                (0x04, Change::To(Action::Unbound)),
-                (CAPS, Change::Default)
-            ]
+            [(0x04, Change::To(Action::Unbound)), (CAPS, Change::Default)]
         );
         assert!(changes(&new, &old, Layer::Fn).is_empty());
     }
@@ -827,7 +842,9 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert!(
-            names.iter().any(|n| n.starts_with("bindings.json.unreadable")),
+            names
+                .iter()
+                .any(|n| n.starts_with("bindings.json.unreadable")),
             "{names:?}"
         );
     }

@@ -394,10 +394,7 @@ fn board(kb: &KeyboardState, state: &BindingsState, f: &BindingsForm, gated: boo
         .map(|k| {
             let can = bindable(kb, layer, k.code);
             let ours = binding(&state.bindings, layer, k.code);
-            let theirs = state
-                .read
-                .as_ref()
-                .and_then(|r| binding(r, layer, k.code));
+            let theirs = state.read.as_ref().and_then(|r| binding(r, layer, k.code));
             Key {
                 x: k.x,
                 y: k.y,
@@ -764,10 +761,13 @@ mod tests {
             ..Bindings::default()
         };
         let caps = with_binding(&b, Layer::Normal, 0x39, keys(&[0xE0, 0x04]));
-        assert_eq!(caps.normal, [KeyBinding {
-            code: 0x39,
-            action: keys(&[0xE0, 0x04])
-        }]);
+        assert_eq!(
+            caps.normal,
+            [KeyBinding {
+                code: 0x39,
+                action: keys(&[0xE0, 0x04])
+            }]
+        );
         let fn_f1 = with_binding(&b, Layer::Fn, 0x3A, KeyAction::Consumer { usage: 226 });
         assert_eq!((fn_f1.normal.len(), fn_f1.fn_layer.len()), (1, 1));
         assert!(with_binding(&b, Layer::Normal, 0x39, KeyAction::Default)

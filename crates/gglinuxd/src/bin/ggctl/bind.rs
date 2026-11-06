@@ -230,7 +230,9 @@ fn key(name: &str) -> Result<u8> {
     match name.to_ascii_lowercase().as_str() {
         "menu" => Ok(0xE7),
         "fn" | "steelseries" => Ok(0xF0),
-        _ => usage(name).with_context(|| format!("'{name}' is not a key name (try: a, f1, capslock, space, 0x39)")),
+        _ => usage(name).with_context(|| {
+            format!("'{name}' is not a key name (try: a, f1, capslock, space, 0x39)")
+        }),
     }
 }
 
@@ -270,7 +272,9 @@ fn action_of(word: &str) -> Result<KeyAction> {
                 .split('+')
                 .map(|k| {
                     usage(k).with_context(|| {
-                        format!("'{k}' is not a key name (try: ctrl+a, f13, media:playpause, mouse:4)")
+                        format!(
+                            "'{k}' is not a key name (try: ctrl+a, f13, media:playpause, mouse:4)"
+                        )
                     })
                 })
                 .collect::<Result<Vec<u8>>>()?;
@@ -395,7 +399,11 @@ fn print_layers(b: &gg_ipc::Bindings, indent: &str) {
         (Layer::Second, "deep+"),
     ] {
         for k in b.layer(layer) {
-            println!("{indent}{name}{} → {}", key_name(k.code), describe(&k.action));
+            println!(
+                "{indent}{name}{} → {}",
+                key_name(k.code),
+                describe(&k.action)
+            );
             any = true;
         }
     }
@@ -466,7 +474,12 @@ mod tests {
                 0x45,
                 KeyAction::Consumer { usage: 205 },
             ),
-            ("j mouse:4", Layer::Normal, 0x0D, KeyAction::Mouse { button: 4 }),
+            (
+                "j mouse:4",
+                Layer::Normal,
+                0x0D,
+                KeyAction::Mouse { button: 4 },
+            ),
             ("Q default", Layer::Normal, 0x14, KeyAction::Default),
             ("caps f13", Layer::Normal, 0x39, keys(&[0x68])),
             (

@@ -150,7 +150,10 @@ pub enum Action {
     /// Host-assisted; the four bytes as read.
     External([u8; 4]),
     /// A function byte the source doesn't name, as read.
-    Other { function: u8, codes: [u8; 4] },
+    Other {
+        function: u8,
+        codes: [u8; 4],
+    },
 }
 
 impl Action {
@@ -716,7 +719,10 @@ mod tests {
         let many: Vec<u8> = KEYS.iter().cycle().take(107).copied().collect();
         let e = read_request(Layer::Normal, &many).unwrap_err();
         assert!(e.to_string().contains("1 to 106 keys"), "{e}");
-        assert!(read_request(Layer::Normal, &[0x46]).is_err(), "Print Screen");
+        assert!(
+            read_request(Layer::Normal, &[0x46]).is_err(),
+            "Print Screen"
+        );
         assert!(
             read_request(Layer::Second, &[0x29]).is_err(),
             "Esc: fixed switch"
@@ -734,8 +740,8 @@ mod tests {
         assert_eq!(
             r[..16],
             [
-                0x00, 0x36, 0x00, 0x02, 0x04, 0x51, 0x04, 0x00, 0x00, 0x00, 0x39, 0x51, 0xE0,
-                0x04, 0x00, 0x00
+                0x00, 0x36, 0x00, 0x02, 0x04, 0x51, 0x04, 0x00, 0x00, 0x00, 0x39, 0x51, 0xE0, 0x04,
+                0x00, 0x00
             ]
         );
         assert!(r[16..].iter().all(|&b| b == 0));
@@ -749,10 +755,7 @@ mod tests {
             let reports = write_reports(layer, &stock(layer)).unwrap();
             assert_eq!(reports.len(), 1, "{layer:?}");
             let r = &reports[0];
-            assert_eq!(
-                r[..4],
-                [0x00, 0x36, layer.byte(), layer.keys().len() as u8]
-            );
+            assert_eq!(r[..4], [0x00, 0x36, layer.byte(), layer.keys().len() as u8]);
             for (i, b) in stock(layer).iter().enumerate() {
                 assert_eq!(r[4 + i * 6..10 + i * 6], b.bytes());
             }

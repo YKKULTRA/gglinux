@@ -97,8 +97,12 @@ fn set(board: &mut Board, bindings: Bindings, enabled: bool) -> Result<(), Strin
     let base = stock_layers();
     let mut merged: Layers = Default::default();
     for (i, (layer, kl)) in LAYERS.into_iter().enumerate() {
-        merged[i] = kb::merge(kl, &base[i], &changes(&bindings, &board.state.bindings, layer))
-            .map_err(|e| e.to_string())?;
+        merged[i] = kb::merge(
+            kl,
+            &base[i],
+            &changes(&bindings, &board.state.bindings, layer),
+        )
+        .map_err(|e| e.to_string())?;
     }
     if enabled && merged != board.layers {
         board.before = Some(std::mem::replace(&mut board.layers, merged));
