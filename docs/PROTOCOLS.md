@@ -255,7 +255,7 @@ Reuse: `not-jan/apex-tux` `apex-hardware/src/usb.rs` + `device.rs` (Unlicense) �
 >   `index, key1, key2, mode | 0x80 if both report, 0, 0` per pair, at most 10. Modes 0–3 are
 >   documented as last-wins, neither, first-wins, second-wins; not verified anywhere.
 > - **Not built:** key bindings (`36`, which also replaces the Fn layer's shortcuts if written
->   blank), and onboard profile images (`02` erase, `03` write: the flash commands below).
+>   blank). Onboard profile images (`02` erase, `03` write) are §3d's, behind a gate.
 
 Earlier notes:
 No public project implements OmniPoint / Rapid Trigger / Rapid Tap / Protection Mode for *any* Apex
@@ -267,13 +267,81 @@ Pro generation on Linux. This is the project's one real reverse-engineering effo
 - **Method:** capture GG↔keyboard traffic with usbmon/Wireshark (Windows host or Windows-in-VM/Wine),
   diff reports while toggling one setting at a time, decode opcodes + per-key byte layout.
 
-### ⚠ Firmware / bricking DENYLIST (never send)
-SteelSeries "FIZZ" update protocol lives on the `0xFFC0` interface: 9-byte header
-`(cmd u8, fsid, fileid, block-size u16 LE, offset u32 LE, payload)`. **Never emit:**
-`FIZZ_ERASE 0x02`, `FIZZ_FILE_ACCESS 0x03`, `FIZZ_FILE_CRC 0x04`, or any bootloader-entry
-(`custom_enter_boot_bytes`, device-specific, unpublished). **Safe read-only/reversible probes to
-start with:** firmware `0x90`, profile `0x89`, region `0xF5`, RGB `0x40`/`0x41` (already validated
-against `0x1642` by OpenRGB). Keep all fuzzing away from the FIZZ range. (Ref: fwupd discussion #10308.)
+### 3d. Onboard profile slots — `83` read, `02`/`03` erase and write, `B1`, `B2` (built M11, gated off, untested here)
+
+> **Source, adapted:** the same Apex Control reference (CC BY 4.0), "Onboard profiles & the flash
+> filesystem", "Image layout", "CRC", "Writing safely" and "Queries & misc". Its author reports a
+> full slot read, and an erase + 25-chunk write + `B1` + full read-back, as confirmed on one keyboard
+> (fw 1.19.7), first on spare slot 4. gglinux builds them behind `keyboard_onboard` (off by
+> default); none of it has been sent to this keyboard yet.
+>
+> - Every setting command above writes RAM only; at power-up the keyboard loads the active slot's
+>   flash image. Slots 0–4 (shown 1–5) are files `0x80 + slot`. Integers are little-endian.
+> - Read a chunk (feature, write then read): request `83 01 <file> <size u16> <offset u32>`; the
+>   feature read answers `83 <err> <data…>`. gglinux reads 24 × 500 bytes and the last 324.
+> - Erase (output → input): `02 01 <file>`; the input report comes when the erase is done (up to
+>   6 s). What it holds isn't documented: gglinux only waits for it (it must start with `02`).
+> - Write a chunk (feature): `03 01 <file> <size u16> <offset u32> <data…>`, 500-byte chunks about
+>   13 ms apart. gglinux sends the 25th as size 324 at offset 12000, its data padded to 500 bytes
+>   with `0xFF` (see the open point below).
+> - Check (output → input): `B1 <slot>`; gglinux reads `B1 00` as good, `B1 <other>` as bad (the
+>   reference says only that the firmware CRC-checks the slot).
+> - Load (output): `B2 <slot>`, no answer.
+> - Image (profile schema 3, device schema 8, fw ≥ 1.19.0), 12 324 bytes = 12 320-byte body + CRC.
+>   Offsets: 0 schema `3` (u32) · 4 name, 24 bytes ASCII · 28 onboard lighting, 48 (Fn-lit mask at
+>   40) · 76 Fn key, u32 (factory `0xF0`) · 80 normal-layer bindings, 100 × 5 · 580 Fn-layer
+>   bindings, 100 × 5 · 1080 device schema `8` (u32) · 1084 primary actuation, 70 `h` then 70 `l` ·
+>   1224 three zone levels + a 70-byte zone list · 1306 second actuation `h`, `l` (`FF FF` off),
+>   release modes, Rapid Trigger distance, 70 each · 1586 protection ms (u32) + 70 distances ·
+>   1660 second-actuation bindings, 70 × 5 · 2010 screen picture, 640 bytes as `1F 81` · 2650 Rapid
+>   Tap, 10 × `key1, key2, mode | 0x80 both, 0, 0` + the on byte · 2701 padding · 2704 macros, 9 600
+>   bytes · 12304 GUID, 16 · 12320 CRC.
+> - The per-key tables (bindings, actuation, release, distance, protection) are in the firmware's
+>   own key order (`deviceKeyIndexToHID` in ApexKit), which the reference doesn't list. Until
+>   gglinux has it, a write leaves those tables as the slot has them.
+> - CRC: the STM32 CRC unit's CRC-32, polynomial `0x04C11DB7`, init `0xFFFFFFFF`, no reflection,
+>   no final XOR, fed as 32-bit little-endian words over the 12 320 body bytes (the byte-wise
+>   equivalent is CRC-32/MPEG-2 with each word's bytes reversed).
+> - Writing safely, as gglinux does it (`crates/gg-device-keyboard/src/onboard.rs`,
+>   `Keyboard::write_slot`): read the whole slot and check size, schemas and CRC → save a backup
+>   file (`~/.config/gglinux/onboard-backups/slot<N>-<UTC>.bin`, folder 700, file 600) and read it
+>   back; it must equal the slot or nothing is erased → change the image in memory and check it the
+>   same way → erase → 25 chunks → `B1` → read everything back and compare (once more if the first
+>   read differs, as the first read after a change may lag) → on any failure from the erase on,
+>   write the old image back the same way and report both. The worker sends nothing else meanwhile,
+>   so the lighting stream pauses around the write. An unchanged image isn't written.
+>
+> **Open point (settled by the GG capture before the gate is turned on).** The reference writes
+> "25 × 500-byte chunks, last padded `0xFF`", which reads as a 25th chunk of size 500 at offset
+> 12000 (12 500 > 12 324). The allowlist refuses any `03`/`83` running past the image, so gglinux
+> sends size 324 with the same 500 bytes of data after the header. Whether the firmware wants 500
+> there (and whether `B1` cares) is unknown.
+
+### What gglinux sends this keyboard: the allowlist
+
+Every report is checked right before it goes out, by
+[`crates/gg-device-keyboard/src/allow.rs`](../crates/gg-device-keyboard/src/allow.rs) (with
+`ALLOWED`/`ALLOWED_SUB` in `proto.rs`). Shape is checked before the gate, and every refusal says
+which rule refused it.
+
+- **Always:** `40 41 4B 23 A3 90 F5`, the screen's `1F 81`/`1F 82`, and the switches' `38 61` (primary
+  layer `00` only), `38 62`, `38 65`, `38 66`, `38 67`. RAM only.
+- **With `keyboard_bindings` on:** `36`/`B6 <layer 0–2> <count 1–106>`, `35 <key>`, `3C <mask>`, and the
+  second actuation table `38 61 44 02`. RAM only.
+- **With `keyboard_onboard` on, flash:** `02 01 <file>`, `03 01 <file> <size 1–500> <offset>` and
+  `83 01 <file> <size 1–500> <offset>` with `file` `0x80`–`0x84` and `offset + size ≤ 12324`, and
+  `B1`/`B2 <slot 0–4>`. Nothing but zeros may follow their fields (`03`'s data aside).
+- **Never, whatever is on:** `04` (the firmware's file checksum), `02`/`03`/`83` with another
+  sub-command or another file (the other files hold what the keyboard needs to run), `75` (writes the
+  region to flash on every call), `38 83` (a screen picture to flash), any bootloader entry
+  (`custom_enter_boot_bytes`, unpublished) and anything unlisted. A random-report property test runs
+  120 000 reports against the listed shapes.
+
+Background: these opcodes share the `0xFFC0` interface with SteelSeries' "FIZZ" update protocol
+(9-byte header `cmd, fsid, fileid, block-size u16, offset u32, payload`; fwupd discussion #10308),
+which is why the old rule here was "never send `0x02`, `0x03`, `0x04`". The narrow rule keeps the
+update path closed (`04`, other files and sub-commands, the bootloader) while letting the five profile
+slots through, gated. Probing beyond the listed shapes stays off limits on this interface.
 
 ---
 
