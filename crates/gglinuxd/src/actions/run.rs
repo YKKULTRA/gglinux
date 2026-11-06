@@ -35,7 +35,10 @@ pub fn media(usage: u16, spawner: &dyn Spawner) -> Result<Vec<String>, String> {
         PREVIOUS => ("playerctl", &["previous"]),
         STOP => ("playerctl", &["stop"]),
         // At most 100 %, as the desktop's own volume keys.
-        VOLUME_UP => ("wpctl", &["set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "5%+"]),
+        VOLUME_UP => (
+            "wpctl",
+            &["set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "5%+"],
+        ),
         VOLUME_DOWN => ("wpctl", &["set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"]),
         MUTE => ("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]),
         other => return Err(format!("gglinux doesn't know the media key {other:#06x}")),
@@ -140,12 +143,22 @@ mod tests {
     #[test]
     fn media_keys_run_playerctl_and_wpctl() {
         let both = Only(&["playerctl", "wpctl"]);
-        assert_eq!(media(PLAY_PAUSE, &both).unwrap(), ["playerctl", "play-pause"]);
+        assert_eq!(
+            media(PLAY_PAUSE, &both).unwrap(),
+            ["playerctl", "play-pause"]
+        );
         assert_eq!(media(NEXT, &both).unwrap(), ["playerctl", "next"]);
         assert_eq!(media(PREVIOUS, &both).unwrap(), ["playerctl", "previous"]);
         assert_eq!(
             media(VOLUME_UP, &both).unwrap(),
-            ["wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "5%+"]
+            [
+                "wpctl",
+                "set-volume",
+                "-l",
+                "1.0",
+                "@DEFAULT_AUDIO_SINK@",
+                "5%+"
+            ]
         );
         assert_eq!(
             media(MUTE, &both).unwrap(),

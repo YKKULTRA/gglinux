@@ -172,7 +172,11 @@ pub fn join_words(words: &[String]) -> String {
     words
         .iter()
         .map(|w| {
-            if !w.is_empty() && !w.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') {
+            if !w.is_empty()
+                && !w
+                    .chars()
+                    .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+            {
                 w.clone()
             } else {
                 format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\""))
@@ -200,7 +204,12 @@ impl ActionsForm {
     pub fn rows(&mut self, daemon: &[ActionBinding]) -> Vec<Row> {
         match &self.draft {
             Some(rows) => rows.clone(),
-            None => self.pending.show(&daemon.to_vec()).iter().map(Row::of).collect(),
+            None => self
+                .pending
+                .show(&daemon.to_vec())
+                .iter()
+                .map(Row::of)
+                .collect(),
         }
     }
 
@@ -320,9 +329,16 @@ pub fn show(ui: &AppWindow, s: &State) {
         let mut form = f.actions.borrow_mut();
         let rows = form.rows(&st.bindings);
         let save = form.to_save(&st.bindings);
-        (rows, save, form.error.clone(), form.hyprland || on_hyprland())
+        (
+            rows,
+            save,
+            form.error.clone(),
+            form.hyprland || on_hyprland(),
+        )
     });
-    sync_rows(g.get_rows(), rows.iter().map(ui_row).collect(), |m| g.set_rows(m));
+    sync_rows(g.get_rows(), rows.iter().map(ui_row).collect(), |m| {
+        g.set_rows(m)
+    });
     g.set_changed(save.is_some());
     g.set_problem(match &save {
         Some(Err(why)) => capitalised(why).into(),
@@ -362,7 +378,11 @@ fn model(items: impl Iterator<Item = String>) -> ModelRc<SharedString> {
 /// Run `change` on the rows, then redraw the panel.
 fn change(ui: &AppWindow, client: &Client, forms: &Forms, edit: impl FnOnce(&mut Vec<Row>)) {
     let s = client.state();
-    let daemon = s.actions.as_ref().map(|a| a.bindings.clone()).unwrap_or_default();
+    let daemon = s
+        .actions
+        .as_ref()
+        .map(|a| a.bindings.clone())
+        .unwrap_or_default();
     forms.actions.borrow_mut().edit(&daemon, edit);
     show(ui, &s);
 }
@@ -371,7 +391,9 @@ fn change(ui: &AppWindow, client: &Client, forms: &Forms, edit: impl FnOnce(&mut
 pub fn bind(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     let g = ui.global::<ActionsUi>();
     // Set once: a list box resets its pick whenever its model is replaced.
-    g.set_keys(model((FIRST..FIRST + KEYS).filter_map(ActionBinding::key_name)));
+    g.set_keys(model(
+        (FIRST..FIRST + KEYS).filter_map(ActionBinding::key_name),
+    ));
     g.set_kinds(model(KINDS.iter().map(|k| k.to_string())));
     g.set_media(model(MEDIA.iter().map(|m| m.1.to_string())));
 
@@ -424,7 +446,11 @@ pub fn bind(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     g.on_add(move || {
         if let Some(ui) = weak.upgrade() {
             let s = c.state();
-            let daemon = s.actions.as_ref().map(|a| a.bindings.clone()).unwrap_or_default();
+            let daemon = s
+                .actions
+                .as_ref()
+                .map(|a| a.bindings.clone())
+                .unwrap_or_default();
             f.actions.borrow_mut().add(&daemon);
             show(&ui, &s);
         }
@@ -443,7 +469,11 @@ pub fn bind(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     g.on_save(move || {
         let Some(ui) = weak.upgrade() else { return };
         let s = c.state();
-        let daemon = s.actions.as_ref().map(|a| a.bindings.clone()).unwrap_or_default();
+        let daemon = s
+            .actions
+            .as_ref()
+            .map(|a| a.bindings.clone())
+            .unwrap_or_default();
         let Some(Ok(list)) = f.actions.borrow().to_save(&daemon) else {
             return;
         };
@@ -546,16 +576,28 @@ mod tests {
 
     #[test]
     fn a_program_line_splits_into_words_without_a_shell_and_joins_back() {
-        assert_eq!(split_words("kitty --single-instance"), ["kitty", "--single-instance"]);
+        assert_eq!(
+            split_words("kitty --single-instance"),
+            ["kitty", "--single-instance"]
+        );
         assert_eq!(
             split_words(r#"sh -c "echo hi; rm -rf ~" '$HOME' a\b"#),
             ["sh", "-c", "echo hi; rm -rf ~", "$HOME", r"a\b"]
         );
-        assert_eq!(split_words(r#"say "a \"b\" c" """#), ["say", r#"a "b" c"#, ""]);
+        assert_eq!(
+            split_words(r#"say "a \"b\" c" """#),
+            ["say", r#"a "b" c"#, ""]
+        );
         assert!(split_words("   ").is_empty());
         for words in [
             vec!["kitty".to_string()],
-            vec!["echo".into(), "; rm -rf ~".into(), "".into(), r#"x"y'z"#.into(), r"a\b".into()],
+            vec![
+                "echo".into(),
+                "; rm -rf ~".into(),
+                "".into(),
+                r#"x"y'z"#.into(),
+                r"a\b".into(),
+            ],
         ] {
             assert_eq!(split_words(&join_words(&words)), words, "{words:?}");
         }
@@ -564,9 +606,27 @@ mod tests {
     #[test]
     fn rows_and_bindings_turn_into_each_other() {
         let list = vec![
-            binding(0x68, "Terminal", Action::Run { argv: vec!["kitty".into(), "--hold".into()] }),
-            binding(0x69, "Hi", Action::Type { text: "hello there".into() }),
-            binding(0x6A, "Night", Action::ProfileApply { name: "Night".into() }),
+            binding(
+                0x68,
+                "Terminal",
+                Action::Run {
+                    argv: vec!["kitty".into(), "--hold".into()],
+                },
+            ),
+            binding(
+                0x69,
+                "Hi",
+                Action::Type {
+                    text: "hello there".into(),
+                },
+            ),
+            binding(
+                0x6A,
+                "Night",
+                Action::ProfileApply {
+                    name: "Night".into(),
+                },
+            ),
             binding(0x6B, "Clip", Action::ClipSave),
             binding(0x6C, "Louder", Action::Media { usage: 0xE9 }),
         ];
@@ -584,7 +644,13 @@ mod tests {
 
     #[test]
     fn edits_start_from_the_daemons_list_and_save_only_a_change_that_checks_out() {
-        let daemon = vec![binding(0x68, "Terminal", Action::Run { argv: vec!["kitty".into()] })];
+        let daemon = vec![binding(
+            0x68,
+            "Terminal",
+            Action::Run {
+                argv: vec!["kitty".into()],
+            },
+        )];
         let mut form = ActionsForm::default();
         assert_eq!(form.rows(&daemon), [Row::of(&daemon[0])]);
         assert_eq!(form.to_save(&daemon), None, "nothing edited");
@@ -596,7 +662,12 @@ mod tests {
         assert_eq!(why, "the action on F14 needs a program to run");
         form.edit(&daemon, |rows| rows[1].value = "foot".into());
         let list = form.to_save(&daemon).unwrap().unwrap();
-        assert_eq!(list[1].action, Action::Run { argv: vec!["foot".into()] });
+        assert_eq!(
+            list[1].action,
+            Action::Run {
+                argv: vec!["foot".into()]
+            }
+        );
         // Editing it back is no change.
         form.edit(&daemon, |rows| {
             rows.pop();
@@ -608,12 +679,21 @@ mod tests {
             rows[1].key = 0x68;
             rows[1].kind = CLIP;
         });
-        assert_eq!(form.to_save(&daemon).unwrap().unwrap_err(), "F13 has two actions");
+        assert_eq!(
+            form.to_save(&daemon).unwrap().unwrap_err(),
+            "F13 has two actions"
+        );
     }
 
     #[test]
     fn a_saved_list_shows_until_the_daemon_shows_it_even_past_a_stale_read() {
-        let old = vec![binding(0x68, "Terminal", Action::Run { argv: vec!["kitty".into()] })];
+        let old = vec![binding(
+            0x68,
+            "Terminal",
+            Action::Run {
+                argv: vec!["kitty".into()],
+            },
+        )];
         let mut new = old.clone();
         new.push(binding(0x69, "Clip", Action::ClipSave));
         let mut form = ActionsForm::default();
@@ -624,7 +704,11 @@ mod tests {
         assert_eq!(shown, new, "the daemon's first read still has the old list");
         assert_eq!(form.rows(&new).len(), 2);
         form.pending.settle();
-        assert_eq!(form.rows(&old).len(), 1, "the reads are over: the daemon's list stands");
+        assert_eq!(
+            form.rows(&old).len(),
+            1,
+            "the reads are over: the daemon's list stands"
+        );
     }
 
     #[test]
@@ -642,9 +726,15 @@ mod tests {
     fn the_notes_say_what_the_desktop_bound_whether_typing_works_and_the_hyprland_lines() {
         let mut st = ActionsState::default();
         assert!(shortcuts_note(&st, false).contains("KDE asks you to confirm"));
-        assert_eq!(shortcuts_note(&st, true), "The desktop hasn't bound these keys yet.");
+        assert_eq!(
+            shortcuts_note(&st, true),
+            "The desktop hasn't bound these keys yet."
+        );
         st.shortcuts = Some("bound (fake)".into());
-        assert_eq!(shortcuts_note(&st, true), "Desktop shortcuts: bound (fake).");
+        assert_eq!(
+            shortcuts_note(&st, true),
+            "Desktop shortcuts: bound (fake)."
+        );
         assert!(typing_note(false).contains("Plasma needs its remote-desktop permission"));
         assert!(typing_note(false).contains("wtype"));
         let (lua, conf) = hyprland_lines(&[0x68, 0x73]);

@@ -59,13 +59,16 @@ const MEDIA: [(&str, u16, &str); 7] = [
     ("voldown", 0xEA, "Volume down"),
 ];
 
-const USAGE: &str = "usage: ggctl actions [set f13..f24 run|type|profile|clip|media … | rm f13..f24]";
+const USAGE: &str =
+    "usage: ggctl actions [set f13..f24 run|type|profile|clip|media … | rm f13..f24]";
 
 pub fn command(rest: &[&str]) -> Result<Command> {
     Ok(match rest {
         [] => Command::List,
         ["rm", key] => Command::Edit(Edit::Remove(spare_key(key)?)),
-        ["set", key, kind, what @ ..] => Command::Edit(Edit::Set(binding(spare_key(key)?, kind, what)?)),
+        ["set", key, kind, what @ ..] => {
+            Command::Edit(Edit::Set(binding(spare_key(key)?, kind, what)?))
+        }
         _ => bail!("{USAGE}"),
     })
 }
@@ -96,10 +99,8 @@ fn binding(key: u8, kind: &str, what: &[&str]) -> Result<ActionBinding> {
         ("profile", [_, ..]) => (joined.clone(), Do::ProfileApply { name: joined }),
         ("clip", []) => ("Save clip".to_string(), Do::ClipSave),
         ("media", [name]) => {
-            let (_, usage, label) = MEDIA
-                .iter()
-                .find(|(n, _, _)| n == name)
-                .with_context(|| {
+            let (_, usage, label) =
+                MEDIA.iter().find(|(n, _, _)| n == name).with_context(|| {
                     let names: Vec<&str> = MEDIA.iter().map(|(n, _, _)| *n).collect();
                     format!("no media key '{name}' (try: {})", names.join(", "))
                 })?;
@@ -173,9 +174,19 @@ fn lines(state: &ActionsState, hyprland: bool) -> Vec<String> {
     }
     if hyprland && !state.bindings.is_empty() {
         out.push("Hyprland binds them only from its config. In hyprland.lua:".into());
-        out.extend(state.bindings.iter().map(|b| format!("  {}", lua_line(b.key))));
+        out.extend(
+            state
+                .bindings
+                .iter()
+                .map(|b| format!("  {}", lua_line(b.key))),
+        );
         out.push("or in hyprland.conf:".into());
-        out.extend(state.bindings.iter().map(|b| format!("  {}", conf_line(b.key))));
+        out.extend(
+            state
+                .bindings
+                .iter()
+                .map(|b| format!("  {}", conf_line(b.key))),
+        );
     }
     out
 }
@@ -234,25 +245,47 @@ mod tests {
         assert_eq!(command(&[]).unwrap(), Command::List);
         let b = set("set f13 run kitty");
         assert_eq!((b.key, b.label.as_str()), (0x68, "kitty"));
-        assert_eq!(b.action, Do::Run { argv: vec!["kitty".into()] });
+        assert_eq!(
+            b.action,
+            Do::Run {
+                argv: vec!["kitty".into()]
+            }
+        );
         assert_eq!(
             set("set F14 type hello there").action,
-            Do::Type { text: "hello there".into() }
+            Do::Type {
+                text: "hello there".into()
+            }
         );
         assert_eq!(
             set("set f15 profile Night").action,
-            Do::ProfileApply { name: "Night".into() }
+            Do::ProfileApply {
+                name: "Night".into()
+            }
         );
         assert_eq!(set("set f16 clip").action, Do::ClipSave);
-        assert_eq!(set("set f17 media playpause").action, Do::Media { usage: 0xCD });
-        assert_eq!(set("set f24 media voldown").action, Do::Media { usage: 0xEA });
+        assert_eq!(
+            set("set f17 media playpause").action,
+            Do::Media { usage: 0xCD }
+        );
+        assert_eq!(
+            set("set f24 media voldown").action,
+            Do::Media { usage: 0xEA }
+        );
         assert_eq!(edit("rm f13"), Edit::Remove(0x68));
     }
 
     #[test]
     fn a_program_and_its_arguments_reach_no_shell() {
         // As the shell hands them over: a quoted word stays one word unless it has spaces.
-        let words = ["set", "f13", "run", "/usr/bin/kitty --single-instance", ";", "rm"];
+        let words = [
+            "set",
+            "f13",
+            "run",
+            "/usr/bin/kitty --single-instance",
+            ";",
+            "rm",
+        ];
         let Command::Edit(Edit::Set(b)) = command(&words).unwrap() else {
             panic!("not a set");
         };
@@ -296,7 +329,12 @@ mod tests {
         set_on(&mut list, "set f14 clip");
         set_on(&mut list, "set f13 run foot");
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].action, Do::Run { argv: vec!["foot".into()] });
+        assert_eq!(
+            list[0].action,
+            Do::Run {
+                argv: vec!["foot".into()]
+            }
+        );
         edit("rm f14").apply(&mut list).unwrap();
         assert_eq!(list.len(), 1);
         let e = edit("rm f14").apply(&mut list).unwrap_err();
@@ -326,7 +364,9 @@ mod tests {
         assert!(lines.contains(
             &r#"  hl.bind("F13", hl.dsp.global("io.github.ykk.gglinux:action-f13"))"#.to_string()
         ));
-        assert!(lines.contains(&"  bind = , F17, global, io.github.ykk.gglinux:action-f17".to_string()));
+        assert!(
+            lines.contains(&"  bind = , F17, global, io.github.ykk.gglinux:action-f17".to_string())
+        );
         let elsewhere = super::lines(&state, false);
         assert!(!elsewhere.iter().any(|l| l.contains("hl.bind")));
         let empty = super::lines(&ActionsState::default(), true);

@@ -246,7 +246,8 @@ struct Live {
 impl Drop for Live {
     fn drop(&mut self) {
         self.listener.abort();
-        if let (Some(session), Ok(rt)) = (self.session.take(), tokio::runtime::Handle::try_current())
+        if let (Some(session), Ok(rt)) =
+            (self.session.take(), tokio::runtime::Handle::try_current())
         {
             rt.spawn(async move {
                 let _ = session.close().await;
@@ -267,7 +268,14 @@ mod tests {
         for k in 0x68..=0x73 {
             assert_eq!(key(&id(k).unwrap()), Some(k));
         }
-        for bad in ["action-f12", "action-f25", "action-f013", "save-clip", "action-fx", ""] {
+        for bad in [
+            "action-f12",
+            "action-f25",
+            "action-f013",
+            "save-clip",
+            "action-fx",
+            "",
+        ] {
             assert_eq!(key(bad), None, "{bad}");
         }
     }
@@ -280,7 +288,10 @@ mod tests {
             "bound: F13 → F13, F14 → no key yet"
         );
         assert_eq!(
-            status(&[pair("action-f13", ""), pair("action-f15", "")], "Hyprland"),
+            status(
+                &[pair("action-f13", ""), pair("action-f15", "")],
+                "Hyprland"
+            ),
             "bound: Hyprland takes F13, F15 from its config"
         );
         assert!(status(&[pair("action-f13", "")], "sway").contains("shortcut settings"));
@@ -289,7 +300,10 @@ mod tests {
 
     #[test]
     fn a_failure_without_the_app_id_points_at_the_desktop_entry() {
-        assert_eq!(failure("boom", true), "the desktop didn't bind the keys: boom");
+        assert_eq!(
+            failure("boom", true),
+            "the desktop didn't bind the keys: boom"
+        );
         assert!(failure("An app id is required", false).contains("io.github.ykk.gglinux.desktop"));
     }
 }

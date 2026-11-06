@@ -48,9 +48,6 @@ pub fn handle(req: Request, _s: &mut Fake) -> ResponseData {
             }
             ResponseData::Success
         }
-        other => error(format!(
-            "{} is not an actions request",
-            method_name(&other)
-        )),
+        other => error(format!("{} is not an actions request", method_name(&other))),
     }
 }

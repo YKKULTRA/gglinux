@@ -77,9 +77,13 @@ async fn typed_text_goes_to_wtype_as_one_argument_after_the_dashes() {
     let d = Scratch::new("actions-type");
     let (s, fakes, _) = service(&d);
     let text = "-n hello; world";
-    s.set(vec![bind(F14, "Greeting", Action::Type { text: text.into() })])
-        .await
-        .unwrap();
+    s.set(vec![bind(
+        F14,
+        "Greeting",
+        Action::Type { text: text.into() },
+    )])
+    .await
+    .unwrap();
     s.activated("action-f14").await;
     assert_eq!(fakes.spawner.spawned(), [["wtype", "--", text]]);
 }
@@ -92,9 +96,13 @@ async fn where_typing_doesnt_work_nothing_is_typed_and_the_error_says_why() {
     let why = "Plasma needs its remote-desktop permission for typing; not built yet";
     let s = fakes.service(d.0.join("actions.json"), Err(why.into()), event_tx);
     assert!(!s.state().typing);
-    s.set(vec![bind(F14, "Greeting", Action::Type { text: "hi".into() })])
-        .await
-        .unwrap();
+    s.set(vec![bind(
+        F14,
+        "Greeting",
+        Action::Type { text: "hi".into() },
+    )])
+    .await
+    .unwrap();
     s.activated("action-f14").await;
     assert!(fakes.spawner.spawned().is_empty());
     let error = last_announced(&mut events).and_then(|st| st.error).unwrap();
@@ -138,10 +146,16 @@ async fn an_unchanged_list_doesnt_rebind_and_new_actions_on_the_same_keys_dont_e
 
     s.set(list.clone()).await.unwrap();
     assert_eq!(fakes.portal.binds().len(), 1, "same list: no new bind");
-    assert!(last_announced(&mut events).is_none(), "and nothing to announce");
+    assert!(
+        last_announced(&mut events).is_none(),
+        "and nothing to announce"
+    );
 
     // Other programs and names, the same keys in another order: saved, not rebound.
-    let changed = vec![run(F14, &["alacritty"]), run(F13, &["kitty", "--single-instance"])];
+    let changed = vec![
+        run(F14, &["alacritty"]),
+        run(F13, &["kitty", "--single-instance"]),
+    ];
     s.set(changed.clone()).await.unwrap();
     assert_eq!(fakes.portal.binds().len(), 1);
     assert_eq!(last_announced(&mut events).unwrap().bindings, changed);
@@ -171,7 +185,10 @@ async fn a_rebind_failure_leaves_the_old_keys_working_and_says_why() {
     assert_eq!(fakes.portal.binds().len(), 2, "it did ask");
     let announced = last_announced(&mut events).unwrap();
     assert_eq!(announced.bindings, old, "the old list stands");
-    assert_eq!(announced.error.as_deref(), Some("the owner closed the dialog"));
+    assert_eq!(
+        announced.error.as_deref(),
+        Some("the owner closed the dialog")
+    );
     assert_eq!(store::load(&d.0.join("actions.json")).bindings, old);
 
     // The old key still runs the old action.
@@ -200,7 +217,11 @@ async fn a_restart_binds_the_keys_of_last_time_again_and_asks_for_no_new_ones() 
     assert_eq!(s.state().bindings.len(), 2, "the list is there at once");
 
     s.restore().await.unwrap();
-    assert_eq!(fakes.portal.binds(), [["action-f13"]], "only what was bound");
+    assert_eq!(
+        fakes.portal.binds(),
+        [["action-f13"]],
+        "only what was bound"
+    );
     assert_eq!(
         last_announced(&mut events).unwrap().shortcuts.as_deref(),
         Some("bound (fake)")
@@ -256,7 +277,13 @@ async fn profiles_clips_and_media_keys_go_where_they_belong() {
     let d = Scratch::new("actions-kinds");
     let (s, fakes, _) = service(&d);
     s.set(vec![
-        bind(F13, "Night", Action::ProfileApply { name: "Night".into() }),
+        bind(
+            F13,
+            "Night",
+            Action::ProfileApply {
+                name: "Night".into(),
+            },
+        ),
         bind(F14, "Clip", Action::ClipSave),
         bind(F15, "Play", Action::Media { usage: PLAY_PAUSE }),
         bind(0x6B, "Louder", Action::Media { usage: VOLUME_UP }),
@@ -271,7 +298,14 @@ async fn profiles_clips_and_media_keys_go_where_they_belong() {
         fakes.spawner.spawned(),
         [
             vec!["playerctl", "play-pause"],
-            vec!["wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "5%+"]
+            vec![
+                "wpctl",
+                "set-volume",
+                "-l",
+                "1.0",
+                "@DEFAULT_AUDIO_SINK@",
+                "5%+"
+            ]
         ]
     );
 }
@@ -284,7 +318,10 @@ async fn removing_every_action_closes_the_session() {
     s.set(Vec::new()).await.unwrap();
     assert_eq!(fakes.portal.binds()[1], Vec::<String>::new());
     assert_eq!(s.state().shortcuts, None);
-    assert_eq!(store::load(&d.0.join("actions.json")), store::Saved::default());
+    assert_eq!(
+        store::load(&d.0.join("actions.json")),
+        store::Saved::default()
+    );
 }
 
 #[tokio::test]
@@ -293,7 +330,13 @@ async fn get_and_set_are_answered_and_a_change_is_announced() {
     let (s, _fakes, mut events) = service(&d);
     let list = vec![run(F13, &["kitty"])];
     assert!(matches!(
-        serve(Request::SetActions { bindings: list.clone() }, &s).await,
+        serve(
+            Request::SetActions {
+                bindings: list.clone()
+            },
+            &s
+        )
+        .await,
         ResponseData::Success
     ));
     assert_eq!(last_announced(&mut events).unwrap().bindings, list);

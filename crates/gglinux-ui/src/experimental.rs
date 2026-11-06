@@ -241,7 +241,11 @@ mod tests {
         assert_eq!(shown(&mut form, &before), after, "a lagging read");
         assert_eq!(shown(&mut form, &after), after);
         assert!(!form.pending.waiting(), "seen back: done");
-        assert_eq!(shown(&mut form, &before), before, "a later change elsewhere shows");
+        assert_eq!(
+            shown(&mut form, &before),
+            before,
+            "a later change elsewhere shows"
+        );
 
         // Never seen back: once the reads are over, the daemon's word stands.
         form.pending.sent(after);
