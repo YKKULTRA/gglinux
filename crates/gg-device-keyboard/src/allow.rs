@@ -9,9 +9,10 @@
 //! Two gated families come on top, each only while its experimental gate is on
 //! ([`Families`]; both off by default):
 //!
-//! - **bindings** (`keyboard_bindings`): `36 <layer 0..=2> <count 1..=106> <blocks>` (a
-//!   feature report: write a layer's bindings), `B6 <layer> <count> <blocks>` (a feature
-//!   report: ask for them back), `35 <key>` (an output report: the Fn key, then zeros),
+//! - **bindings** (`keyboard_bindings`): `36 <layer 0..=2> <count> <blocks>` (a feature
+//!   report: write a layer's bindings, whole: 91 keys on layers 0 and 1, 68 on layer 2),
+//!   `B6 <layer> <count 1..=106> [key, 0 × 5] × count` (a feature report: ask for them
+//!   back), `35 <key>` (an output report: the Fn key, then zeros),
 //!   `3C <32-byte mask>` (an output report: the Fn-lit keys, then zeros) and the second
 //!   actuation point's table `38 61 44 02 [key, h, l] × 68`. RAM only.
 //! - **onboard** (`keyboard_onboard`), the profile slots in flash: `02 01 <file>` (erase),
@@ -200,8 +201,12 @@ fn open(report: &[u8], family: Family, on: bool) -> Result<()> {
     Ok(())
 }
 
-/// `36`/`B6 <layer> <count>` and room for `count` blocks.
+/// `36`/`B6 <layer> <count>` and room for `count` blocks. A `36` writes a layer whole
+/// ("every write is a complete frame for its layer"): 91 keys on layers 0 and 1, 68 on
+/// layer 2. A `B6` names each key alone: `[key, 0 × 5]`.
 fn binding_blocks(r: &[u8]) -> Result<()> {
+    /// The keys on the normal and Fn layers.
+    const WHOLE_LAYER: usize = 91;
     let op = r[1];
     let layer = r.get(2).copied();
     ensure!(
@@ -223,6 +228,25 @@ fn binding_blocks(r: &[u8]) -> Result<()> {
         "keyboard command {op:#04x}: {count} keys need {need} bytes, the report has {}",
         r.len()
     );
+    let layer = r[2];
+    if op == OP_BINDINGS {
+        let whole = if layer == SECOND_LAYER {
+            ANALOG_KEYS.len()
+        } else {
+            WHOLE_LAYER
+        };
+        ensure!(
+            usize::from(count) == whole,
+            "keyboard command 0x36 writes a whole layer, {WHOLE_LAYER} keys on layers 0 and 1 \
+             and {} on layer 2: not {count} keys on layer {layer}",
+            ANALOG_KEYS.len()
+        );
+    } else if let Some(i) = r[4..need]
+        .chunks(BLOCK)
+        .position(|b| b[1..].iter().any(|&x| x != 0))
+    {
+        bail!("keyboard command 0xb6 names each key alone, and block {i} has more than its key");
+    }
     Ok(())
 }
 
@@ -394,17 +418,33 @@ mod tests {
     const BINDINGS_GATE: &str = "keyboard_bindings";
     const ONBOARD_GATE: &str = "keyboard_onboard";
 
-    /// A bindings report: `op layer count`, then `count` blocks, in `len` bytes.
+    /// A bindings report: `op layer count`, then `count` blocks, in `len` bytes. A write's
+    /// blocks are keys typing themselves; a read request's, the keys alone.
     fn bindings_report(op: u8, layer: u8, count: u8, len: usize) -> Vec<u8> {
         let mut r = report(len, &[op, layer, count]);
         for i in 0..usize::from(count) {
             let at = 4 + i * BLOCK;
             if at + BLOCK <= len {
+                let key = 0x04 + i as u8;
                 // `04 51 04 00 00 00`: A sends A, the doc's resting state.
-                r[at..at + BLOCK].copy_from_slice(&[0x04 + i as u8, 0x51, 0x04 + i as u8, 0, 0, 0]);
+                let block = if op == OP_READ_BINDINGS {
+                    [key, 0, 0, 0, 0, 0]
+                } else {
+                    [key, 0x51, key, 0, 0, 0]
+                };
+                r[at..at + BLOCK].copy_from_slice(&block);
             }
         }
         r
+    }
+
+    /// A whole layer's key count: 91 on the normal and Fn layers, 68 past the second point.
+    fn whole(layer: u8) -> u8 {
+        if layer == SECOND_LAYER {
+            68
+        } else {
+            91
+        }
     }
 
     #[test]
@@ -412,31 +452,70 @@ mod tests {
         for op in [OP_BINDINGS, OP_READ_BINDINGS] {
             for layer in LAYERS {
                 passes_only_with(
-                    &bindings_report(op, layer, 1, FEATURE_REPORT),
+                    &bindings_report(op, layer, whole(layer), FEATURE_REPORT),
                     &[BINDINGS_ON, BOTH],
                     BINDINGS_GATE,
                 );
             }
-            let full = bindings_report(op, 0, 106, FEATURE_REPORT);
-            assert_eq!(4 + 106 * BLOCK, 640, "106 blocks fit a feature report");
-            passes_only_with(&full, &[BINDINGS_ON, BOTH], BINDINGS_GATE);
             // Exactly long enough for its blocks.
             passes_only_with(
-                &bindings_report(op, 1, 2, 4 + 2 * BLOCK),
+                &bindings_report(op, 1, 91, 4 + 91 * BLOCK),
                 &[BINDINGS_ON, BOTH],
                 BINDINGS_GATE,
             );
-            never(&bindings_report(op, 3, 1, FEATURE_REPORT), "layer 0x03");
-            never(&bindings_report(op, 0xFF, 1, FEATURE_REPORT), "layer 0xff");
+            never(&bindings_report(op, 3, 91, FEATURE_REPORT), "layer 0x03");
+            never(&bindings_report(op, 0xFF, 91, FEATURE_REPORT), "layer 0xff");
             never(&bindings_report(op, 0, 0, FEATURE_REPORT), "0 keys");
             never(&bindings_report(op, 0, 107, FEATURE_REPORT), "107 keys");
             never(
-                &bindings_report(op, 0, 2, 4 + 2 * BLOCK - 1),
-                "need 16 bytes",
+                &bindings_report(op, 0, 91, 4 + 91 * BLOCK - 1),
+                "need 550 bytes",
             );
             never(&report(3, &[op, 0]), "count");
-            never(&report(FEATURE_REPORT + 1, &[op, 0, 1]), "645 bytes");
+            never(&report(FEATURE_REPORT + 1, &[op, 0, 91]), "645 bytes");
         }
+        // A read request may ask for any 1 to 106 keys.
+        let full = bindings_report(OP_READ_BINDINGS, 0, 106, FEATURE_REPORT);
+        assert_eq!(4 + 106 * BLOCK, 640, "106 blocks fit a feature report");
+        passes_only_with(&full, &[BINDINGS_ON, BOTH], BINDINGS_GATE);
+        passes_only_with(
+            &bindings_report(OP_READ_BINDINGS, 1, 2, 4 + 2 * BLOCK),
+            &[BINDINGS_ON, BOTH],
+            BINDINGS_GATE,
+        );
+        never(
+            &bindings_report(OP_READ_BINDINGS, 0, 2, 4 + 2 * BLOCK - 1),
+            "need 16 bytes",
+        );
+    }
+
+    #[test]
+    fn a_layer_write_is_the_whole_layer_and_a_read_request_names_keys_alone() {
+        // "Every write is a complete frame for its layer": 91, 91 and 68 keys.
+        for (layer, count) in [
+            (0, 90),
+            (0, 92),
+            (1, 68),
+            (2, 91),
+            (2, 67),
+            (0, 1),
+            (2, 106),
+        ] {
+            never(
+                &bindings_report(OP_BINDINGS, layer, count, FEATURE_REPORT),
+                &format!("{count} keys on layer {layer}"),
+            );
+        }
+        // `B6 <layer> <count> [key, 0 × 5] × count`: nothing after a key in its block.
+        for byte in 1..BLOCK {
+            let mut r = bindings_report(OP_READ_BINDINGS, 1, 3, FEATURE_REPORT);
+            r[4 + 2 * BLOCK + byte] = 0x51;
+            never(&r, "names each key alone");
+        }
+        // Past the blocks, a read request is the report's zero padding as before.
+        let r = bindings_report(OP_READ_BINDINGS, 1, 3, FEATURE_REPORT);
+        assert!(r[4 + 3 * BLOCK..].iter().all(|&b| b == 0));
+        passes_only_with(&r, &[BINDINGS_ON, BOTH], BINDINGS_GATE);
     }
 
     #[test]
@@ -715,16 +794,28 @@ mod tests {
         let op = rng.pick(&OPS);
         match op {
             OP_BINDINGS | OP_READ_BINDINGS => {
-                let count = 1 + rng.below(106) as u8;
+                let layer = rng.below(3) as u8;
+                let count = if op == OP_BINDINGS {
+                    whole(layer)
+                } else {
+                    1 + rng.below(106) as u8
+                };
                 let need = 4 + BLOCK * usize::from(count);
                 let mut r = bindings_report(
                     op,
-                    rng.below(3) as u8,
+                    layer,
                     count,
                     need + rng.below(FEATURE_REPORT - need + 1),
                 );
-                for b in r.iter_mut().skip(4).take(BLOCK * usize::from(count)) {
-                    *b = rng.byte();
+                for (i, b) in r
+                    .iter_mut()
+                    .skip(4)
+                    .take(BLOCK * usize::from(count))
+                    .enumerate()
+                {
+                    if op == OP_BINDINGS || i % BLOCK == 0 {
+                        *b = rng.byte();
+                    }
                 }
                 r
             }
@@ -854,6 +945,11 @@ mod tests {
                     && fits
                     && matches!(at(2), Some(0..=2))
                     && matches!(at(3), Some(n) if (1..=106).contains(&n) && r.len() >= 4 + 6 * n as usize)
+                    && if r[1] == 0x36 {
+                        at(3) == Some(if at(2) == Some(2) { 68 } else { 91 })
+                    } else {
+                        (0..usize::from(r[3])).all(|i| r[5 + 6 * i..10 + 6 * i] == [0; 5])
+                    }
             }
             0x35 => f.bindings && fits && r.len() >= 3 && zeros_from(3),
             0x3C => f.bindings && fits && r.len() >= 34 && zeros_from(34),

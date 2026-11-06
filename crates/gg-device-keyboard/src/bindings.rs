@@ -30,8 +30,9 @@ use crate::Keyboard;
 /// light (`04`–`45`, `49`–`52`, `E0`–`E7`, `F0`) and every key with an adjustable switch
 /// (adding the ISO and JIS keys `64`, `87`–`8B`): 92 keys. The one left out is `FB`, the
 /// play/pause button beside the screen, taken to be hard-wired like the other media
-/// buttons. The keyboard's answer to the first read on hardware settles it: a read
-/// names any key it doesn't report.
+/// buttons. A wrong guess doesn't always make a read fail: the keyboard answers only for
+/// the keys asked, so a key missing here goes unnoticed, and one it lacks might still get
+/// a block. The list is checked read-only against a slot image before the first write.
 pub const KEYS: [u8; 91] = [
     0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13,
     0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23,
@@ -69,6 +70,13 @@ const MAX_BLOCKS: usize = *BLOCKS.end() as usize;
 /// `(h, l)` for a key without a second actuation point, as the flash image marks one.
 /// Unverified for the RAM table until a capture shows it; the gate stays off till then.
 pub const NO_SECOND_POINT: (u8, u8) = (0xFF, 0xFF);
+/// The key that holds the Fn layer from the factory: the SteelSeries key (the flash
+/// image's "Fn trigger key … factory `0xF0`").
+pub const STOCK_FN_KEY: u8 = 0xF0;
+/// How long a read waits before it asks again, when the keyboard's answer was still the
+/// one to the command before ("the feature read slot holds the response to the last
+/// command"). The source gives no time; one short retry is all a read gets.
+const READ_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// What a stock keyboard's Fn layer holds, as Apex Control read it: F9–F12, Left GUI, O,
 /// I, T and Q run the keyboard's own shortcuts (brightness, media, the screen menu). For
@@ -303,9 +311,10 @@ fn check_whole(layer: Layer, blocks: &[Block]) -> Result<()> {
 
 /// What to write on `layer`: the layer as the keyboard reported it (`read`, whole) with
 /// `changes` on top, in [`Layer::keys`] order. Keys not changed keep their block byte for
-/// byte, and so does every key holding one of the keyboard's own functions (`62`): those
-/// can't be made again once erased, so a change to one is refused. Opaque actions
-/// ([`Action::kept_only`]) are only accepted where the key already has that very action.
+/// byte, and so does a key asked for the action it already has, and every key holding one
+/// of the keyboard's own functions (`62`): those can't be made again once erased, so a
+/// change to one is refused. Opaque actions ([`Action::kept_only`]) are only accepted
+/// where the key already has that very action.
 pub fn merge(layer: Layer, read: &[Block], changes: &[(u8, Change)]) -> Result<Vec<Block>> {
     check_whole(layer, read)?;
     let mut out: Vec<Block> = layer
@@ -333,13 +342,12 @@ pub fn merge(layer: Layer, read: &[Block], changes: &[(u8, Change)]) -> Result<V
                 );
                 was
             }
+            // The same action may be packed another way (a usage in a later code byte):
+            // the keyboard's own bytes stay.
+            Change::To(_) if same => was,
             Change::Default => Block::default_for(layer, *code),
             Change::To(a) if a.kept_only() => {
-                ensure!(
-                    same,
-                    "key {code:#04x}: {a:?} can only be kept as the keyboard reported it, not made up"
-                );
-                was
+                bail!("key {code:#04x}: {a:?} can only be kept as the keyboard reported it, not made up")
             }
             Change::To(a) => Block::new(*code, a)?,
         };
@@ -503,11 +511,18 @@ pub fn second_actuation_table(second_of: impl Fn(u8) -> Option<u8>) -> Vec<u8> {
 }
 
 impl Keyboard {
-    /// Read `layer` back, every key it has, in [`Layer::keys`] order.
+    /// Read `layer` back, every key it has, in [`Layer::keys`] order. An answer that is
+    /// still another command's (the switch tables' `38 00`, a colour frame's `40 00`) is
+    /// asked for once more, a moment later.
     pub fn read_bindings(&self, layer: Layer) -> Result<Vec<Block>> {
         let mut blocks = Vec::new();
         for asked in layer.keys().chunks(MAX_BLOCKS) {
-            let reply = self.exchange_feature(&read_request(layer, asked)?)?;
+            let request = read_request(layer, asked)?;
+            let mut reply = self.exchange_feature(&request)?;
+            if reply.first() != Some(&OP_READ_BINDINGS) {
+                std::thread::sleep(READ_RETRY);
+                reply = self.exchange_feature(&request)?;
+            }
             blocks.extend(
                 decode_reply(layer, asked, &reply)
                     .with_context(|| format!("reading the {} layer back", layer.name()))?,
@@ -786,6 +801,64 @@ mod tests {
     }
 
     #[test]
+    fn literal_replies_decode_to_the_sources_blocks() {
+        // `B6 00 01 01 | 42 62 01 00 00 00`: the Fn layer, one key, F9 running shortcut 01.
+        let f9 = [0xB6, 0x00, 0x01, 0x01, 0x42, 0x62, 0x01, 0x00, 0x00, 0x00];
+        let got = decode_reply(Layer::Fn, &[0x42], &f9).unwrap();
+        assert_eq!(
+            got,
+            [Block {
+                code: 0x42,
+                function: FIRMWARE,
+                codes: [0x01, 0, 0, 0]
+            }]
+        );
+        assert_eq!(got[0].action(), Action::Firmware([0x01, 0, 0, 0]));
+        // `B6 00 00 02 | 39 51 E0 04 00 00 | 04 51 04 00 00 00`: Caps Lock types Ctrl+A,
+        // A types itself, on the normal layer, padded with zeros as a whole report.
+        let mut normal = vec![0xB6, 0x00, 0x00, 0x02];
+        normal.extend([0x39, 0x51, 0xE0, 0x04, 0x00, 0x00]);
+        normal.extend([0x04, 0x51, 0x04, 0x00, 0x00, 0x00]);
+        normal.resize(FEATURE_REPORT - 1, 0);
+        let got = decode_reply(Layer::Normal, &[0x04, 0x39], &normal).unwrap();
+        assert_eq!(got[0], Block::default_for(Layer::Normal, 0x04));
+        assert_eq!(got[1].action(), Action::Keys(vec![0xE0, 0x04]));
+    }
+
+    #[test]
+    fn a_read_that_finds_another_commands_answer_is_asked_once_more() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        kb.set_families(ON);
+        // The read slot still holds the switch tables' `38 00` the first time.
+        let mut answers = 0;
+        fake.answer_feature_with(Key::sub(0xB6, 0x01), move |_| {
+            answers += 1;
+            if answers == 1 {
+                vec![0x38, 0x00]
+            } else {
+                reply(Layer::Fn, &stock(Layer::Fn))
+            }
+        });
+        assert_eq!(kb.read_bindings(Layer::Fn).unwrap(), stock(Layer::Fn));
+        let request = read_request(Layer::Fn, &KEYS).unwrap();
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 2, "one retry");
+        assert!(sent.iter().all(|s| s.report == request));
+        // Still another command's answer: refused, saying what it found, asked twice only.
+        fake.clear_sent();
+        fake.answer_feature(Key::sub(0xB6, 0x00), &[0x40, 0x00]);
+        let e = format!("{:#}", kb.read_bindings(Layer::Normal).unwrap_err());
+        assert!(e.contains("answered 0x40 0x00"), "{e}");
+        assert_eq!(fake.sent().len(), 2);
+        // A real answer that's wrong isn't asked again.
+        fake.clear_sent();
+        fake.answer_feature(Key::sub(0xB6, 0x00), &[0xB6, 0x01]);
+        assert!(kb.read_bindings(Layer::Normal).is_err());
+        assert_eq!(fake.sent().len(), 1);
+    }
+
+    #[test]
     fn a_reply_that_isnt_one_is_an_error_saying_why() {
         let asked = [0x04];
         let a = [Block::default_for(Layer::Normal, 0x04)];
@@ -841,6 +914,41 @@ mod tests {
         let mut shuffled = read.clone();
         shuffled.reverse();
         assert_eq!(merge(Layer::Normal, &shuffled, &[]).unwrap(), read);
+    }
+
+    #[test]
+    fn a_key_named_with_the_action_it_already_has_keeps_its_block_as_read() {
+        let mut read = stock(Layer::Normal);
+        // The same actions gglinux would make, packed differently: B types B with its
+        // usage in the second code byte, C mutes with bytes after its usage.
+        read[1] = Block {
+            code: 0x05,
+            function: KEYBOARD,
+            codes: [0x00, 0x05, 0x00, 0x00],
+        };
+        read[2] = Block {
+            code: 0x06,
+            function: CONSUMER,
+            codes: [0xE2, 0x00, 0x07, 0x00],
+        };
+        let merged = merge(
+            Layer::Normal,
+            &read,
+            &[
+                (0x05, Change::To(Action::Keys(vec![0x05]))),
+                (0x06, Change::To(Action::Consumer(226))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(merged, read, "byte for byte");
+        // A different action is made new.
+        let merged = merge(
+            Layer::Normal,
+            &read,
+            &[(0x05, Change::To(Action::Keys(vec![0x06])))],
+        )
+        .unwrap();
+        assert_eq!(merged[1].bytes(), [0x05, 0x51, 0x06, 0, 0, 0]);
     }
 
     #[test]
