@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The fake keyboard's screen and screen care, checked as the daemon checks them and echoed back.
+//! Every kind is taken, an animation or the System Monitor too; nothing is drawn, so the
+//! monitor reads nothing of this computer (and never asks its graphics card).
 
 use gg_ipc::{Request, ResponseData};
 
