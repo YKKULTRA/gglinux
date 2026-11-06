@@ -351,9 +351,10 @@ which rule refused it.
   layer `00` only), `38 62`, `38 65`, `38 66`, `38 67`. RAM only.
 - **With `keyboard_bindings` on:** `36`/`B6 <layer 0–2> <count 1–106>`, `35 <key>`, `3C <mask>`, and the
   second actuation table `38 61 44 02`. RAM only.
-- **With `keyboard_onboard` on, flash:** `02 01 <file>`, `03 01 <file> <size 1–500> <offset>` and
-  `83 01 <file> <size 1–500> <offset>` with `file` `0x80`–`0x84` and `offset + size ≤ 12324`, and
-  `B1`/`B2 <slot 0–4>`. Nothing but zeros may follow their fields (`03`'s data aside).
+- **With `keyboard_onboard` on, flash:** `02 01 <file>`, `03 01 <file> F4 01 <offset>` and
+  `83 01 <file> F4 01 <offset>` with `file` `0x80`–`0x84` and `offset` a multiple of 500 from 0 to 12000
+  (500-byte chunks, as Apex Control's code sends them; `03`'s data is the image's bytes there, `0xFF` up to 500,
+  then zeros), and `B1`/`B2 <slot 0–4>`. Nothing but zeros may follow their fields.
 - **Never, whatever is on:** `04` (the firmware's file checksum), `02`/`03`/`83` with another
   sub-command or another file (the other files hold what the keyboard needs to run), `75` (writes the
   region to flash on every call), `38 83` (a screen picture to flash), any bootloader entry

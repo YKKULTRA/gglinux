@@ -73,6 +73,7 @@ ggctl onboard load N                    # make the keyboard run slot N
 ggctl onboard write N current           # write gglinux's screen picture and Rapid Tap into slot N
 ggctl onboard restore N <backup file>   # write a backup into slot N (also: write N <file>)
                                         #   both back the slot up first and put it back on any failure
+ggctl onboard restore N <file> --damaged  # put a backup into a slot that doesn't check out (asks first)
 ggctl actions                           # actions on the spare keys F13–F24, and what the desktop bound
 ggctl actions set f13 run kitty         # or: type <text>, profile <name>, clip, media playpause|next|
                                         #   previous|stop|mute|volup|voldown; a program's own options
