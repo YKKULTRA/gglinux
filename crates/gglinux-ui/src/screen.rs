@@ -699,7 +699,9 @@ fn bind_conversion(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
         move |v: i32| {
             let Some(ui) = weak.upgrade() else { return };
             let mut f = forms.screen.borrow_mut();
-            let Some(a) = f.animation.as_mut() else { return };
+            let Some(a) = f.animation.as_mut() else {
+                return;
+            };
             let before = (a.threshold, a.dither, a.invert);
             change(a, v);
             if before == (a.threshold, a.dither, a.invert) {

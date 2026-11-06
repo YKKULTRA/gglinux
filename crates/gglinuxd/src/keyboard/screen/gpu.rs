@@ -83,7 +83,10 @@ pub enum Shown {
     /// No NVIDIA card, none with the `nvidia` driver, or no answer yet.
     Unknown,
     /// The last answer: use in %, temperature in °C, each if the card gave it.
-    Read { busy: Option<u8>, celsius: Option<i32> },
+    Read {
+        busy: Option<u8>,
+        celsius: Option<i32>,
+    },
 }
 
 /// One NVIDIA graphics card's PCI device in `/sys`.
@@ -317,7 +320,14 @@ pub(super) mod tests {
     #[test]
     fn a_sleeping_card_is_never_asked() {
         let d = Scratch::new("gpu-asleep");
-        device(&d.0, "0000:01:00.0", NVIDIA, "0x030000", "suspended", "nvidia");
+        device(
+            &d.0,
+            "0000:01:00.0",
+            NVIDIA,
+            "0x030000",
+            "suspended",
+            "nvidia",
+        );
         device(&d.0, "0000:00:02.0", "0x8086", "0x030000", "active", "i915");
         let mut gpu = Gpu::new(d.0.clone(), Arc::new(Never));
         let base = Instant::now();
@@ -335,7 +345,14 @@ pub(super) mod tests {
     fn one_sleeping_card_of_two_keeps_both_unasked() {
         let d = Scratch::new("gpu-two");
         device(&d.0, "0000:01:00.0", NVIDIA, "0x030000", "active", "nvidia");
-        device(&d.0, "0000:02:00.0", NVIDIA, "0x030200", "suspended", "nvidia");
+        device(
+            &d.0,
+            "0000:02:00.0",
+            NVIDIA,
+            "0x030200",
+            "suspended",
+            "nvidia",
+        );
         let mut gpu = Gpu::new(d.0.clone(), Arc::new(Never));
         assert_eq!(gpu.read(Instant::now()), Shown::Idle);
     }
@@ -345,7 +362,14 @@ pub(super) mod tests {
         let d = Scratch::new("gpu-awake");
         device(&d.0, "0000:01:00.0", NVIDIA, "0x030000", "active", "nvidia");
         // The audio function of the same card isn't a display controller.
-        device(&d.0, "0000:01:00.1", NVIDIA, "0x040300", "suspended", "snd_hda_intel");
+        device(
+            &d.0,
+            "0000:01:00.1",
+            NVIDIA,
+            "0x040300",
+            "suspended",
+            "snd_hda_intel",
+        );
         let fake = Fake::answering("37, 52\n");
         let mut gpu = Gpu::new(d.0.clone(), fake.clone());
         let base = Instant::now();
@@ -400,7 +424,8 @@ pub(super) mod tests {
     fn the_card_gets_its_whole_idle_time_between_two_questions() {
         let d = Scratch::new("gpu-idle-time");
         device(&d.0, "0000:01:00.0", NVIDIA, "0x030000", "active", "nvidia");
-        let delay = d.0.join("bus/pci/devices/0000:01:00.0/power/autosuspend_delay_ms");
+        let delay =
+            d.0.join("bus/pci/devices/0000:01:00.0/power/autosuspend_delay_ms");
         std::fs::write(delay, "5000\n").unwrap();
         let fake = Fake::answering("1, 35");
         let mut gpu = Gpu::new(d.0.clone(), fake.clone());
@@ -416,11 +441,25 @@ pub(super) mod tests {
     #[test]
     fn no_nvidia_card_or_another_driver_is_unknown_and_never_asked() {
         let d = Scratch::new("gpu-none");
-        device(&d.0, "0000:03:00.0", "0x1002", "0x030000", "active", "amdgpu");
+        device(
+            &d.0,
+            "0000:03:00.0",
+            "0x1002",
+            "0x030000",
+            "active",
+            "amdgpu",
+        );
         let mut gpu = Gpu::new(d.0.clone(), Arc::new(Never));
         assert_eq!(gpu.read(Instant::now()), Shown::Unknown);
         // Handed to a virtual machine: nvidia-smi can't see it.
-        device(&d.0, "0000:01:00.0", NVIDIA, "0x030000", "active", "vfio-pci");
+        device(
+            &d.0,
+            "0000:01:00.0",
+            NVIDIA,
+            "0x030000",
+            "active",
+            "vfio-pci",
+        );
         let mut gpu = Gpu::new(d.0.clone(), Arc::new(Never));
         assert_eq!(gpu.read(Instant::now()), Shown::Unknown);
         let mut nothing = Gpu::new(d.0.join("missing"), Arc::new(Never));

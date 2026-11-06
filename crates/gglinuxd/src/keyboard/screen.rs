@@ -164,7 +164,9 @@ pub fn source_for(screen: &Screen) -> Option<Box<dyn ScreenSource>> {
             date: *date,
         }),
         Screen::Image { pixels } => Box::new(Still(Bitmap::from_rows(pixels).unwrap_or_default())),
-        Screen::Animation { frames, delays_ms } => Box::new(anim::Animation::new(frames, delays_ms)),
+        Screen::Animation { frames, delays_ms } => {
+            Box::new(anim::Animation::new(frames, delays_ms))
+        }
         Screen::Monitor { items } => Box::new(sysmon::Monitor::new(
             items,
             sysmon::Roots::system(),
@@ -493,15 +495,25 @@ mod tests {
         assert_eq!(picture(&text, &now), Some(oled::text("GG")));
         let image = Screen::Image { pixels: lit(0, 0) };
         for still in [text, image] {
-            assert_eq!(source_for(&still).unwrap().next_due(&now), None, "{still:?}");
+            assert_eq!(
+                source_for(&still).unwrap().next_due(&now),
+                None,
+                "{still:?}"
+            );
         }
         let animation = Screen::Animation {
             frames: vec![lit(0, 0), lit(1, 0)],
             delays_ms: vec![100, 100],
         };
         let mut a = source_for(&animation).unwrap();
-        assert_eq!(a.frame(&now), Bitmap::from_rows(&lit(0, 0)).ok(), "the first picture");
-        assert!(a.next_due(&now).is_some_and(|d| d <= Duration::from_millis(102)));
+        assert_eq!(
+            a.frame(&now),
+            Bitmap::from_rows(&lit(0, 0)).ok(),
+            "the first picture"
+        );
+        assert!(a
+            .next_due(&now)
+            .is_some_and(|d| d <= Duration::from_millis(102)));
         // The monitor's source is only made here: drawing it would read this computer.
         let clock_only = Screen::Monitor {
             items: vec![MonitorItem::Clock],
@@ -533,11 +545,17 @@ mod tests {
         assert_eq!(screen.frame(&when(250)), Some(moved(10, 10)), "round again");
 
         screen.care.shift = false;
-        assert_eq!(screen.frame(&when(350)), Bitmap::from_rows(&lit(20, 12)).ok());
+        assert_eq!(
+            screen.frame(&when(350)),
+            Bitmap::from_rows(&lit(20, 12)).ok()
+        );
 
         screen.set_away(true);
         for ms in [400, 500, 600] {
-            assert!(screen.frame(&when(ms)).unwrap().is_dark(), "dark at {ms} ms");
+            assert!(
+                screen.frame(&when(ms)).unwrap().is_dark(),
+                "dark at {ms} ms"
+            );
         }
     }
 
@@ -591,7 +609,11 @@ mod tests {
             bytes as f64 / secs
         );
         assert_eq!(frames.len(), sent.len(), "nothing but pictures");
-        assert!(frames.len() <= 32, "never faster than the delays: {}", frames.len());
+        assert!(
+            frames.len() <= 32,
+            "never faster than the delays: {}",
+            frames.len()
+        );
         assert!(frames.len() >= 15, "and not far behind: {}", frames.len());
         for pair in frames.windows(2) {
             assert_ne!(pair[0].report, pair[1].report, "each picture goes out once");

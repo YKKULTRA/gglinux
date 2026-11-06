@@ -179,7 +179,8 @@ fn to_rows(px: &[[u8; 4]], iw: usize, ih: usize) -> Vec<u8> {
             for y in y0..y1 {
                 for p in &px[y * iw + x0..y * iw + x1] {
                     // Transparent parts are on black.
-                    let l = 0.299 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.114 * f32::from(p[2]);
+                    let l =
+                        0.299 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.114 * f32::from(p[2]);
                     sum += l * f32::from(p[3]) / 255.0;
                 }
             }
@@ -285,7 +286,10 @@ mod gif {
     ) -> Result<bool> {
         let mut r = Reader { bytes, pos: 0 };
         let magic = r.take(6)?;
-        ensure!(magic == b"GIF87a" || magic == b"GIF89a", "it doesn't start like a GIF");
+        ensure!(
+            magic == b"GIF87a" || magic == b"GIF89a",
+            "it doesn't start like a GIF"
+        );
         let (w, h) = (r.u16()?, r.u16()?);
         ensure!(w > 0 && h > 0, "it's {w}x{h}");
         ensure!(w * h <= MOST_PIXELS, "it's {w}x{h}, too big to read here");
@@ -379,7 +383,7 @@ mod gif {
         let mut before = 0;
         for pass in PASSES {
             let (start, step) = pass;
-            if y >= start && (y - start) % step == 0 {
+            if y >= start && (y - start).is_multiple_of(step) {
                 return before + (y - start) / step;
             }
             before += rows_in(pass);
@@ -654,8 +658,11 @@ mod tests {
         0x48, 0xb0, 0x60, 0x80, 0x80, 0x00, 0x3b,
     ];
 
-    /// Every picture of a GIF as (canvas, width, height, delay).
-    fn pictures(bytes: &[u8], most: usize) -> (Vec<(Vec<[u8; 4]>, usize, usize, u32)>, bool) {
+    /// One picture as the whole canvas shows it: pixels, width, height, delay.
+    type Shown = (Vec<[u8; 4]>, usize, usize, u32);
+
+    /// Every picture of a GIF, and whether there were more than `most`.
+    fn pictures(bytes: &[u8], most: usize) -> (Vec<Shown>, bool) {
         let mut all = Vec::new();
         let more = gif::decode(bytes, most, |c, w, h, d| all.push((c.to_vec(), w, h, d))).unwrap();
         (all, more)
@@ -676,7 +683,7 @@ mod tests {
                 for x in 0..20 {
                     assert_eq!(
                         white(canvas[y * 20 + x]),
-                        (x + y + i) % 3 == 0,
+                        (x + y + i).is_multiple_of(3),
                         "picture {i} at ({x}, {y})"
                     );
                 }
@@ -764,7 +771,8 @@ mod tests {
             if p.interlaced {
                 for y in 0..fh {
                     let row = gif::source_row(y, fh);
-                    indices[row * fw..(row + 1) * fw].copy_from_slice(&p.indices[y * fw..(y + 1) * fw]);
+                    indices[row * fw..(row + 1) * fw]
+                        .copy_from_slice(&p.indices[y * fw..(y + 1) * fw]);
                 }
             }
             b.push(2);
@@ -820,7 +828,12 @@ mod tests {
         let file = build(
             3,
             1,
-            &[part((0, 0, 3, 1), 1), window, restored, part((0, 0, 1, 1), 1)],
+            &[
+                part((0, 0, 3, 1), 1),
+                window,
+                restored,
+                part((0, 0, 1, 1), 1),
+            ],
         );
         let (all, _) = pictures(&file, 256);
         let at = |n: usize| -> Vec<u8> { all[n].0.iter().map(|&p| colour(p)).collect() };
@@ -841,7 +854,9 @@ mod tests {
         assert_eq!(delays_ms, &[100, 200, 300], "50 ms is 0.1 s");
         assert_eq!(screen.validate(), Ok(()));
 
-        let many: Vec<Part> = (0..300).map(|i| part((0, 0, 4, 1), (i % 2) as u8)).collect();
+        let many: Vec<Part> = (0..300)
+            .map(|i| part((0, 0, 4, 1), (i % 2) as u8))
+            .collect();
         let (screen, cut) = from_gif(&build(4, 1, &many)).unwrap();
         assert!(cut, "said so");
         match screen {
@@ -853,7 +868,9 @@ mod tests {
         let mut slow = part((0, 0, 4, 1), 1);
         slow.delay_cs = 2000;
         let (screen, _) = from_gif(&build(4, 1, &[slow, part((0, 0, 4, 1), 0)])).unwrap();
-        assert!(matches!(screen, Screen::Animation { delays_ms, .. } if delays_ms == [10_000, 100]));
+        assert!(
+            matches!(screen, Screen::Animation { delays_ms, .. } if delays_ms == [10_000, 100])
+        );
     }
 
     #[test]
@@ -887,6 +904,9 @@ mod tests {
         };
         assert!(format!("{not_gif:#}").contains("reading"), "{not_gif:#}");
         assert!(from_gif(b"\x89PNG\r\n\x1a\n").is_err());
-        assert!(from_gif(b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x3b").is_err(), "no pictures");
+        assert!(
+            from_gif(b"GIF89a\x01\x00\x01\x00\x00\x00\x00\x3b").is_err(),
+            "no pictures"
+        );
     }
 }

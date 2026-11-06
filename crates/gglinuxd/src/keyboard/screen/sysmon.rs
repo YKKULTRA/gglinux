@@ -178,7 +178,10 @@ fn lines(items: &[MonitorItem], r: &Readings) -> Vec<(&'static str, String)> {
 /// desktop's system monitors count them).
 fn gigabytes(used_kib: u64, total_kib: u64) -> String {
     const KIB_PER_GIB: f64 = 1024.0 * 1024.0;
-    let (used, total) = (used_kib as f64 / KIB_PER_GIB, total_kib as f64 / KIB_PER_GIB);
+    let (used, total) = (
+        used_kib as f64 / KIB_PER_GIB,
+        total_kib as f64 / KIB_PER_GIB,
+    );
     if total >= 10.0 {
         format!("{used:.1}/{total:.0} GB")
     } else {
@@ -226,7 +229,10 @@ fn draw(lines: &[(&'static str, String)], chars: usize) -> Bitmap {
 fn scale_for(count: usize, chars: usize) -> usize {
     (1..=3)
         .rev()
-        .find(|&s| chars * 8 * s <= oled::WIDTH && count * 8 * s + 2 * count.saturating_sub(1) <= oled::HEIGHT)
+        .find(|&s| {
+            chars * 8 * s <= oled::WIDTH
+                && count * 8 * s + 2 * count.saturating_sub(1) <= oled::HEIGHT
+        })
         .unwrap_or(1)
 }
 
@@ -486,7 +492,14 @@ mod tests {
         };
         assert_eq!(
             shown(&r),
-            ["CPU 12%", "CPU 54°C", "RAM 9.1/62 GB", "GPU 3%", "GPU 41°C", "Time 09:05"]
+            [
+                "CPU 12%",
+                "CPU 54°C",
+                "RAM 9.1/62 GB",
+                "GPU 3%",
+                "GPU 41°C",
+                "Time 09:05"
+            ]
         );
         let asleep = Readings {
             gpu: Some(gpu::Shown::Idle),
@@ -494,7 +507,14 @@ mod tests {
         };
         assert_eq!(
             shown(&asleep),
-            ["CPU --%", "CPU --°C", "RAM --", "GPU idle", "GPU --°C", "Time 00:00"]
+            [
+                "CPU --%",
+                "CPU --°C",
+                "RAM --",
+                "GPU idle",
+                "GPU --°C",
+                "Time 00:00"
+            ]
         );
         let unknown = Readings {
             gpu: Some(gpu::Shown::Unknown),
@@ -547,7 +567,10 @@ mod tests {
         let one = draw(&[("CPU", "7%".to_owned())], widest(MonitorItem::Cpu));
         let rows = bands(&one);
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].1 - rows[0].0 >= 12, "twice the 8-pixel font: {one:?}");
+        assert!(
+            rows[0].1 - rows[0].0 >= 12,
+            "twice the 8-pixel font: {one:?}"
+        );
         // Four lines of the widest kind still fit.
         let four = draw(
             &[
@@ -603,12 +626,24 @@ mod tests {
     }
 
     #[test]
-    fn a_monitor_without_gpu_items_never_looks_at_the_card_and_with_a_sleeping_card_never_asks_it() {
+    fn a_monitor_without_gpu_items_never_looks_at_the_card_and_with_a_sleeping_card_never_asks_it()
+    {
         let d = Scratch::new("mon-gpu");
         let r = roots(&d);
         stat(&r.proc, 1, 1);
-        device(&r.sys, "0000:01:00.0", "0x10de", "0x030000", "suspended", "nvidia");
-        let mut m = Monitor::new(&[MonitorItem::Gpu, MonitorItem::GpuTemp], r.clone(), Arc::new(Never));
+        device(
+            &r.sys,
+            "0000:01:00.0",
+            "0x10de",
+            "0x030000",
+            "suspended",
+            "nvidia",
+        );
+        let mut m = Monitor::new(
+            &[MonitorItem::Gpu, MonitorItem::GpuTemp],
+            r.clone(),
+            Arc::new(Never),
+        );
         for s in 0..10 {
             m.frame(&at(s, 0, 0));
         }
