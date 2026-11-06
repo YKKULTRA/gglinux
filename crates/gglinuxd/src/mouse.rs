@@ -363,4 +363,29 @@ mod tests {
             ]
         );
     }
+
+    /// The app offers `gg_ipc::mouse_keys` in its pickers: every name there must be one the
+    /// mouse code takes, as the right kind, and every key the mouse code knows must be offered.
+    #[test]
+    fn the_apps_key_names_are_the_mouse_codes_own() {
+        use gg_device_mouse::tables;
+        let mut offered = std::collections::BTreeSet::new();
+        for (name, _) in gg_ipc::mouse_keys::KEYS {
+            match ButtonAction::parse(name) {
+                Ok(ButtonAction::Key(code)) => {
+                    offered.insert(code);
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+        for (name, _) in gg_ipc::mouse_keys::MEDIA {
+            assert!(
+                matches!(ButtonAction::parse(name), Ok(ButtonAction::Multimedia(_))),
+                "{name}"
+            );
+        }
+        let known: std::collections::BTreeSet<u8> =
+            tables::KEYBOARD.iter().map(|(_, c)| *c).collect();
+        assert_eq!(offered, known);
+    }
 }

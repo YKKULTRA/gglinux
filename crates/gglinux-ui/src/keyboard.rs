@@ -393,6 +393,9 @@ fn screen_kind(s: &Screen) -> i32 {
         Screen::Text { .. } => 1,
         Screen::Clock { .. } => 2,
         Screen::Image { .. } => 3,
+        // Shown as a picture until the screen unit (M11 A4) gives them their own modes.
+        Screen::Animation { .. } => 3,
+        Screen::Monitor { .. } => 0,
     }
 }
 

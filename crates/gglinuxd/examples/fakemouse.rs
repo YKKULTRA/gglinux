@@ -417,6 +417,22 @@ fn handle(req: Request, state: &Arc<Mutex<Fake>>) -> ResponseData {
             ResponseData::Success
         }
         Request::GetParts => ResponseData::Parts { parts: s.parts },
+        // M11 contract: placeholders until each unit gives its fake a state.
+        Request::GetExperimental => ResponseData::Experimental {
+            experimental: gg_ipc::Experimental::default(),
+        },
+        Request::SetExperimental { .. } => ResponseData::Success,
+        Request::GetBindings
+        | Request::ReadBindings
+        | Request::SetBindings { .. }
+        | Request::GetOnboard
+        | Request::ReadOnboard { .. }
+        | Request::LoadOnboard { .. }
+        | Request::WriteOnboard { .. }
+        | Request::GetActions
+        | Request::SetActions { .. } => ResponseData::Error {
+            message: "not built yet".into(),
+        },
         Request::SetParts { parts } => {
             s.parts = parts;
             ResponseData::Success
@@ -725,6 +741,17 @@ fn method_name(req: &Request) -> &'static str {
         Request::SetScreenCare { .. } => "set_screen_care",
         Request::GetParts => "get_parts",
         Request::SetParts { .. } => "set_parts",
+        Request::GetExperimental => "get_experimental",
+        Request::SetExperimental { .. } => "set_experimental",
+        Request::GetBindings => "get_bindings",
+        Request::ReadBindings => "read_bindings",
+        Request::SetBindings { .. } => "set_bindings",
+        Request::GetOnboard => "get_onboard",
+        Request::ReadOnboard { .. } => "read_onboard",
+        Request::LoadOnboard { .. } => "load_onboard",
+        Request::WriteOnboard { .. } => "write_onboard",
+        Request::GetActions => "get_actions",
+        Request::SetActions { .. } => "set_actions",
         Request::GetGamesenseState => "get_gamesense_state",
         Request::SetGamesenseEnabled { .. } => "set_gamesense_enabled",
         Request::SetGameEnabled { .. } => "set_game_enabled",

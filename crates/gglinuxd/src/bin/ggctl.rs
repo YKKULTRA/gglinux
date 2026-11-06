@@ -426,6 +426,8 @@ fn print_keyboard(state: &KeyboardState) {
             Screen::Text { text } => format!("text {:?}", text),
             Screen::Clock { .. } => "clock".to_owned(),
             Screen::Image { .. } => "picture".to_owned(),
+            Screen::Animation { frames, .. } => format!("animation of {} pictures", frames.len()),
+            Screen::Monitor { items } => format!("system monitor {items:?}"),
         }
     );
     if let Some(e) = &state.screen_error {

@@ -163,6 +163,8 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
         Changed::Gamesense => pages::show_games(ui, s),
         Changed::Profiles => pages::show_profiles(ui, s),
         Changed::Clips => pages::show_moments(ui, s),
+        // Shown by the M11 panels; nothing shows them yet.
+        Changed::Experimental | Changed::Bindings | Changed::Onboard | Changed::Actions => {}
     }
 }
 

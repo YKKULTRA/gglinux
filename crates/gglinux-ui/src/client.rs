@@ -22,8 +22,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use gg_ipc::{
-    ClipsState, DeviceInfo, Event, GameSenseState, HeadsetState, KeyboardState, MouseState, Part,
-    Parts, ProfilesState, Request, RequestFrame, ResponseData, ServerMessage, SonarState,
+    ActionsState, BindingsState, ClipsState, DeviceInfo, Event, Experimental, GameSenseState,
+    HeadsetState, KeyboardState, MouseState, OnboardState, Part, Parts, ProfilesState, Request,
+    RequestFrame, ResponseData, ServerMessage, SonarState,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -78,6 +79,10 @@ pub struct State {
     pub gamesense: Option<GameSenseState>,
     pub profiles: Option<ProfilesState>,
     pub clips: Option<ClipsState>,
+    pub experimental: Option<Experimental>,
+    pub bindings: Option<BindingsState>,
+    pub onboard: Option<OnboardState>,
+    pub actions: Option<ActionsState>,
     /// Kept while the daemon is away: a restart for a change of parts shouldn't
     /// bring the hidden pages back for a moment.
     pub parts: Option<Parts>,
@@ -131,6 +136,22 @@ impl State {
                 self.parts = Some(*parts);
                 self.restarting = false;
                 Changed::Parts
+            }
+            ResponseData::Experimental { experimental } => {
+                self.experimental = Some(*experimental);
+                Changed::Experimental
+            }
+            ResponseData::Bindings { state } => {
+                self.bindings = Some(state.clone());
+                Changed::Bindings
+            }
+            ResponseData::Onboard { state } => {
+                self.onboard = Some(state.clone());
+                Changed::Onboard
+            }
+            ResponseData::Actions { state } => {
+                self.actions = Some(state.clone());
+                Changed::Actions
             }
             ResponseData::Pong | ResponseData::Success | ResponseData::Error { .. } => return None,
         })
@@ -187,6 +208,22 @@ impl State {
                 self.clips = Some(state);
                 Changed::Clips
             }
+            Event::ExperimentalChanged { experimental } => {
+                self.experimental = Some(experimental);
+                Changed::Experimental
+            }
+            Event::BindingsChanged { state } => {
+                self.bindings = Some(state);
+                Changed::Bindings
+            }
+            Event::OnboardChanged { state } => {
+                self.onboard = Some(state);
+                Changed::Onboard
+            }
+            Event::ActionsChanged { state } => {
+                self.actions = Some(state);
+                Changed::Actions
+            }
         }
     }
 
@@ -214,10 +251,14 @@ pub enum Changed {
     Profiles,
     Clips,
     Parts,
+    Experimental,
+    Bindings,
+    Onboard,
+    Actions,
 }
 
 impl Changed {
-    pub const ALL: [Changed; 10] = [
+    pub const ALL: [Changed; 14] = [
         Changed::Connection,
         Changed::Devices,
         Changed::Mouse,
@@ -228,6 +269,10 @@ impl Changed {
         Changed::Profiles,
         Changed::Clips,
         Changed::Parts,
+        Changed::Experimental,
+        Changed::Bindings,
+        Changed::Onboard,
+        Changed::Actions,
     ];
 }
 
@@ -436,6 +481,18 @@ impl Client {
         for part in Part::ALL.into_iter().filter(|p| running.on(*p)) {
             let this = self.clone();
             reads.spawn(async move { this.refresh(part).await });
+        }
+        // States outside the parts, and the keyboard's others. A daemon from before
+        // they existed answers with an error, which leaves them unknown.
+        let mut extra = vec![Request::GetExperimental, Request::GetActions];
+        if running.keyboard {
+            extra.extend([Request::GetBindings, Request::GetOnboard]);
+        }
+        for req in extra {
+            let this = self.clone();
+            reads.spawn(async move {
+                let _ = this.ask(req, TIMEOUT).await;
+            });
         }
         while reads.join_next().await.is_some() {}
     }

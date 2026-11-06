@@ -91,7 +91,7 @@ impl Peer {
     }
 
     /// Answer the reads a connection starts with: `parts` (only the clips run),
-    /// no devices, and `clips` for the recorder.
+    /// no devices, `clips` for the recorder, and the states outside the parts.
     fn warm_up(&mut self, clips: &str) {
         let r = self.request();
         assert!(matches!(r.req, Request::GetParts), "{:?}", r.req);
@@ -101,13 +101,25 @@ impl Peer {
                 parts: clips_only(),
             },
         );
-        for _ in 0..2 {
+        for _ in 0..4 {
             let r = self.request();
             match r.req {
                 Request::ListDevices => {
                     self.answer(r.id, ResponseData::Devices { devices: vec![] })
                 }
                 Request::GetClipsState => self.answer(r.id, clips_answer(clips)),
+                Request::GetExperimental => self.answer(
+                    r.id,
+                    ResponseData::Experimental {
+                        experimental: gg_ipc::Experimental::default(),
+                    },
+                ),
+                Request::GetActions => self.answer(
+                    r.id,
+                    ResponseData::Actions {
+                        state: gg_ipc::ActionsState::default(),
+                    },
+                ),
                 other => panic!("a read it shouldn't make: {other:?}"),
             }
         }

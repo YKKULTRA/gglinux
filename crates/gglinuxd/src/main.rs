@@ -669,6 +669,20 @@ async fn dispatch(
                 .send::<()>(|reply| ClipsCommand::Delete { name, reply })
                 .await,
         ),
+        // M11 contract: answered by the units that build them.
+        Request::GetExperimental
+        | Request::SetExperimental { .. }
+        | Request::GetBindings
+        | Request::ReadBindings
+        | Request::SetBindings { .. }
+        | Request::GetOnboard
+        | Request::ReadOnboard { .. }
+        | Request::LoadOnboard { .. }
+        | Request::WriteOnboard { .. }
+        | Request::GetActions
+        | Request::SetActions { .. } => ResponseData::Error {
+            message: "not built yet".into(),
+        },
     };
     ServerMessage::response(frame.id, result)
 }

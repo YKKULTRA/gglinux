@@ -883,6 +883,12 @@ fn picture(screen: &Screen, now: LocalTime) -> Option<Bitmap> {
             oled::clock(&time, under.as_deref())
         }
         Screen::Image { pixels } => Bitmap::from_rows(pixels).unwrap_or_default(),
+        // Placeholders until the screen unit (M11 A4) draws these properly.
+        Screen::Animation { frames, .. } => frames
+            .first()
+            .map(|f| Bitmap::from_rows(f).unwrap_or_default())
+            .unwrap_or_default(),
+        Screen::Monitor { .. } => oled::text("System Monitor"),
     })
 }
 

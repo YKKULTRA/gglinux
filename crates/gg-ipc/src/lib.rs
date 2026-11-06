@@ -7,6 +7,17 @@
 
 use serde::{Deserialize, Serialize};
 
+mod actions;
+mod bindings;
+mod experimental;
+pub mod mouse_keys;
+mod onboard;
+
+pub use actions::{validate as validate_actions, Action, ActionBinding, ActionsState};
+pub use bindings::{Bindings, BindingsState, KeyAction, KeyBinding, Layer};
+pub use experimental::{Experimental, Feature};
+pub use onboard::{check_slot, OnboardSlot, OnboardSource, OnboardState, SLOTS as ONBOARD_SLOTS};
+
 /// Broad device category, used by the UI to pick the right panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -603,12 +614,40 @@ pub enum Screen {
     /// A 128 × 40 picture: 640 bytes, 16 a row from the top, the leftmost pixel in each
     /// byte's high bit.
     Image { pixels: Vec<u8> },
+    /// An animation: pictures laid out as [`Screen::Image`]'s, each shown for its delay, looping.
+    Animation {
+        frames: Vec<Vec<u8>>,
+        delays_ms: Vec<u16>,
+    },
+    /// Live readings of the computer, one to four of them.
+    Monitor { items: Vec<MonitorItem> },
+}
+
+/// One reading on the System Monitor screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorItem {
+    /// CPU use, %.
+    Cpu,
+    /// CPU package temperature.
+    CpuTemp,
+    /// Memory in use.
+    Ram,
+    /// Graphics card use, % (shown as idle while the card sleeps: it is never woken to ask).
+    Gpu,
+    /// Graphics card temperature, under the same rule.
+    GpuTemp,
+    /// The time.
+    Clock,
 }
 
 impl Screen {
     pub const MAX_LINES: usize = 5;
     pub const MAX_COLUMNS: usize = 16;
     pub const IMAGE_BYTES: usize = 640;
+    pub const MAX_FRAMES: usize = 256;
+    pub const FRAME_DELAY_MS: std::ops::RangeInclusive<u16> = 100..=10_000;
+    pub const MAX_MONITOR_ITEMS: usize = 4;
 
     /// Check what the screen can show, with a message meant for the user.
     pub fn validate(&self) -> Result<(), String> {
@@ -643,6 +682,49 @@ impl Screen {
                 Self::IMAGE_BYTES,
                 pixels.len()
             )),
+            Screen::Animation { frames, delays_ms } => {
+                if frames.is_empty() || frames.len() > Self::MAX_FRAMES {
+                    return Err(format!(
+                        "an animation has 1 to {} pictures, not {}",
+                        Self::MAX_FRAMES,
+                        frames.len()
+                    ));
+                }
+                if delays_ms.len() != frames.len() {
+                    return Err("every picture of an animation needs its own delay".into());
+                }
+                if let Some(f) = frames.iter().find(|f| f.len() != Self::IMAGE_BYTES) {
+                    return Err(format!(
+                        "a screen picture is {} bytes, not {}",
+                        Self::IMAGE_BYTES,
+                        f.len()
+                    ));
+                }
+                if let Some(d) = delays_ms.iter().find(|d| !Self::FRAME_DELAY_MS.contains(d)) {
+                    return Err(format!(
+                        "a picture shows for 0.1 to 10 seconds, not {} ms",
+                        d
+                    ));
+                }
+                Ok(())
+            }
+            Screen::Monitor { items } => {
+                if items.is_empty() || items.len() > Self::MAX_MONITOR_ITEMS {
+                    return Err(format!(
+                        "the monitor shows 1 to {} readings, not {}",
+                        Self::MAX_MONITOR_ITEMS,
+                        items.len()
+                    ));
+                }
+                let mut seen = Vec::new();
+                for i in items {
+                    if seen.contains(i) {
+                        return Err(format!("{i:?} is on the monitor twice"));
+                    }
+                    seen.push(*i);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -754,6 +836,10 @@ pub struct Switches {
     pub rapid_trigger: RapidTrigger,
     #[serde(default)]
     pub rapid_tap: RapidTap,
+    /// Keys with a second (deep-press) actuation point, deeper than their first; what they do
+    /// there is their binding on [`Layer::Second`]. Needs [`Feature::KeyboardBindings`].
+    #[serde(default)]
+    pub second: Vec<KeyActuation>,
 }
 
 impl Switches {
@@ -812,6 +898,31 @@ impl Switches {
                 in_pairs.push(code);
             }
         }
+        let mut seen = Vec::new();
+        for k in &self.second {
+            if !Self::ACTUATION.contains(&k.actuation) {
+                return Err(format!(
+                    "second actuation point {} of key {:#04x} out of range (0.1 to 4.0 mm)",
+                    mm(k.actuation),
+                    k.code
+                ));
+            }
+            if k.actuation <= self.actuation_of(k.code) {
+                return Err(format!(
+                    "the second actuation point of key {:#04x} ({}) must be deeper than its first ({})",
+                    k.code,
+                    mm(k.actuation),
+                    mm(self.actuation_of(k.code))
+                ));
+            }
+            if seen.contains(&k.code) {
+                return Err(format!(
+                    "key {:#04x} has two second actuation points",
+                    k.code
+                ));
+            }
+            seen.push(k.code);
+        }
         Ok(())
     }
 
@@ -838,6 +949,7 @@ impl Default for Switches {
             keys: Vec::new(),
             rapid_trigger: RapidTrigger::default(),
             rapid_tap: RapidTap::default(),
+            second: Vec::new(),
         }
     }
 }
@@ -1213,6 +1325,42 @@ pub enum Request {
     SetParts {
         parts: Parts,
     },
+    /// Which experimental (not yet hardware-tried) features are on.
+    GetExperimental,
+    /// Turn experimental features on or off.
+    SetExperimental {
+        experimental: Experimental,
+    },
+    /// The keyboard bindings gglinux applies, and the keyboard's own as last read.
+    GetBindings,
+    /// Read the keyboard's bindings now, all three layers. Needs [`Feature::KeyboardBindings`].
+    ReadBindings,
+    /// Replace the bindings gglinux applies; `enabled` false leaves the keyboard's own.
+    SetBindings {
+        bindings: Bindings,
+        enabled: bool,
+    },
+    /// The keyboard's onboard slots as last read.
+    GetOnboard,
+    /// Read one slot (`None`: all five) and back it up to a file. Needs
+    /// [`Feature::KeyboardOnboard`].
+    ReadOnboard {
+        slot: Option<u8>,
+    },
+    /// Make the keyboard run one of its slots.
+    LoadOnboard {
+        slot: u8,
+    },
+    /// Write a slot, as one checked transaction that restores the backup on any mismatch.
+    WriteOnboard {
+        slot: u8,
+        from: OnboardSource,
+    },
+    /// The actions on the spare keys F13–F24.
+    GetActions,
+    SetActions {
+        bindings: Vec<ActionBinding>,
+    },
 }
 
 impl Request {
@@ -1220,7 +1368,14 @@ impl Request {
     pub fn part(&self) -> Option<Part> {
         use Request as R;
         Some(match self {
-            R::ListDevices | R::Ping | R::GetParts | R::SetParts { .. } => return None,
+            R::ListDevices
+            | R::Ping
+            | R::GetParts
+            | R::SetParts { .. }
+            | R::GetExperimental
+            | R::SetExperimental { .. }
+            | R::GetActions
+            | R::SetActions { .. } => return None,
             R::GetMouseState
             | R::SetMouseDpi { .. }
             | R::SetMousePolling { .. }
@@ -1247,7 +1402,14 @@ impl Request {
             | R::SetLighting { .. }
             | R::SetSwitches { .. }
             | R::SetScreen { .. }
-            | R::SetScreenCare { .. } => Part::Keyboard,
+            | R::SetScreenCare { .. }
+            | R::GetBindings
+            | R::ReadBindings
+            | R::SetBindings { .. }
+            | R::GetOnboard
+            | R::ReadOnboard { .. }
+            | R::LoadOnboard { .. }
+            | R::WriteOnboard { .. } => Part::Keyboard,
             R::GetGamesenseState
             | R::SetGamesenseEnabled { .. }
             | R::SetGameEnabled { .. }
@@ -1419,6 +1581,18 @@ pub enum ResponseData {
     Parts {
         parts: Parts,
     },
+    Experimental {
+        experimental: Experimental,
+    },
+    Bindings {
+        state: BindingsState,
+    },
+    Onboard {
+        state: OnboardState,
+    },
+    Actions {
+        state: ActionsState,
+    },
     /// A command was accepted and applied.
     Success,
     Error {
@@ -1465,6 +1639,22 @@ pub enum Event {
     /// The recorder started or stopped, a clip was saved or deleted, or settings changed.
     ClipsChanged {
         state: ClipsState,
+    },
+    /// An experimental feature was turned on or off.
+    ExperimentalChanged {
+        experimental: Experimental,
+    },
+    /// The keyboard bindings changed, or were read.
+    BindingsChanged {
+        state: BindingsState,
+    },
+    /// An onboard slot was read, loaded or written, or an operation started or ended.
+    OnboardChanged {
+        state: OnboardState,
+    },
+    /// The actions changed, or one ran or failed.
+    ActionsChanged {
+        state: ActionsState,
     },
 }
 
@@ -2382,5 +2572,167 @@ mod tests {
             None
         );
         assert_eq!(Request::ListDevices.part(), None);
+    }
+}
+
+/// The M11 additions: what the daemon, the app and `ggctl` agree on.
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    fn req(json: &str) -> Request {
+        serde_json::from_str::<RequestFrame>(&format!(r#"{{"id":1,"req":{json}}}"#))
+            .unwrap()
+            .req
+    }
+
+    #[test]
+    fn new_requests_have_their_documented_json_and_part() {
+        assert!(matches!(
+            req(r#"{"method":"get_experimental"}"#),
+            Request::GetExperimental
+        ));
+        assert!(matches!(
+            req(r#"{"method":"set_experimental","params":{"experimental":{"keyboard_onboard":true}}}"#),
+            Request::SetExperimental { experimental } if experimental.on(Feature::KeyboardOnboard)
+        ));
+        assert!(matches!(
+            req(r#"{"method":"read_bindings"}"#),
+            Request::ReadBindings
+        ));
+        assert!(matches!(
+            req(r#"{"method":"set_bindings","params":{"bindings":{"normal":[{"code":57,"action":{"kind":"keys","codes":[224,4]}}]},"enabled":true}}"#),
+            Request::SetBindings { bindings, enabled: true } if bindings.normal.len() == 1
+        ));
+        assert!(matches!(
+            req(r#"{"method":"read_onboard","params":{"slot":null}}"#),
+            Request::ReadOnboard { slot: None }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"write_onboard","params":{"slot":4,"from":{"kind":"current"}}}"#),
+            Request::WriteOnboard {
+                slot: 4,
+                from: OnboardSource::Current
+            }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"set_actions","params":{"bindings":[]}}"#),
+            Request::SetActions { .. }
+        ));
+        for (r, part) in [
+            (Request::GetExperimental, None),
+            (Request::GetActions, None),
+            (Request::GetBindings, Some(Part::Keyboard)),
+            (Request::ReadBindings, Some(Part::Keyboard)),
+            (Request::GetOnboard, Some(Part::Keyboard)),
+            (Request::LoadOnboard { slot: 0 }, Some(Part::Keyboard)),
+        ] {
+            assert_eq!(r.part(), part, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn new_responses_and_events_round_trip() {
+        let msgs = [
+            ResponseData::Experimental {
+                experimental: Experimental::default(),
+            },
+            ResponseData::Bindings {
+                state: BindingsState::default(),
+            },
+            ResponseData::Onboard {
+                state: OnboardState::default(),
+            },
+            ResponseData::Actions {
+                state: ActionsState::default(),
+            },
+        ];
+        for m in msgs {
+            let json = serde_json::to_string(&m).unwrap();
+            let back: ResponseData = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        let e = Event::OnboardChanged {
+            state: OnboardState::default(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.starts_with(r#"{"event":"onboard_changed""#), "{json}");
+    }
+
+    #[test]
+    fn animations_and_the_monitor_are_checked() {
+        let frame = vec![0u8; Screen::IMAGE_BYTES];
+        let ok = Screen::Animation {
+            frames: vec![frame.clone(), frame.clone()],
+            delays_ms: vec![100, 10_000],
+        };
+        ok.validate().unwrap();
+        for bad in [
+            Screen::Animation {
+                frames: vec![],
+                delays_ms: vec![],
+            },
+            Screen::Animation {
+                frames: vec![frame.clone()],
+                delays_ms: vec![],
+            },
+            Screen::Animation {
+                frames: vec![vec![0; 639]],
+                delays_ms: vec![100],
+            },
+            Screen::Animation {
+                frames: vec![frame.clone()],
+                delays_ms: vec![99],
+            },
+            Screen::Monitor { items: vec![] },
+            Screen::Monitor {
+                items: vec![MonitorItem::Cpu, MonitorItem::Cpu],
+            },
+            Screen::Monitor {
+                items: vec![
+                    MonitorItem::Cpu,
+                    MonitorItem::Ram,
+                    MonitorItem::Gpu,
+                    MonitorItem::Clock,
+                    MonitorItem::CpuTemp,
+                ],
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        Screen::Monitor {
+            items: vec![MonitorItem::Cpu, MonitorItem::Clock],
+        }
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_second_actuation_point_must_be_deeper_than_the_first() {
+        let mut s = Switches {
+            actuation: 15,
+            ..Switches::default()
+        };
+        s.second = vec![KeyActuation {
+            code: 0x1A,
+            actuation: 30,
+        }];
+        s.validate().unwrap();
+        s.second[0].actuation = 15;
+        assert!(s.validate().unwrap_err().contains("deeper"));
+        s.second = vec![
+            KeyActuation {
+                code: 0x1A,
+                actuation: 30,
+            },
+            KeyActuation {
+                code: 0x1A,
+                actuation: 31,
+            },
+        ];
+        assert!(s.validate().is_err());
+        // Old settings files without the field still load.
+        let old: Switches = serde_json::from_str(r#"{"enabled":true,"actuation":15}"#).unwrap();
+        assert!(old.second.is_empty());
     }
 }
