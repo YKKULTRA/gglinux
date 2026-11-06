@@ -163,7 +163,10 @@ fn every_board_is_as_wide_as_the_width() {
             "{name}"
         );
         let right = board.iter().map(|k| k.2 + k.4).fold(0.0, f32::max);
-        assert_eq!(right, WIDTH, "{name}: the app sizes the drawing by its keys");
+        assert_eq!(
+            right, WIDTH,
+            "{name}: the app sizes the drawing by its keys"
+        );
     }
 }
 
