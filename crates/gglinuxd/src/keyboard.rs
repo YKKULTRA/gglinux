@@ -11,12 +11,25 @@
 //! so the OLED doesn't burn in. The switch settings live in the keyboard's
 //! RAM, so they're sent once each time it connects. All off by default: a fresh
 //! install never touches the keyboard.
+//!
+//! This file keeps the loop, the lighting, opening and closing the keyboard and the
+//! routing of [`Command`]s. The screen is [`screen`] (with its [`screen::ScreenSource`]s)
+//! and the switches [`switches`]. Key bindings and the onboard slots each have a module
+//! their unit fills in without touching this one: [`bindings`] and [`onboard`], each a
+//! `Store` the worker holds, an `on_command` for its `Cmd`s, an `on_connect` run once the
+//! keyboard has opened and had its switches again, and a `handle` for `main`'s requests.
+//! The open keyboard lets a gated command family out only while its experimental gate
+//! is on ([`Command::SetExperimental`]).
 
 mod audio;
+pub mod bindings;
 mod effects;
 mod mic;
+pub mod onboard;
 mod reader;
+mod screen;
 mod spectrum;
+mod switches;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,10 +39,10 @@ use std::time::{Duration, Instant};
 
 use gg_device_keyboard::layout::ANSI_TKL;
 use gg_device_keyboard::proto::ANALOG_KEYS;
-use gg_device_keyboard::{oled, Bitmap, Keyboard, Rgb};
+use gg_device_keyboard::{Families, Keyboard, Rgb};
 use gg_ipc::{
-    Effect, Event, KeyInfo, KeyboardState, Lighting, ReactiveStatus, Screen, ScreenCare, Switches,
-    TapMode,
+    Effect, Event, Experimental, KeyInfo, KeyboardState, Lighting, ReactiveStatus, Screen,
+    ScreenCare, Switches,
 };
 use hidapi::HidApi;
 use serde::{de::DeserializeOwned, Serialize};
@@ -39,7 +52,9 @@ use tracing::{debug, error, info, warn};
 use crate::clock::is_older_than;
 use audio::{Capture, Levels};
 use reader::{OpenError, Reader};
+use screen::ScreenState;
 use spectrum::BANDS;
+use switches::SwitchesState;
 
 const FRAME: Duration = Duration::from_millis(33);
 const STATIC_REFRESH: Duration = Duration::from_secs(2);
@@ -48,11 +63,6 @@ const IDLE_WAIT: Duration = Duration::from_millis(500);
 /// The most key presses held for reactive lighting; older ones are dropped first.
 const MAX_HITS: usize = 32;
 const MIC_POLL: Duration = Duration::from_millis(500);
-/// How often an unchanged screen picture is sent again, in case the keyboard's own menus
-/// (the volume roller, the media button) drew over it.
-const SCREEN_REFRESH: Duration = Duration::from_secs(10);
-/// How long the picture stays put before it moves a pixel, with screen care's shift on.
-const SHIFT_EVERY: u64 = 120;
 
 /// Colours by HID code, drawn over the lighting.
 pub type Layer = HashMap<u8, Rgb>;
@@ -107,8 +117,22 @@ pub enum Command {
     /// The visualizer should listen to this output (a `node.name`), or to the
     /// default output when `None`. From Sonar; no reply.
     ListenTo(Option<String>),
+    /// For the key bindings: see [`bindings`].
+    Bindings(bindings::Cmd),
+    /// For the onboard profile slots: see [`onboard`].
+    Onboard(onboard::Cmd),
+    /// The experimental gates as they are now. The open keyboard, and every keyboard
+    /// opened from now on, lets a gated command family out only while its gate is on.
+    /// No reply.
+    SetExperimental(Experimental),
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
+    /// Send a feature report through the open keyboard's allowlist and read the answer.
+    #[cfg(test)]
+    Exchange {
+        report: Vec<u8>,
+        reply: Reply<Vec<u8>>,
+    },
 }
 
 /// Names only: a `Pressed` never prints its key.
@@ -127,7 +151,12 @@ impl std::fmt::Debug for Command {
             Command::AudioStopped => "AudioStopped",
             Command::MicMuted(_) => "MicMuted",
             Command::ListenTo(_) => "ListenTo",
+            Command::Bindings(_) => "Bindings",
+            Command::Onboard(_) => "Onboard",
+            Command::SetExperimental(_) => "SetExperimental",
             Command::Shutdown(_) => "Shutdown",
+            #[cfg(test)]
+            Command::Exchange { .. } => "Exchange",
         })
     }
 }
@@ -165,20 +194,54 @@ impl Handle {
     pub fn listen_to(&self, output: Option<String>) {
         let _ = self.tx.send(Command::ListenTo(output));
     }
+
+    /// Tell the worker the experimental gates changed; fire and forget. Commands sent
+    /// after this one find them changed.
+    pub fn set_experimental(&self, experimental: Experimental) {
+        let _ = self.tx.send(Command::SetExperimental(experimental));
+    }
 }
 
-pub fn spawn(event_tx: broadcast::Sender<Event>, overlays: Vec<Arc<dyn Overlay>>) -> Handle {
+/// Start the keyboard worker, with the experimental gates as they are at start.
+pub fn spawn(
+    event_tx: broadcast::Sender<Event>,
+    overlays: Vec<Arc<dyn Overlay>>,
+    experimental: Experimental,
+) -> Handle {
     let (tx, rx) = mpsc::channel();
     let readers_tx = tx.clone();
     std::thread::Builder::new()
         .name("gg-keyboard".into())
-        .spawn(move || worker(rx, readers_tx, event_tx, overlays))
+        .spawn(move || worker(rx, readers_tx, event_tx, overlays, experimental))
         .expect("spawn gg-keyboard thread");
     Handle { tx }
 }
 
+/// A worker on `device`, a keyboard over a fake transport, open from the start, with its
+/// settings in `config_dir` and no device list: it never opens anything else.
+#[cfg(test)]
+pub fn spawn_fake(
+    device: Keyboard,
+    config_dir: PathBuf,
+    event_tx: broadcast::Sender<Event>,
+    experimental: Experimental,
+) -> Handle {
+    let (tx, rx) = mpsc::channel();
+    let worker_tx = tx.clone();
+    std::thread::Builder::new()
+        .name("gg-keyboard-fake".into())
+        .spawn(move || {
+            let mut state = State::new(None, &config_dir, worker_tx, Vec::new(), experimental);
+            connected(&mut state, device);
+            run(state, &rx, &event_tx);
+        })
+        .expect("spawn gg-keyboard-fake thread");
+    Handle { tx }
+}
+
 struct State {
-    api: HidApi,
+    /// The device list; `None` in tests, which open nothing.
+    api: Option<HidApi>,
     device: Option<Keyboard>,
     /// Whether this handle has taken the lighting over (init sent).
     taken: bool,
@@ -212,24 +275,59 @@ struct State {
     listen_to: Option<String>,
     mic_watch: Option<mic::Watch>,
     mic_muted: bool,
-    switches: Switches,
-    switches_path: PathBuf,
-    /// What sending the switches to the open keyboard gave; `None`: not sent to it yet.
-    switches_sent: Option<Result<(), String>>,
-    screen: Screen,
-    screen_path: PathBuf,
-    /// Whether gglinux has drawn on this keyboard's screen since it connected.
-    screen_taken: bool,
-    /// The picture last sent, and when, so an unchanged one isn't sent every loop.
-    screen_shown: Option<Bitmap>,
-    screen_last: Option<Instant>,
-    screen_error: Option<String>,
-    care: ScreenCare,
-    care_path: PathBuf,
-    /// Nobody is at the computer, as [`crate::presence`] last said.
-    away: bool,
-    /// The screen is dark for that right now.
-    resting: bool,
+    switches: SwitchesState,
+    screen: ScreenState,
+    bindings: bindings::Store,
+    onboard: onboard::Store,
+    /// The experimental gates, as last told; the open keyboard's families follow them.
+    experimental: Experimental,
+    /// The keyboard opened since the last loop: `on_connect` is due once its switches
+    /// have gone out again.
+    just_opened: bool,
+}
+
+impl State {
+    fn new(
+        api: Option<HidApi>,
+        config_dir: &Path,
+        tx: Sender<Command>,
+        overlays: Vec<Arc<dyn Overlay>>,
+        experimental: Experimental,
+    ) -> State {
+        let settings_path = config_dir.join("lighting.json");
+        State {
+            api,
+            device: None,
+            taken: false,
+            last_open_attempt: None,
+            last_frame: None,
+            lighting: load(&settings_path, "lighting"),
+            settings_path,
+            positions: effects::positions(),
+            started: Instant::now(),
+            published: None,
+            tx,
+            reader: None,
+            last_reader_attempt: None,
+            reactive: ReactiveStatus::Off,
+            hits: Vec::new(),
+            overlays,
+            layers: Vec::new(),
+            overlay_was_active: false,
+            levels: Arc::new(Mutex::new([0.0; BANDS])),
+            capture: None,
+            last_capture_attempt: None,
+            listen_to: None,
+            mic_watch: None,
+            mic_muted: false,
+            switches: SwitchesState::load(config_dir),
+            screen: ScreenState::load(config_dir),
+            bindings: bindings::Store::load(config_dir),
+            onboard: onboard::Store::load(config_dir),
+            experimental,
+            just_opened: false,
+        }
+    }
 }
 
 fn worker(
@@ -237,6 +335,7 @@ fn worker(
     tx: Sender<Command>,
     event_tx: broadcast::Sender<Event>,
     overlays: Vec<Arc<dyn Overlay>>,
+    experimental: Experimental,
 ) {
     let hid = gg_hid::lock();
     let api = match HidApi::new() {
@@ -247,54 +346,15 @@ fn worker(
         }
     };
     drop(hid);
-    let settings_path = gg_ipc::config_dir().join("lighting.json");
-    let switches_path = gg_ipc::config_dir().join("switches.json");
-    let screen_path = gg_ipc::config_dir().join("screen.json");
-    let care_path = gg_ipc::config_dir().join("screen-care.json");
-    let mut state = State {
-        api,
-        device: None,
-        taken: false,
-        last_open_attempt: None,
-        last_frame: None,
-        lighting: load(&settings_path, "lighting"),
-        settings_path,
-        positions: effects::positions(),
-        started: Instant::now(),
-        published: None,
-        tx,
-        reader: None,
-        last_reader_attempt: None,
-        reactive: ReactiveStatus::Off,
-        hits: Vec::new(),
-        overlays,
-        layers: Vec::new(),
-        overlay_was_active: false,
-        levels: Arc::new(Mutex::new([0.0; BANDS])),
-        capture: None,
-        last_capture_attempt: None,
-        listen_to: None,
-        mic_watch: None,
-        mic_muted: false,
-        switches: load(&switches_path, "switch"),
-        switches_path,
-        switches_sent: None,
-        screen: load(&screen_path, "screen"),
-        screen_path,
-        screen_taken: false,
-        screen_shown: None,
-        screen_last: None,
-        screen_error: None,
-        care: load(&care_path, "screen care"),
-        care_path,
-        away: false,
-        resting: false,
-    };
+    let state = State::new(Some(api), &gg_ipc::config_dir(), tx, overlays, experimental);
+    run(state, &rx, &event_tx);
+}
 
+fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Event>) {
     loop {
         match rx.recv_timeout(next_wait(&state)) {
             Ok(command) => {
-                if !handle(command, &mut state, &event_tx) {
+                if !handle(command, &mut state, event_tx) {
                     return;
                 }
             }
@@ -303,7 +363,7 @@ fn worker(
             // which main sends on exit. Kept as a fallback.
             Err(RecvTimeoutError::Disconnected) => {
                 hand_back(&mut state);
-                release_screen(&mut state);
+                state.screen.release(state.device.as_ref());
                 return;
             }
         }
@@ -334,9 +394,16 @@ fn worker(
             hand_back(&mut state);
         }
         render(&mut state);
-        sync_switches(&mut state);
-        render_screen(&mut state);
-        publish(&mut state, &event_tx);
+        state.switches.sync(state.device.as_ref());
+        if std::mem::take(&mut state.just_opened) {
+            if let Some(device) = state.device.as_ref() {
+                let exp = &state.experimental;
+                bindings::on_connect(&mut state.bindings, device, exp, event_tx);
+                onboard::on_connect(&mut state.onboard, device, exp, event_tx);
+            }
+        }
+        state.screen.render(state.device.as_ref());
+        publish(&mut state, event_tx);
     }
 }
 
@@ -365,22 +432,11 @@ fn next_wait(state: &State) -> Duration {
                 .saturating_sub(t.elapsed())
             })
         };
-    match screen_wait(&state.screen, state.device.is_some()) {
+    // A screen that changes by itself (a clock) wakes the loop in time.
+    match state.screen.wait(state.device.is_some()) {
         Some(screen) => lighting.min(screen),
         None => lighting,
     }
-}
-
-/// A clock on the screen wakes the loop just after each second turns.
-fn screen_wait(screen: &Screen, connected: bool) -> Option<Duration> {
-    if !connected || !matches!(screen, Screen::Clock { .. }) {
-        return None;
-    }
-    let into_second = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_millis())
-        .unwrap_or(0);
-    Some(Duration::from_millis(u64::from(1000 - into_second) + 5))
 }
 
 /// Whether key presses should be read right now.
@@ -510,8 +566,11 @@ fn sync_reader(state: &mut State) {
     if state.reader.is_some() || !is_older_than(state.last_reader_attempt, REOPEN_INTERVAL) {
         return;
     }
+    let Some(api) = state.api.as_ref() else {
+        return;
+    };
     state.last_reader_attempt = Some(Instant::now());
-    match Reader::start(&state.api, state.tx.clone()) {
+    match Reader::start(api, state.tx.clone()) {
         Ok(reader) => {
             info!("reading key presses for reactive lighting");
             state.reader = Some(reader);
@@ -536,39 +595,31 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             let _ = reply.send(Ok(snapshot(state)));
         }
         Command::SetSwitches { switches, reply } => {
-            if let Err(message) = switches.validate().and_then(|()| check_analog(&switches)) {
+            // The loop sends them, if they're on.
+            if let Err(message) = state.switches.set(switches) {
                 let _ = reply.send(Err(message));
                 return true;
             }
-            state.switches = switches;
-            save(&state.switches_path, &state.switches, "switch");
-            state.switches_sent = None; // the loop sends them, if they're on
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
         }
         Command::SetScreen { screen, reply } => {
-            if let Err(message) = screen.validate() {
+            if let Err(message) = state.screen.set(screen) {
                 let _ = reply.send(Err(message));
                 return true;
             }
-            state.screen = screen;
-            save(&state.screen_path, &state.screen, "screen");
-            state.screen_shown = None; // draw the change now
-            state.screen_error = None;
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
         }
         Command::SetScreenCare { care, reply } => {
-            state.care = care;
-            save(&state.care_path, &state.care, "screen care");
-            state.screen_shown = None; // draw the change now
+            state.screen.set_care(care);
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
         }
         Command::SetAway { away, reply } => {
-            if away != state.away {
-                state.away = away;
-                render_screen(state); // now, not at the next loop: sleep may be next
+            if state.screen.set_away(away) {
+                // Now, not at the next loop: sleep may be next.
+                state.screen.render(state.device.as_ref());
                 publish(state, event_tx);
             }
             let _ = reply.send(Ok(()));
@@ -619,36 +670,85 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             state.reactive = ReactiveStatus::Off;
             state.last_reader_attempt = Some(Instant::now()); // retry after REOPEN_INTERVAL
         }
+        Command::Bindings(cmd) => bindings::on_command(
+            cmd,
+            &mut state.bindings,
+            state.device.as_ref(),
+            &state.experimental,
+            event_tx,
+        ),
+        Command::Onboard(cmd) => onboard::on_command(
+            cmd,
+            &mut state.onboard,
+            state.device.as_ref(),
+            &state.experimental,
+            event_tx,
+        ),
+        Command::SetExperimental(experimental) => {
+            state.experimental = experimental;
+            if let Some(device) = state.device.as_ref() {
+                device.set_families(families(&experimental));
+            }
+        }
         Command::Shutdown(reply) => {
             hand_back(state);
-            release_screen(state);
+            state.screen.release(state.device.as_ref());
             let _ = reply.send(Ok(()));
             return false;
         }
+        #[cfg(test)]
+        Command::Exchange { report, reply } => {
+            let answer = match state.device.as_ref() {
+                Some(device) => device
+                    .exchange_feature(&report)
+                    .map_err(|e| format!("{e:#}")),
+                None => Err("no keyboard".to_owned()),
+            };
+            let _ = reply.send(answer);
+        }
     }
     true
+}
+
+/// The command families the open keyboard lets out under these gates.
+fn families(experimental: &Experimental) -> Families {
+    Families {
+        bindings: experimental.keyboard_bindings,
+        onboard: experimental.keyboard_onboard,
+    }
 }
 
 fn try_open(state: &mut State) {
     if !is_older_than(state.last_open_attempt, REOPEN_INTERVAL) {
         return;
     }
+    let Some(api) = state.api.as_mut() else {
+        return;
+    };
     state.last_open_attempt = Some(Instant::now());
     let hid = gg_hid::lock();
-    if state.api.refresh_devices().is_err() {
+    if api.refresh_devices().is_err() {
         return;
     }
-    let opened = Keyboard::open(&state.api);
+    let opened = Keyboard::open(api);
     drop(hid);
     match opened {
         Ok(keyboard) => {
             info!("keyboard connected");
-            state.device = Some(keyboard);
-            forget_device(state);
-            state.last_frame = None;
+            connected(state, keyboard);
         }
         Err(e) => debug!(error = %format!("{e:#}"), "keyboard not available"),
     }
+}
+
+/// The keyboard just opened: it has its own settings, and lets out only the command
+/// families the experimental gates allow.
+fn connected(state: &mut State, keyboard: Keyboard) {
+    keyboard.set_families(families(&state.experimental));
+    state.device = Some(keyboard);
+    forget_device(state);
+    state.last_frame = None;
+    state.just_opened = true;
 }
 
 /// Let the keyboard go if it's gone from the device list, at most every
@@ -657,18 +757,17 @@ fn look_for(state: &mut State) {
     if !is_older_than(state.last_open_attempt, REOPEN_INTERVAL) {
         return;
     }
+    let Some(api) = state.api.as_mut() else {
+        return;
+    };
     state.last_open_attempt = Some(Instant::now());
     let hid = gg_hid::lock();
-    let refreshed = state.api.refresh_devices();
+    let refreshed = api.refresh_devices();
     drop(hid);
     if refreshed.is_err() {
         return;
     }
-    if state
-        .device
-        .as_ref()
-        .is_some_and(|d| !d.is_listed(&state.api))
-    {
+    if state.device.as_ref().is_some_and(|d| !d.is_listed(api)) {
         info!("keyboard disconnected");
         state.device = None;
         forget_device(state);
@@ -678,10 +777,8 @@ fn look_for(state: &mut State) {
 /// Forget what was sent to the keyboard: after it (re)connects, it has its own settings.
 fn forget_device(state: &mut State) {
     state.taken = false;
-    state.switches_sent = None;
-    state.screen_taken = false;
-    state.screen_shown = None;
-    state.screen_last = None;
+    state.switches.forget();
+    state.screen.forget();
 }
 
 /// Send a frame if one is due.
@@ -741,243 +838,6 @@ fn hand_back(state: &mut State) {
     state.taken = false;
 }
 
-/// Every key a switch setting names must have an adjustable switch.
-fn check_analog(switches: &Switches) -> Result<(), String> {
-    let named = switches
-        .keys
-        .iter()
-        .map(|k| k.code)
-        .chain(switches.rapid_trigger.keys.iter().copied())
-        .chain(switches.rapid_tap.pairs.iter().flat_map(|p| [p.a, p.b]));
-    for code in named {
-        if !ANALOG_KEYS.contains(&code) {
-            let label = ANSI_TKL
-                .iter()
-                .find(|k| k.0 == code)
-                .map_or_else(|| format!("{code:#04x}"), |k| k.1.to_owned());
-            return Err(format!("{label} has a fixed switch: it can't be adjusted"));
-        }
-    }
-    Ok(())
-}
-
-fn device_tap_mode(mode: TapMode) -> gg_device_keyboard::TapMode {
-    use gg_device_keyboard::TapMode as D;
-    match mode {
-        TapMode::LastWins => D::LastWins,
-        TapMode::Neither => D::Neither,
-        TapMode::FirstWins => D::FirstWins,
-        TapMode::SecondWins => D::SecondWins,
-    }
-}
-
-/// Send the switch settings once to a keyboard that hasn't had them since it connected.
-fn sync_switches(state: &mut State) {
-    if !state.switches.enabled || state.switches_sent.is_some() {
-        return;
-    }
-    let Some(device) = state.device.as_ref() else {
-        return;
-    };
-    let s = &state.switches;
-    let pairs: Vec<gg_device_keyboard::TapPair> = s
-        .rapid_tap
-        .pairs
-        .iter()
-        .map(|p| gg_device_keyboard::TapPair {
-            a: p.a,
-            b: p.b,
-            mode: device_tap_mode(p.mode),
-            report_both: p.report_both,
-        })
-        .collect();
-    let sensitivity = s.rapid_trigger.sensitivity;
-    let result = device
-        .set_switches(&gg_device_keyboard::Switches {
-            actuation: &|code| s.actuation_of(code),
-            rapid_trigger: &|code| s.rapid_trigger_on(code),
-            sensitivity: &|_| sensitivity,
-            rapid_tap: s.rapid_tap.enabled,
-            tap_pairs: &pairs,
-        })
-        .map_err(|e| format!("{e:#}"));
-    match &result {
-        Ok(()) => info!("keyboard switch settings sent"),
-        Err(e) => warn!(error = %e, "the keyboard did not take the switch settings"),
-    }
-    state.switches_sent = Some(result);
-}
-
-/// The local time, for the clock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LocalTime {
-    hour: u8,
-    minute: u8,
-    second: u8,
-    /// 0 is Sunday.
-    weekday: u8,
-    day: u8,
-    /// 0 is January.
-    month: u8,
-}
-
-fn local_now() -> LocalTime {
-    // SAFETY: `time` with a null pointer only returns the time; `localtime_r` writes
-    // only the `tm` it's given, which lives on this stack.
-    let tm = unsafe {
-        let t = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        tm
-    };
-    LocalTime {
-        hour: tm.tm_hour as u8,
-        minute: tm.tm_min as u8,
-        second: tm.tm_sec.min(59) as u8,
-        weekday: tm.tm_wday as u8,
-        day: tm.tm_mday as u8,
-        month: tm.tm_mon as u8,
-    }
-}
-
-/// The clock's big line, and the small one under it if any.
-fn clock_text(t: LocalTime, seconds: bool, h24: bool, date: bool) -> (String, Option<String>) {
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let mut time = if h24 {
-        format!("{:02}:{:02}", t.hour, t.minute)
-    } else {
-        let h = match t.hour % 12 {
-            0 => 12,
-            h => h,
-        };
-        format!("{h}:{:02}", t.minute)
-    };
-    if seconds {
-        time.push_str(&format!(":{:02}", t.second));
-    }
-    let mut under = Vec::new();
-    if date {
-        under.push(format!(
-            "{} {} {}",
-            DAYS[usize::from(t.weekday % 7)],
-            t.day,
-            MONTHS[usize::from(t.month % 12)]
-        ));
-    }
-    if !h24 {
-        under.push(if t.hour < 12 { "AM" } else { "PM" }.to_owned());
-    }
-    (time, (!under.is_empty()).then(|| under.join(" ")))
-}
-
-/// What a screen setting draws at `now`; `None` for the keyboard's own.
-fn picture(screen: &Screen, now: LocalTime) -> Option<Bitmap> {
-    Some(match screen {
-        Screen::Keyboard => return None,
-        Screen::Text { text } => oled::text(text),
-        Screen::Clock { seconds, h24, date } => {
-            let (time, under) = clock_text(now, *seconds, *h24, *date);
-            oled::clock(&time, under.as_deref())
-        }
-        Screen::Image { pixels } => Bitmap::from_rows(pixels).unwrap_or_default(),
-        // Placeholders until the screen unit (M11 A4) draws these properly.
-        Screen::Animation { frames, .. } => frames
-            .first()
-            .map(|f| Bitmap::from_rows(f).unwrap_or_default())
-            .unwrap_or_default(),
-        Screen::Monitor { .. } => oled::text("System Monitor"),
-    })
-}
-
-/// Whether the screen rests dark now: nobody is there, and it's a picture of gglinux's,
-/// or the keyboard's own and care covers that too.
-fn resting(screen: &Screen, care: &ScreenCare, away: bool) -> bool {
-    away && care.dark_when_away && (care.own_screen_too || !matches!(screen, Screen::Keyboard))
-}
-
-/// Where the picture sits at `unix_secs`, as an offset from where it's drawn: a 5 × 5
-/// square walked row by row, back and forth, a pixel every [`SHIFT_EVERY`] seconds. Each
-/// lit pixel's wear is spread over up to 25 neighbours.
-fn shift_at(unix_secs: u64) -> (i32, i32) {
-    let step = (unix_secs / SHIFT_EVERY % 25) as i32;
-    let (row, col) = (step / 5, step % 5);
-    let x = if row % 2 == 0 { col } else { 4 - col };
-    (x - 2, row - 2)
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// What the screen should show now, `None` for the keyboard's own: dark while resting,
-/// otherwise the picture, moved as screen care says.
-fn frame(state: &State) -> Option<Bitmap> {
-    if resting(&state.screen, &state.care, state.away) {
-        return Some(Bitmap::default());
-    }
-    let picture = picture(&state.screen, local_now())?;
-    Some(if state.care.shift {
-        let (dx, dy) = shift_at(unix_now());
-        picture.shifted(dx, dy)
-    } else {
-        picture
-    })
-}
-
-/// Draw the screen if its picture changed (or is due a refresh), or hand it back.
-fn render_screen(state: &mut State) {
-    state.resting = state.device.is_some() && resting(&state.screen, &state.care, state.away);
-    let Some(device) = state.device.as_ref() else {
-        return;
-    };
-    let Some(picture) = frame(state) else {
-        state.screen_error = None;
-        release_screen(state);
-        return;
-    };
-    if state.screen_shown.as_ref() == Some(&picture)
-        && !is_older_than(state.screen_last, SCREEN_REFRESH)
-    {
-        return;
-    }
-    match device.show_screen(&picture) {
-        Ok(()) => {
-            state.screen_taken = true;
-            state.screen_error = None;
-        }
-        Err(e) => {
-            let message = format!("{e:#}");
-            if state.screen_error.as_ref() != Some(&message) {
-                warn!(error = %message, "the keyboard did not take the screen picture");
-            }
-            state.screen_error = Some(message);
-        }
-    }
-    // Kept even after a failure, so it's tried again at the refresh, not every loop.
-    state.screen_shown = Some(picture);
-    state.screen_last = Some(Instant::now());
-}
-
-/// Give the screen back to the keyboard's own menus, if gglinux drew on it.
-fn release_screen(state: &mut State) {
-    if !state.screen_taken {
-        return;
-    }
-    if let Some(device) = state.device.as_ref() {
-        match device.release_screen() {
-            Ok(()) => debug!("keyboard screen handed back"),
-            Err(e) => warn!(error = %format!("{e:#}"), "could not hand the keyboard screen back"),
-        }
-    }
-    state.screen_taken = false;
-    state.screen_shown = None;
-}
-
 fn snapshot(state: &State) -> KeyboardState {
     KeyboardState {
         connected: state.device.is_some(),
@@ -994,15 +854,12 @@ fn snapshot(state: &State) -> KeyboardState {
         lighting: state.lighting.clone(),
         reactive: state.reactive,
         analog_keys: ANALOG_KEYS.to_vec(),
-        switches: state.switches.clone(),
-        switches_error: match &state.switches_sent {
-            Some(Err(e)) => Some(e.clone()),
-            _ => None,
-        },
-        screen: state.screen.clone(),
-        screen_error: state.screen_error.clone(),
-        screen_care: state.care,
-        screen_resting: state.resting,
+        switches: state.switches.settings().clone(),
+        switches_error: state.switches.error(),
+        screen: state.screen.setting().clone(),
+        screen_error: state.screen.error(),
+        screen_care: state.screen.care(),
+        screen_resting: state.screen.resting(),
     }
 }
 
@@ -1046,6 +903,7 @@ fn save<T: Serialize>(path: &Path, settings: &T, what: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gg_device_keyboard::testing::FakeTransport;
     use gg_ipc::{Effect, Reactive};
 
     fn lighting(enabled: bool, reactive: bool, effect: Effect) -> Lighting {
@@ -1228,145 +1086,109 @@ mod tests {
         assert!(check_keys(&l).is_err());
     }
 
-    fn at(hour: u8, minute: u8, second: u8) -> LocalTime {
-        LocalTime {
-            hour,
-            minute,
-            second,
-            weekday: 4,
-            day: 29,
-            month: 9,
-        }
+    /// A state with no device list and its settings in a folder that isn't there: every
+    /// setting at its default, and nothing here saves one.
+    fn nowhere() -> PathBuf {
+        std::env::temp_dir().join(format!("gglinuxd-keyboard-nowhere-{}", std::process::id()))
+    }
+
+    fn bare_state() -> State {
+        State::new(
+            None,
+            &nowhere(),
+            mpsc::channel().0,
+            Vec::new(),
+            Experimental::default(),
+        )
     }
 
     #[test]
-    fn the_clock_reads_as_chosen() {
-        let t = at(13, 5, 9);
-        assert_eq!(clock_text(t, false, true, false), ("13:05".into(), None));
-        assert_eq!(
-            clock_text(t, true, true, true),
-            ("13:05:09".into(), Some("Thu 29 Oct".into()))
-        );
-        assert_eq!(
-            clock_text(t, false, false, false),
-            ("1:05".into(), Some("PM".into()))
-        );
-        assert_eq!(
-            clock_text(at(0, 30, 0), false, false, true),
-            ("12:30".into(), Some("Thu 29 Oct AM".into())),
-            "midnight is 12 AM"
-        );
-    }
+    fn the_open_keyboard_lets_a_gated_family_out_only_while_its_gate_is_on() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut state = bare_state();
+        connected(&mut state, FakeTransport::new().keyboard());
+        let families_now = |s: &State| s.device.as_ref().unwrap().families();
+        assert_eq!(families_now(&state), Families::default());
 
-    #[test]
-    fn the_keyboard_s_own_screen_draws_nothing_and_a_clock_changes_each_second() {
-        assert!(picture(&Screen::Keyboard, at(1, 2, 3)).is_none());
-        let clock = Screen::Clock {
-            seconds: true,
-            h24: true,
-            date: false,
+        let bindings_on = Experimental {
+            keyboard_bindings: true,
+            ..Experimental::default()
         };
-        assert_ne!(picture(&clock, at(1, 2, 3)), picture(&clock, at(1, 2, 4)));
-        let minutes = Screen::Clock {
-            seconds: false,
-            h24: true,
-            date: false,
+        assert!(handle(
+            Command::SetExperimental(bindings_on),
+            &mut state,
+            &event_tx
+        ));
+        let bindings = Families {
+            bindings: true,
+            onboard: false,
         };
+        assert_eq!(families_now(&state), bindings);
+        connected(&mut state, FakeTransport::new().keyboard());
         assert_eq!(
-            picture(&minutes, at(1, 2, 3)),
-            picture(&minutes, at(1, 2, 4)),
-            "without seconds, the same picture: nothing is sent"
+            families_now(&state),
+            bindings,
+            "and every keyboard opened later"
         );
-    }
 
-    #[test]
-    fn a_picture_is_drawn_from_its_rows() {
-        let mut pixels = vec![0u8; 640];
-        pixels[0] = 0x80;
-        let b = picture(&Screen::Image { pixels }, at(0, 0, 0)).unwrap();
-        assert!(b.get(0, 0) && !b.get(1, 0));
-    }
-
-    #[test]
-    fn a_clock_wakes_the_loop_within_a_second_and_only_while_the_keyboard_is_here() {
-        let clock = Screen::Clock {
-            seconds: false,
-            h24: true,
-            date: false,
+        let onboard_and_a_mouse_gate = Experimental {
+            keyboard_onboard: true,
+            mouse_power: true,
+            ..Experimental::default()
         };
-        let wait = screen_wait(&clock, true).unwrap();
-        assert!(wait > Duration::ZERO && wait <= Duration::from_millis(1005));
-        assert!(screen_wait(&clock, false).is_none());
-        assert!(screen_wait(&Screen::Keyboard, true).is_none());
-    }
-
-    #[test]
-    fn switch_settings_may_only_name_keys_with_adjustable_switches() {
-        let mut s = Switches::default();
-        s.keys.push(gg_ipc::KeyActuation {
-            code: 0x1A,
-            actuation: 4,
-        });
-        assert!(check_analog(&s).is_ok());
-        s.rapid_trigger.keys.push(0x29); // Escape
+        handle(
+            Command::SetExperimental(onboard_and_a_mouse_gate),
+            &mut state,
+            &event_tx,
+        );
         assert_eq!(
-            check_analog(&s).unwrap_err(),
-            "Esc has a fixed switch: it can't be adjusted"
+            families_now(&state),
+            Families {
+                bindings: false,
+                onboard: true
+            }
         );
-        s.rapid_trigger.keys.clear();
-        s.rapid_tap.pairs.push(gg_ipc::TapPair {
-            a: 0x50,
-            b: 0x4F,
-            mode: TapMode::LastWins,
-            report_both: false,
-        });
-        assert!(check_analog(&s).is_err(), "the arrows are fixed too");
+
+        // Told while no keyboard is open: kept for the next one.
+        state.device = None;
+        handle(
+            Command::SetExperimental(Experimental::default()),
+            &mut state,
+            &event_tx,
+        );
+        connected(&mut state, FakeTransport::new().keyboard());
+        assert_eq!(families_now(&state), Families::default());
+        assert!(state.just_opened, "the units' on_connect is due");
     }
 
-    #[test]
-    fn the_screen_rests_only_while_away_and_the_keyboards_own_only_when_asked() {
-        let clock = Screen::Clock {
-            seconds: false,
-            h24: true,
-            date: false,
-        };
-        let care = ScreenCare::default();
-        assert!(resting(&clock, &care, true));
-        assert!(!resting(&clock, &care, false), "somebody's there");
+    #[tokio::test]
+    async fn a_worker_on_a_fresh_install_sends_the_keyboard_nothing_and_answers_the_units() {
+        let fake = FakeTransport::new();
+        let (event_tx, _) = broadcast::channel(8);
+        let kb = spawn_fake(
+            fake.keyboard(),
+            nowhere(),
+            event_tx,
+            Experimental::default(),
+        );
+        assert!(kb.send(Command::GetState).await.unwrap().connected);
+        assert_eq!(
+            kb.send(|r| Command::Bindings(bindings::Cmd::Get(r)))
+                .await
+                .unwrap(),
+            gg_ipc::BindingsState::default()
+        );
+        assert_eq!(
+            kb.send(|r| Command::Onboard(onboard::Cmd::Get(r)))
+                .await
+                .unwrap(),
+            gg_ipc::OnboardState::default()
+        );
+        kb.send::<()>(Command::Shutdown).await.unwrap();
         assert!(
-            !resting(&Screen::Keyboard, &care, true),
-            "the keyboard's own screen is left alone by default"
+            fake.sent().is_empty(),
+            "lighting, switches and screen are all off by default: {:?}",
+            fake.sent()
         );
-        let own = ScreenCare {
-            own_screen_too: true,
-            ..care
-        };
-        assert!(resting(&Screen::Keyboard, &own, true));
-        let never = ScreenCare {
-            dark_when_away: false,
-            own_screen_too: true,
-            ..care
-        };
-        assert!(!resting(&clock, &never, true) && !resting(&Screen::Keyboard, &never, true));
-    }
-
-    #[test]
-    fn the_shift_walks_a_five_by_five_square_a_pixel_at_a_time() {
-        let steps: Vec<(i32, i32)> = (0..25).map(|i| shift_at(i * SHIFT_EVERY)).collect();
-        let mut seen = steps.clone();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), 25, "every offset once a round: {steps:?}");
-        assert!(steps.iter().all(|&(x, y)| x.abs() <= 2 && y.abs() <= 2));
-        for pair in steps.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            assert_eq!((a.0 - b.0).abs() + (a.1 - b.1).abs(), 1, "{a:?} to {b:?}");
-        }
-        assert_eq!(
-            shift_at(SHIFT_EVERY - 1),
-            shift_at(0),
-            "it holds for a whole step"
-        );
-        assert_eq!(shift_at(25 * SHIFT_EVERY), shift_at(0), "and starts over");
     }
 }
