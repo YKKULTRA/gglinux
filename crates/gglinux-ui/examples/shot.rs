@@ -9,7 +9,10 @@
 //! one (`XDG_RUNTIME_DIR=/tmp/gg-fake cargo run -p gglinuxd --example fakemouse`)
 //! it draws every page with made-up devices, from a machine nobody is looking at.
 //! `SHOT_DO=global.callback[:arg],...` runs callbacks first (a click, in effect),
-//! and `SHOT_WAIT_MS` is how long to wait for the daemon's answers.
+//! and `SHOT_WAIT_MS` is how long to wait for the daemon's answers. Each module
+//! of the app answers for its own panel's steps in its `poke` (`mouse.rs` for
+//! `mouse.*`, `switches.rs` for `switches.*`, ...), asked in turn by
+//! `gglinux::poke`.
 //!
 //! `SHOT_SCROLL` scrolls the page first, as its scroll bar would:
 //! - a number of pixels;

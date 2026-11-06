@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Key bindings for the Apex Pro TKL Gen 3: a panel in the keyboard card, after
+// the switches (placed in app.slint). Not built yet, so it stays hidden.
+
+export global BindingsUi {
+    /// Show the panel: in the keyboard card after the switches, with a divider
+    /// above it. Off, it takes no room.
+    in property <bool> shown: false;
+}
+
+/// What the panel shows: nothing yet. Its gaps come from where it's placed.
+export component BindingsPanel { }

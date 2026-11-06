@@ -9,11 +9,15 @@
 
 slint::include_modules!();
 
+pub mod actions;
+pub mod bindings;
 pub mod client;
 pub mod engine;
 pub mod eq;
+pub mod experimental;
 pub mod keyboard;
 pub mod mouse;
+pub mod onboard;
 pub mod pages;
 pub mod screen;
 pub mod shell;
@@ -30,7 +34,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use client::{Changed, Client, State};
 
-/// The panels' working copies.
+/// The panels' working copies: one for each module that draws a panel.
 #[derive(Default)]
 pub struct Forms {
     pub mouse: Rc<RefCell<mouse::MouseForm>>,
@@ -38,22 +42,30 @@ pub struct Forms {
     pub keyboard: RefCell<keyboard::KeyboardForm>,
     pub switches: RefCell<switches::SwitchesForm>,
     pub screen: RefCell<screen::ScreenForm>,
+    pub bindings: RefCell<bindings::BindingsForm>,
+    pub onboard: RefCell<onboard::OnboardForm>,
     pub sonar: Rc<RefCell<sonar::SonarForm>>,
     pub parts: Rc<RefCell<pages::PartsForm>>,
+    pub actions: RefCell<actions::ActionsForm>,
+    pub experimental: RefCell<experimental::ExperimentalForm>,
 }
 
 impl Forms {
     /// Start every working copy afresh. The old app drew its panels anew when
     /// the daemon came back, and a copy made against a daemon process that's gone
-    /// would show settings the new one never applied.
+    /// would show settings the new one never applied. Each module resets its own.
     fn reset(&self) {
         mouse::reset(self);
         engine::reset(self);
         keyboard::reset(self);
         switches::reset(self);
         screen::reset(self);
+        bindings::reset(self);
+        onboard::reset(self);
         *self.sonar.borrow_mut() = Default::default();
         *self.parts.borrow_mut() = Default::default();
+        actions::reset(self);
+        experimental::reset(self);
     }
 }
 
@@ -124,12 +136,16 @@ pub fn wire(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     keyboard::bind(ui, client, forms);
     switches::bind(ui, client, forms);
     screen::bind(ui, client, forms);
+    bindings::bind(ui, client, forms);
+    onboard::bind(ui, client, forms);
     sonar::bind(ui, client, forms.sonar.clone());
     pages::bind_games(ui, client);
     pages::bind_moments(ui, client);
     pages::bind_parts(ui, client, forms.parts.clone());
     pages::bind_profiles(ui, client);
     pages::bind_settings(ui, client);
+    actions::bind(ui, client, forms);
+    experimental::bind(ui, client, forms);
     // Start at login and backups work without the daemon.
     pages::show_settings(ui);
 }
@@ -177,8 +193,10 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
         Changed::Gamesense => pages::show_games(ui, s),
         Changed::Profiles => pages::show_profiles(ui, s),
         Changed::Clips => pages::show_moments(ui, s),
-        // Shown by the M11 panels; nothing shows them yet.
-        Changed::Experimental | Changed::Bindings | Changed::Onboard | Changed::Actions => {}
+        Changed::Experimental => experimental::show(ui, s),
+        Changed::Bindings => bindings::show(ui, s),
+        Changed::Onboard => onboard::show(ui, s),
+        Changed::Actions => actions::show(ui, s),
     }
 }
 
@@ -252,8 +270,12 @@ pub fn poke(ui: &AppWindow, step: &str) {
         || keyboard::poke(ui, name, n)
         || switches::poke(ui, name, n)
         || screen::poke(ui, name, n)
+        || bindings::poke(ui, name, n)
+        || onboard::poke(ui, name, n)
         || sonar::poke(ui, name, n)
-        || pages::poke(ui, name, n);
+        || pages::poke(ui, name, n)
+        || actions::poke(ui, name, n)
+        || experimental::poke(ui, name, n);
     if !known {
         match name {
             "page" => ui.global::<Gg>().set_page(match n {
@@ -291,6 +313,22 @@ mod tests {
         assert_eq!(first.iter().collect::<Vec<_>>(), [1, 5, 6, 7]);
         sync_rows(ModelRc::default(), vec![9], |m| replaced = Some(m));
         assert_eq!(replaced.unwrap().iter().collect::<Vec<_>>(), [9]);
+    }
+
+    #[test]
+    fn a_lost_connection_starts_every_working_copy_afresh() {
+        let forms = Forms::default();
+        forms.mouse.borrow_mut().add_stage();
+        forms.headset.borrow_mut().pick_preset(4);
+        forms.keyboard.borrow_mut().toggle_light(0x04);
+        forms.switches.borrow_mut().selected.insert(0x04);
+        forms.screen.borrow_mut().picked = Some(1);
+        forms.reset();
+        assert_eq!(*forms.mouse.borrow(), mouse::MouseForm::default());
+        assert_eq!(*forms.headset.borrow(), engine::HeadsetForm::default());
+        assert!(forms.keyboard.borrow().light_selected.is_empty());
+        assert!(forms.switches.borrow().selected.is_empty());
+        assert_eq!(forms.screen.borrow().picked, None);
     }
 
     #[test]

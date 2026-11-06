@@ -7,11 +7,15 @@ import { Theme } from "theme.slint";
 import { NavItem, Card, Title, Hint, Code, Shown, PanelHead, Divider } from "widgets.slint";
 import { EngineUi, DeviceList, HeadsetPanel } from "devices.slint";
 import { MousePanel } from "mouse.slint";
-import { KeyboardUi, LightingPanel } from "keyboard.slint";
+import { KeyboardUi, LightingPanel, Opt } from "keyboard.slint";
 import { SwitchesPanel } from "switches.slint";
+import { BindingsUi, BindingsPanel } from "bindings.slint";
 import { ScreenPanel } from "screen.slint";
+import { OnboardUi, OnboardPanel } from "onboard.slint";
 import { SonarPanel } from "sonar.slint";
 import { GamesPanel, MomentsPanel, PartsPanel, ProfilesPanel, SettingsPanel } from "pages.slint";
+import { ActionsUi, ActionsPanel } from "actions.slint";
+import { ExperimentalUi, ExperimentalPanel } from "experimental.slint";
 
 export { Theme, EngineUi }
 export { HeadsetUi } from "devices.slint";
@@ -19,9 +23,13 @@ export { MouseUi } from "mouse.slint";
 export { KeyboardUi } from "keyboard.slint";
 export { SwitchesUi, TapRow } from "switches.slint";
 export { ScreenUi } from "screen.slint";
+export { BindingsUi } from "bindings.slint";
+export { OnboardUi } from "onboard.slint";
 export { Key } from "widgets.slint";
 export { SonarUi, SonarChannel, SonarApp, EqHandle } from "sonar.slint";
 export { GamesUi, Game, MomentsUi, Clip, PartsUi, PartRow, ProfilesUi, RuleRow, SettingsUi } from "pages.slint";
+export { ActionsUi } from "actions.slint";
+export { ExperimentalUi } from "experimental.slint";
 
 export enum Page { engine, sonar, games, moments, settings }
 
@@ -99,9 +107,10 @@ component DevicePanels {
     height: root.side ? max(m.height, h.height) : m.height + h.height;
 }
 
-/// The Apex Pro TKL Gen 3's card: the lighting, the switches and the screen.
-/// Put together here, so each panel's file may use the keyboard's own
-/// (keyboard.slint) without the files importing each other.
+/// The Apex Pro TKL Gen 3's card: the lighting, the switches, key bindings,
+/// the screen and the onboard slots. Put together here, so each panel's file
+/// may use the keyboard's own (keyboard.slint) without the files importing
+/// each other.
 component KeyboardPanel inherits Card {
     PanelHead {
         icon: @image-url("icons/keyboard.svg");
@@ -114,9 +123,27 @@ component KeyboardPanel inherits Card {
         Divider { }
         LightingPanel { }
         Divider { }
-        SwitchesPanel { }
+        // No spacing in these two: a hidden panel takes no room and leaves no
+        // gap. Shown, it gets a divider and the card's 16 px around it.
+        VerticalLayout {
+            spacing: 0;
+            SwitchesPanel { }
+            Opt { shown: BindingsUi.shown; gap: 16px; VerticalLayout {
+                spacing: 16px;
+                Divider { }
+                BindingsPanel { }
+            } }
+        }
         Divider { }
-        ScreenPanel { }
+        VerticalLayout {
+            spacing: 0;
+            ScreenPanel { }
+            Opt { shown: OnboardUi.shown; gap: 16px; VerticalLayout {
+                spacing: 16px;
+                Divider { }
+                OnboardPanel { }
+            } }
+        }
     } }
 }
 
@@ -238,6 +265,8 @@ export component AppWindow inherits Window {
                 Shown { shown: Gg.connected && Gg.page == Page.games; GamesPanel { max-width: 760px; } }
                 Shown { shown: Gg.connected && Gg.page == Page.moments; MomentsPanel { max-width: 760px; } }
                 Shown { shown: Gg.connected && Gg.page == Page.settings; PartsPanel { max-width: 760px; } }
+                Shown { shown: Gg.connected && Gg.page == Page.settings && ActionsUi.shown; ActionsPanel { max-width: 760px; } }
+                Shown { shown: Gg.connected && Gg.page == Page.settings && ExperimentalUi.shown; ExperimentalPanel { max-width: 760px; } }
                 Shown { shown: Gg.connected && Gg.page == Page.settings && Gg.parts.profiles; ProfilesPanel { max-width: 760px; } }
                 // Outside the guard: starting at login and backups work without the daemon.
                 Shown { shown: Gg.page == Page.settings; SettingsPanel { max-width: 760px; showing: Gg.page == Page.settings; } }
