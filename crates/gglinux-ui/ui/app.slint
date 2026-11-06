@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// The gglinux window: a sidebar of pages, and the page.
+// The gglinux window: a sidebar of pages, and the page. The Engine page's
+// device panels and keyboard card are put together here from their own files.
 
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { NavItem, Card, Title, Hint, Code, Shown } from "widgets.slint";
+import { NavItem, Card, Title, Hint, Code, Shown, PanelHead, Divider } from "widgets.slint";
 import { EngineUi, DeviceList, HeadsetPanel } from "devices.slint";
 import { MousePanel } from "mouse.slint";
-import { KeyboardPanel } from "keyboard.slint";
+import { KeyboardUi, LightingPanel } from "keyboard.slint";
+import { SwitchesPanel } from "switches.slint";
+import { ScreenPanel } from "screen.slint";
 import { SonarPanel } from "sonar.slint";
 import { GamesPanel, MomentsPanel, PartsPanel, ProfilesPanel, SettingsPanel } from "pages.slint";
 
 export { Theme, EngineUi }
 export { HeadsetUi } from "devices.slint";
 export { MouseUi } from "mouse.slint";
-export { KeyboardUi, SwitchesUi, ScreenUi, TapRow } from "keyboard.slint";
+export { KeyboardUi } from "keyboard.slint";
+export { SwitchesUi, TapRow } from "switches.slint";
+export { ScreenUi } from "screen.slint";
 export { Key } from "widgets.slint";
 export { SonarUi, SonarChannel, SonarApp, EqHandle } from "sonar.slint";
 export { GamesUi, Game, MomentsUi, Clip, PartsUi, PartRow, ProfilesUi, RuleRow, SettingsUi } from "pages.slint";
@@ -71,6 +76,7 @@ component Offline inherits Card {
 /// The mouse and headset panels: side by side once both fit at a readable
 /// width, else one above the other. Each is capped as in the old app, since a
 /// column of short rows stretched wide leaves each label far from its control.
+/// Here rather than in devices.slint, as mouse.slint uses that file's boxes.
 component DevicePanels {
     property <length> gap: 18px;
     property <length> cap: 560px;
@@ -91,6 +97,27 @@ component DevicePanels {
         HeadsetPanel { }
     }
     height: root.side ? max(m.height, h.height) : m.height + h.height;
+}
+
+/// The Apex Pro TKL Gen 3's card: the lighting, the switches and the screen.
+/// Put together here, so each panel's file may use the keyboard's own
+/// (keyboard.slint) without the files importing each other.
+component KeyboardPanel inherits Card {
+    PanelHead {
+        icon: @image-url("icons/keyboard.svg");
+        title: "Apex Pro TKL Gen 3";
+        meta: KeyboardUi.connected ? "connected" : "not connected";
+    }
+    Shown { shown: KeyboardUi.known; gap: 0; VerticalLayout {
+        padding-top: 4px;
+        spacing: 16px;
+        Divider { }
+        LightingPanel { }
+        Divider { }
+        SwitchesPanel { }
+        Divider { }
+        ScreenPanel { }
+    } }
 }
 
 component EnginePage {

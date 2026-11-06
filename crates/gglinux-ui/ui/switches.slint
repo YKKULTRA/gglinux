@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The Apex Pro TKL Gen 3's switches, in the keyboard card.
+
+import { ComboBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Hint, ErrorLine, Toggle, Button, AccentSlider, Row, Unit, Head, Board, Key } from "widgets.slint";
+import { KeyboardUi, Opt, SubTitle } from "keyboard.slint";
+
+export struct TapRow {
+    a: int,
+    b: int,
+    mode: int,
+    both: bool,
+}
+
+export global SwitchesUi {
+    in property <bool> enabled;
+    in property <int> actuation: 20;
+    in property <[Key]> keys;
+    in property <int> selected;
+    in-out property <int> own-level: 15;
+    in property <bool> rapid;
+    in property <int> rapid-distance: 2;
+    in property <string> rapid-keys;
+    in property <bool> rapid-some;
+    in property <bool> tap;
+    in property <[string]> key-names;
+    in property <[TapRow]> pairs;
+    in property <string> refused;
+    in property <bool> busy;
+    in property <string> error;
+    out property <[string]> tap-modes: ["Last pressed wins", "Neither counts", "First key wins", "Second key wins"];
+    callback set-enabled(bool);
+    callback set-actuation(int);
+    callback key-clicked(int);
+    callback set-own(bool);
+    callback clear-selection();
+    callback set-rapid(bool);
+    callback set-rapid-distance(int);
+    callback rapid-only-selected();
+    callback rapid-every-key();
+    callback set-tap(bool);
+    callback set-pair(int, int, int, int, bool);
+    callback add-pair();
+    callback remove-pair(int);
+}
+
+export component SwitchesPanel {
+    VerticalLayout {
+        Head { text: "SWITCHES"; }
+        Opt { Toggle { text: "gglinux sets the switches (off: the keyboard keeps its own)"; checked: SwitchesUi.enabled; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-enabled(v); } } }
+        Opt { Hint { text: "The keyboard keeps these in memory, not in its flash, so gglinux sends them again each time it connects. Turned off, the keyboard keeps the last ones until it's unplugged."; } }
+        Opt { shown: SwitchesUi.enabled; gap: 14px; VerticalLayout {
+            Row {
+                label: "Actuation";
+                act := AccentSlider { minimum: 1; maximum: 40; value: SwitchesUi.actuation; enabled: !SwitchesUi.busy; released(v) => { SwitchesUi.set-actuation(v); } }
+                Unit { text: (act.shown / 10).to-fixed(1) + " mm for every key without its own"; }
+            }
+            Opt { gap: 12px; Board { keys: SwitchesUi.keys; cols: KeyboardUi.cols; rows: KeyboardUi.rows; clicked(i) => { SwitchesUi.key-clicked(i); } } }
+            Opt { Hint { text: "Click keys to select them. Grey keys have fixed switches; keys with their own point are outlined, and Rapid Trigger keys are tinted."; } }
+            Opt { Row {
+                label: "Selected (\{SwitchesUi.selected})";
+                own := AccentSlider { minimum: 1; maximum: 40; value: SwitchesUi.own-level; released(v) => { SwitchesUi.own-level = v; } }
+                Unit { text: (own.shown / 10).to-fixed(1) + " mm"; }
+            } }
+            Opt { HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Button { text: "Set for selected"; enabled: !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.set-own(true); } }
+                Button { text: "Back to the default"; enabled: !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.set-own(false); } }
+                Button { text: "Clear selection"; enabled: SwitchesUi.selected > 0; clicked => { SwitchesUi.clear-selection(); } }
+            } }
+            Opt { gap: 20px; SubTitle { text: "Rapid Trigger"; } }
+            Opt { Toggle { text: "A key resets as soon as it starts to rise, and fires again as soon as it goes back down"; checked: SwitchesUi.rapid; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-rapid(v); } } }
+            Opt { shown: SwitchesUi.rapid; VerticalLayout {
+                spacing: 10px;
+                Row {
+                    label: "Distance";
+                    dist := AccentSlider { minimum: 1; maximum: 20; value: SwitchesUi.rapid-distance; enabled: !SwitchesUi.busy; released(v) => { SwitchesUi.set-rapid-distance(v); } }
+                    Unit { text: (dist.shown / 10).to-fixed(1) + " mm"; }
+                }
+                Row {
+                    label: "Keys";
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Unit { text: SwitchesUi.rapid-keys; min-width: 0; }
+                        Button { text: "Only the selected"; small: true; enabled: !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.rapid-only-selected(); } }
+                        Button { text: "Every key"; small: true; enabled: !SwitchesUi.busy && SwitchesUi.rapid-some; clicked => { SwitchesUi.rapid-every-key(); } }
+                    }
+                }
+            } }
+            Opt { gap: 20px; SubTitle { text: "Rapid Tap"; } }
+            Opt { Toggle { text: "With both keys of a pair held, the keyboard decides which one counts (SOCD)"; checked: SwitchesUi.tap; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-tap(v); } } }
+            Opt { shown: SwitchesUi.tap; VerticalLayout {
+                spacing: 10px;
+                // The lists give way to the rest in a narrow window.
+                for p[i] in SwitchesUi.pairs : HorizontalLayout {
+                    spacing: 8px;
+                    ComboBox { min-width: 60px; preferred-width: 100px; max-width: 100px; horizontal-stretch: 0; model: SwitchesUi.key-names; current-index: p.a; enabled: !SwitchesUi.busy; selected => { SwitchesUi.set-pair(i, self.current-index, p.b, p.mode, p.both); } }
+                    Text { text: "and"; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 0; }
+                    ComboBox { min-width: 60px; preferred-width: 100px; max-width: 100px; horizontal-stretch: 0; model: SwitchesUi.key-names; current-index: p.b; enabled: !SwitchesUi.busy; selected => { SwitchesUi.set-pair(i, p.a, self.current-index, p.mode, p.both); } }
+                    ComboBox { min-width: 120px; preferred-width: 170px; max-width: 170px; horizontal-stretch: 0; model: SwitchesUi.tap-modes; current-index: p.mode; enabled: !SwitchesUi.busy; selected => { SwitchesUi.set-pair(i, p.a, p.b, self.current-index, p.both); } }
+                    // Kept on one line: wrapped, a row would come out shorter than it is.
+                    Toggle { min-width: 92px; horizontal-stretch: 0; text: "send both"; checked: p.both; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-pair(i, p.a, p.b, p.mode, v); } }
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 0;
+                        Button { text: "Remove"; small: true; enabled: !SwitchesUi.busy; clicked => { SwitchesUi.remove-pair(i); } }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+                    Button { text: "Add a pair"; enabled: !SwitchesUi.busy && SwitchesUi.pairs.length < 10; clicked => { SwitchesUi.add-pair(); } }
+                    Unit { text: "\{SwitchesUi.pairs.length} of 10"; }
+                }
+                Hint { text: "What each mode does comes from other projects' notes; it hasn't been checked on this keyboard yet."; }
+            } }
+        } }
+        Opt { shown: SwitchesUi.refused != ""; ErrorLine { text: "The keyboard refused the switch settings: " + SwitchesUi.refused; } }
+        Opt { shown: SwitchesUi.error != ""; ErrorLine { text: SwitchesUi.error; } }
+    }
+}

@@ -15,8 +15,10 @@ pub mod eq;
 pub mod keyboard;
 pub mod mouse;
 pub mod pages;
+pub mod screen;
 pub mod shell;
 pub mod sonar;
+pub mod switches;
 pub mod system;
 
 use std::cell::RefCell;
@@ -34,6 +36,8 @@ pub struct Forms {
     pub mouse: Rc<RefCell<mouse::MouseForm>>,
     pub headset: Rc<RefCell<engine::HeadsetForm>>,
     pub keyboard: RefCell<keyboard::KeyboardForm>,
+    pub switches: RefCell<switches::SwitchesForm>,
+    pub screen: RefCell<screen::ScreenForm>,
     pub sonar: Rc<RefCell<sonar::SonarForm>>,
     pub parts: Rc<RefCell<pages::PartsForm>>,
 }
@@ -45,7 +49,9 @@ impl Forms {
     fn reset(&self) {
         mouse::reset(self);
         engine::reset(self);
-        *self.keyboard.borrow_mut() = Default::default();
+        keyboard::reset(self);
+        switches::reset(self);
+        screen::reset(self);
         *self.sonar.borrow_mut() = Default::default();
         *self.parts.borrow_mut() = Default::default();
     }
@@ -116,6 +122,8 @@ pub fn wire(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     mouse::bind_mouse(ui, client, forms.mouse.clone());
     engine::bind_headset(ui, client, forms.headset.clone());
     keyboard::bind(ui, client, forms);
+    switches::bind(ui, client, forms);
+    screen::bind(ui, client, forms);
     sonar::bind(ui, client, forms.sonar.clone());
     pages::bind_games(ui, client);
     pages::bind_moments(ui, client);
@@ -159,7 +167,12 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
         Changed::Devices => engine::show_devices(ui, s),
         Changed::Mouse => mouse::show_mouse(ui, s, &forms.mouse),
         Changed::Headset => engine::show_headset(ui, s, &forms.headset),
-        Changed::Keyboard => keyboard::show(ui, s, &forms),
+        // One card, three panels.
+        Changed::Keyboard => {
+            keyboard::show(ui, s, &forms);
+            switches::show(ui, s, &forms);
+            screen::show(ui, s, &forms);
+        }
         Changed::Sonar => sonar::show(ui, s, &forms.sonar),
         Changed::Gamesense => pages::show_games(ui, s),
         Changed::Profiles => pages::show_profiles(ui, s),
@@ -237,6 +250,8 @@ pub fn poke(ui: &AppWindow, step: &str) {
     let known = engine::poke(ui, name, n)
         || mouse::poke(ui, name, n)
         || keyboard::poke(ui, name, n)
+        || switches::poke(ui, name, n)
+        || screen::poke(ui, name, n)
         || sonar::poke(ui, name, n)
         || pages::poke(ui, name, n);
     if !known {
