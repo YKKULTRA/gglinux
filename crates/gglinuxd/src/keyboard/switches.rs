@@ -6,11 +6,13 @@
 //! Keys may also have a second (deep-press) actuation point. Its table goes after the
 //! others, and only while the keyboard lets the bindings family out (`keyboard_bindings`
 //! on); with the gate off exactly the same reports go out as without deep-press points.
+//! Removing the last one sends the table once more, with none for every key, and a deep
+//! press must reach the keyboard deeper than the key's first press ([`check_deeper`]).
 
 use std::path::{Path, PathBuf};
 
 use gg_device_keyboard::layout::US;
-use gg_device_keyboard::proto::ANALOG_KEYS;
+use gg_device_keyboard::proto::{self, ANALOG_KEYS};
 use gg_device_keyboard::Keyboard;
 use gg_ipc::{Switches, TapMode};
 use tracing::{info, warn};
@@ -24,6 +26,9 @@ pub struct SwitchesState {
     /// With which bindings family the open keyboard last had its deep-press points
     /// dealt with: sent (`true`), held back (`false`), or not yet.
     second: Option<bool>,
+    /// The open keyboard holds deep-press points of gglinux's: a table with some went out
+    /// since it connected. They stay there until a table without them replaces them.
+    second_out: bool,
 }
 
 impl SwitchesState {
@@ -35,15 +40,21 @@ impl SwitchesState {
             path,
             sent: None,
             second: None,
+            second_out: false,
         }
     }
 
     /// New switch settings, checked and saved; the loop sends them, if they're on.
     pub fn set(&mut self, switches: Switches) -> Result<(), String> {
-        switches.validate().and_then(|()| check_analog(&switches))?;
+        switches
+            .validate()
+            .and_then(|()| check_analog(&switches))
+            .and_then(|()| check_deeper(&switches))?;
         self.switches = switches;
         super::save(&self.path, &self.switches, "switch");
-        self.forget();
+        // Sent again, to the keyboard that has the old ones (and maybe deep-press points).
+        self.sent = None;
+        self.second = None;
         Ok(())
     }
 
@@ -94,11 +105,15 @@ impl SwitchesState {
     }
 
     /// The deep-press points, once the others went through: only while the keyboard lets
-    /// the bindings family out, and again when that comes on.
+    /// the bindings family out, and again when that comes on. With none left, a table of
+    /// "none" for every key takes back points of gglinux's the keyboard still holds.
     fn sync_second(&mut self, device: &Keyboard) {
         let on = device.families().bindings;
         let s = &self.switches;
-        if s.second.is_empty() || !matches!(self.sent, Some(Ok(()))) || self.second == Some(on) {
+        if !matches!(self.sent, Some(Ok(()))) || self.second == Some(on) {
+            return;
+        }
+        if s.second.is_empty() && !self.second_out {
             return;
         }
         self.second = Some(on);
@@ -114,7 +129,10 @@ impl SwitchesState {
             })
             .map_err(|e| format!("{e:#}"));
         match result {
-            Ok(()) => info!("keyboard deep-press points sent"),
+            Ok(()) => {
+                info!("keyboard deep-press points sent");
+                self.second_out = !s.second.is_empty();
+            }
             Err(e) => {
                 warn!(error = %e, "the keyboard did not take the deep-press points");
                 self.sent = Some(Err(e));
@@ -122,10 +140,12 @@ impl SwitchesState {
         }
     }
 
-    /// Forget they were sent: a keyboard that (re)connects has its own.
+    /// Forget they were sent: a keyboard that (re)connects, or that just loaded an
+    /// onboard slot, has its own.
     pub fn forget(&mut self) {
         self.sent = None;
         self.second = None;
+        self.second_out = false;
     }
 
     pub fn settings(&self) -> &Switches {
@@ -141,6 +161,34 @@ impl SwitchesState {
     }
 }
 
+/// A key's deep press must go to the keyboard deeper than its first press. The keyboard
+/// gets thresholds, not tenths, and some tenths share one (0.1 and 0.2 mm; 3.8, 3.9 and
+/// 4.0 mm): two points with the same one would fire together.
+fn check_deeper(switches: &Switches) -> Result<(), String> {
+    let mm = |tenths: u8| format!("{}.{} mm", tenths / 10, tenths % 10);
+    for k in &switches.second {
+        let first = switches.actuation_of(k.code);
+        if proto::thresholds(k.actuation).0 <= proto::thresholds(first).0 {
+            return Err(format!(
+                "{}'s deep press at {} reaches the keyboard at the same depth as its first \
+                 press at {}, so both would fire together. Leave more room between them: the \
+                 keyboard can't tell 0.1 from 0.2 mm, or 3.8 from 3.9 or 4.0 mm",
+                label(k.code),
+                mm(k.actuation),
+                mm(first)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A key's label on the US board; keys with a fixed switch have the same one on every board.
+fn label(code: u8) -> String {
+    US.iter()
+        .find(|k| k.0 == code)
+        .map_or_else(|| format!("{code:#04x}"), |k| k.1.to_owned())
+}
+
 /// Every key a switch setting names must have an adjustable switch.
 fn check_analog(switches: &Switches) -> Result<(), String> {
     let named = switches
@@ -152,12 +200,10 @@ fn check_analog(switches: &Switches) -> Result<(), String> {
         .chain(switches.second.iter().map(|k| k.code));
     for code in named {
         if !ANALOG_KEYS.contains(&code) {
-            // Keys with a fixed switch have the same label on every board.
-            let label = US
-                .iter()
-                .find(|k| k.0 == code)
-                .map_or_else(|| format!("{code:#04x}"), |k| k.1.to_owned());
-            return Err(format!("{label} has a fixed switch: it can't be adjusted"));
+            return Err(format!(
+                "{} has a fixed switch: it can't be adjusted",
+                label(code)
+            ));
         }
     }
     Ok(())
@@ -176,6 +222,7 @@ fn device_tap_mode(mode: TapMode) -> gg_device_keyboard::TapMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Scratch;
     use gg_device_keyboard::testing::{FakeTransport, Kind};
 
     #[test]
@@ -213,6 +260,7 @@ mod tests {
             path: PathBuf::new(),
             sent: None,
             second: None,
+            second_out: false,
         }
     }
 
@@ -369,5 +417,157 @@ mod tests {
         assert!(s.error().unwrap().contains("0x38"), "{:?}", s.error());
         s.sync(Some(&kb));
         assert_eq!(fake.sent().len(), 5, "not tried every loop");
+    }
+
+    #[test]
+    fn removing_the_last_deep_press_sends_one_table_with_none_for_every_key() {
+        let d = Scratch::new("switches-deep-cleared");
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        kb.set_families(bindings_on());
+        let mut s = SwitchesState::load(&d.0);
+        let none = || Switches {
+            second: Vec::new(),
+            ..deep(true)
+        };
+        s.set(deep(true)).unwrap();
+        s.sync(Some(&kb));
+        assert_eq!(fake.sent().len(), 6);
+
+        fake.clear_sent();
+        s.set(none()).unwrap();
+        s.sync(Some(&kb));
+        s.sync(Some(&kb));
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 6, "the switches, then one deep-press table");
+        assert_eq!(
+            sent[5].report,
+            gg_device_keyboard::bindings::second_actuation_table(|_| None)
+        );
+
+        // Once: the keyboard has none now.
+        fake.clear_sent();
+        s.set(Switches {
+            actuation: 16,
+            ..none()
+        })
+        .unwrap();
+        s.sync(Some(&kb));
+        assert_eq!(fake.sent().len(), 5);
+
+        // Removed while the gate is off: nothing then, the table once it's back on.
+        s.set(deep(true)).unwrap();
+        s.sync(Some(&kb));
+        kb.set_families(gg_device_keyboard::Families::default());
+        s.set(none()).unwrap();
+        fake.clear_sent();
+        s.sync(Some(&kb));
+        assert_eq!(fake.sent().len(), 5, "the switches only");
+        kb.set_families(bindings_on());
+        s.sync(Some(&kb));
+        s.sync(Some(&kb));
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 6);
+        assert_eq!(
+            sent[5].report,
+            gg_device_keyboard::bindings::second_actuation_table(|_| None)
+        );
+
+        // A keyboard that reconnects has its own: nothing to take back there.
+        s.set(deep(true)).unwrap();
+        s.sync(Some(&kb));
+        s.forget();
+        s.set(none()).unwrap();
+        fake.clear_sent();
+        s.sync(Some(&kb));
+        assert_eq!(fake.sent().len(), 5);
+    }
+
+    #[test]
+    fn a_deep_press_must_reach_the_keyboard_deeper_than_the_first_press() {
+        let d = Scratch::new("switches-deeper");
+        let mut s = SwitchesState::load(&d.0);
+        let at = |first, deep| Switches {
+            enabled: true,
+            actuation: first,
+            second: vec![gg_ipc::KeyActuation {
+                code: 0x1A,
+                actuation: deep,
+            }],
+            ..Switches::default()
+        };
+        // 3.8, 3.9 and 4.0 mm send the same threshold; so do 0.1 and 0.2 mm.
+        assert_eq!(
+            s.set(at(38, 39)).unwrap_err(),
+            "W's deep press at 3.9 mm reaches the keyboard at the same depth as its first \
+             press at 3.8 mm, so both would fire together. Leave more room between them: the \
+             keyboard can't tell 0.1 from 0.2 mm, or 3.8 from 3.9 or 4.0 mm"
+        );
+        for (first, deep) in [(38, 40), (39, 40), (1, 2)] {
+            let e = s.set(at(first, deep)).unwrap_err();
+            assert!(e.contains("same depth"), "{first} {deep}: {e}");
+        }
+        // A key's own first point counts, not every key's.
+        let mut own = at(10, 39);
+        own.keys.push(gg_ipc::KeyActuation {
+            code: 0x1A,
+            actuation: 38,
+        });
+        assert!(s.set(own).unwrap_err().contains("same depth"));
+        assert!(!d.0.join("switches.json").exists(), "nothing saved");
+        for (first, deep) in [(37, 38), (2, 3), (15, 30), (1, 40)] {
+            s.set(at(first, deep)).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn after_a_slot_load_gglinuxs_switches_go_to_the_keyboard_again() {
+        use super::super::{onboard, spawn_fake, Command};
+        let d = Scratch::new("switches-slot-load");
+        std::fs::write(
+            d.0.join("switches.json"),
+            r#"{"enabled":true,"actuation":20}"#,
+        )
+        .unwrap();
+        let fake = FakeTransport::new();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let exp = gg_ipc::Experimental {
+            keyboard_onboard: true,
+            ..gg_ipc::Experimental::default()
+        };
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, exp);
+        kb.send(Command::GetState).await.unwrap();
+        kb.send(Command::GetState).await.unwrap();
+        assert_eq!(fake.sent().len(), 5, "sent once on connect");
+
+        fake.clear_sent();
+        let load = |slot| move |reply| Command::Onboard(onboard::Cmd::Load { slot, reply });
+        kb.send(load(1)).await.unwrap();
+        kb.send(Command::GetState).await.unwrap();
+        let ops: Vec<(Kind, u8, u8)> = fake
+            .sent()
+            .iter()
+            .map(|s| (s.kind, s.report[1], s.report[2]))
+            .collect();
+        assert_eq!(
+            ops,
+            [
+                (Kind::Output, 0xB2, 0x01),
+                (Kind::Feature, 0x38, 0x61),
+                (Kind::Feature, 0x38, 0x62),
+                (Kind::Feature, 0x38, 0x65),
+                (Kind::Output, 0x38, 0x67),
+                (Kind::Output, 0x38, 0x66),
+            ],
+            "the slot runs its own switches: gglinux's go again"
+        );
+
+        // A load that fails leaves the keyboard as it was: nothing goes again.
+        fake.clear_sent();
+        fake.fail_send(12);
+        assert!(kb.send(load(2)).await.is_err());
+        kb.send(Command::GetState).await.unwrap();
+        assert!(fake.sent().is_empty());
+        kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 }

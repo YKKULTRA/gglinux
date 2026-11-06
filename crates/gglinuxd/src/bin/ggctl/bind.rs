@@ -5,7 +5,8 @@
 //! ```text
 //! ggctl bind                          # the bindings gglinux sends, and the last read
 //! ggctl bind read                     # read the keyboard's own back
-//! ggctl bind on|off                   # send them when the keyboard connects, or not
+//! ggctl bind on|off                   # send them each time the keyboard connects, or stop
+//!                                     #   (what was sent stays until it's unplugged)
 //! ggctl bind capslock ctrl+a          # a key or combination, up to 4 keys
 //! ggctl bind fn+f1 media:mute         # with Fn held (or --layer fn)
 //! ggctl bind deep+w mouse:4           # past W's deep-press point (or --layer deep)
@@ -168,7 +169,8 @@ const MOUSE: [(&str, u8); 5] = [
 /// What the command line asks of the bindings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindEdit {
-    /// Send them when the keyboard connects, or leave the keyboard's own.
+    /// Send them each time the keyboard connects, or stop sending them. Off undoes
+    /// nothing: what was sent stays on the keyboard until it's unplugged.
     Enabled(bool),
     /// One key on one layer; turns the bindings on.
     Key {
@@ -419,7 +421,7 @@ pub fn print(state: &BindingsState) {
         if state.enabled {
             "on (gglinux sends them when the keyboard connects)"
         } else {
-            "off (the keyboard keeps its own)"
+            "off (gglinux sends nothing; what it sent stays until the keyboard is unplugged)"
         }
     );
     if let Some(k) = state.bindings.fn_key {

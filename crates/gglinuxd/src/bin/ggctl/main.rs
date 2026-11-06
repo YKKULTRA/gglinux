@@ -62,7 +62,8 @@ ggctl experimental                      # features not tried on your hardware ye
 ggctl experimental keyboard_onboard on  # turn one on or off, by the name listed
 ggctl bind                              # key bindings gglinux sends, and the keyboard's as last read
 ggctl bind read                         # read the keyboard's bindings back (all three layers)
-ggctl bind on|off                       # send them when the keyboard connects, or leave its own
+ggctl bind on|off                       # on: send them each time the keyboard connects; off: send
+                                        #   nothing more (what was sent stays until it's unplugged)
 ggctl bind capslock ctrl+a              # up to 4 keys; or media:mute, mouse:4, cpi, wheel:up,
                                         #   pan:left, none, default
 ggctl bind fn+f1 media:mute             # with Fn held (or --layer fn); deep+w … past W's deep press
