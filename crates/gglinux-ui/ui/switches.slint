@@ -27,6 +27,11 @@ export global SwitchesUi {
     in property <[string]> key-names;
     in property <[TapRow]> pairs;
     in property <string> refused;
+    /// The deep-press point: `keyboard_bindings` is on, and why it isn't.
+    in property <bool> deep-gated;
+    in property <string> deep-refusal;
+    in-out property <int> deep-level: 30;
+    in property <string> deep-keys;
     in property <bool> busy;
     in property <string> error;
     out property <[string]> tap-modes: ["Last pressed wins", "Neither counts", "First key wins", "Second key wins"];
@@ -43,6 +48,8 @@ export global SwitchesUi {
     callback set-pair(int, int, int, int, bool);
     callback add-pair();
     callback remove-pair(int);
+    /// The selected keys get a deep-press point at `deep-level` (true), or none.
+    callback set-deep(bool);
 }
 
 export component SwitchesPanel {
@@ -70,6 +77,20 @@ export component SwitchesPanel {
                 Button { text: "Back to the default"; enabled: !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.set-own(false); } }
                 Button { text: "Clear selection"; enabled: SwitchesUi.selected > 0; clicked => { SwitchesUi.clear-selection(); } }
             } }
+            Opt { gap: 20px; SubTitle { text: "Deep press"; } }
+            Opt { Hint { text: SwitchesUi.deep-gated ? "A second, deeper point for the selected keys. Pressed past it, a key does what its deep-press binding says (Key bindings, below)." : SwitchesUi.deep-refusal; } }
+            Opt { Row {
+                label: "Second point";
+                deep := AccentSlider { minimum: 1; maximum: 40; value: SwitchesUi.deep-level; enabled: SwitchesUi.deep-gated && !SwitchesUi.busy; released(v) => { SwitchesUi.deep-level = v; } }
+                Unit { text: (deep.shown / 10).to-fixed(1) + " mm"; }
+            } }
+            Opt { HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Button { text: "Set for selected"; enabled: SwitchesUi.deep-gated && !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.set-deep(true); } }
+                Button { text: "Remove from selected"; enabled: SwitchesUi.deep-gated && !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.set-deep(false); } }
+            } }
+            Opt { Hint { text: SwitchesUi.deep-keys; } }
             Opt { gap: 20px; SubTitle { text: "Rapid Trigger"; } }
             Opt { Toggle { text: "A key resets as soon as it starts to rise, and fires again as soon as it goes back down"; checked: SwitchesUi.rapid; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-rapid(v); } } }
             Opt { shown: SwitchesUi.rapid; VerticalLayout {
