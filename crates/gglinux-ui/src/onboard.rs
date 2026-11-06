@@ -160,8 +160,24 @@ fn draw(ui: &AppWindow, state: &OnboardState, refused: Option<String>) {
     if let Some(e) = &state.error {
         g.set_error(e.into());
     }
-    g.set_note(state.note.clone().unwrap_or_default().into());
+    g.set_note(
+        state
+            .note
+            .as_deref()
+            .map(sentence)
+            .unwrap_or_default()
+            .into(),
+    );
     g.set_recovery(recovery(state).into());
+}
+
+/// `text` with its first letter made a capital, to stand alone as a sentence.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// For the `shot` example: slot `slot` (from 0) doesn't check out and the last write got
@@ -340,6 +356,15 @@ mod tests {
             "{text}"
         );
         assert_eq!(recovery(&OnboardState::default()), "");
+    }
+
+    #[test]
+    fn a_note_from_the_daemon_stands_as_a_sentence() {
+        assert_eq!(
+            sentence("the keyboard's own check of the slot didn't answer"),
+            "The keyboard's own check of the slot didn't answer"
+        );
+        assert_eq!(sentence(""), "");
     }
 
     #[test]
