@@ -135,6 +135,24 @@ impl Edit {
     }
 }
 
+/// After a change: read the actions back until the daemon shows `sent`, three reads at
+/// most, 200 ms apart. A daemon may answer the first read after a change with the list
+/// from before it, and the next `ggctl actions set` must not start from that list.
+pub fn read_back(
+    sent: &[ActionBinding],
+    mut read: impl FnMut() -> Result<ActionsState>,
+) -> Result<bool> {
+    for n in 0..3 {
+        if n > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        if read()?.bindings == sent {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// What `ggctl actions` prints.
 pub fn print(state: &ActionsState) {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
@@ -339,6 +357,32 @@ mod tests {
         assert_eq!(list.len(), 1);
         let e = edit("rm f14").apply(&mut list).unwrap_err();
         assert_eq!(e.to_string(), "F14 has no action");
+    }
+
+    #[test]
+    fn a_change_is_read_back_past_a_stale_answer() {
+        let mut list = Vec::new();
+        set_on(&mut list, "set f13 run kitty");
+        let stale = ActionsState::default();
+        let fresh = ActionsState {
+            bindings: list.clone(),
+            ..ActionsState::default()
+        };
+        let mut answers = vec![fresh, stale.clone()];
+        let mut reads = 0;
+        let seen = read_back(&list, || {
+            reads += 1;
+            Ok(answers.pop().unwrap())
+        });
+        assert!(seen.unwrap());
+        assert_eq!(reads, 2, "the stale one, then the change");
+        let mut reads = 0;
+        let never = read_back(&list, || {
+            reads += 1;
+            Ok(stale.clone())
+        });
+        assert!(!never.unwrap());
+        assert_eq!(reads, 3);
     }
 
     fn set_on(list: &mut Vec<ActionBinding>, line: &str) {
