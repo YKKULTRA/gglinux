@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use gg_device_keyboard::bindings::{self as kb, Action, Block, Change};
-use gg_device_keyboard::layout::ANSI_TKL;
+use gg_device_keyboard::layout::US;
 use gg_device_keyboard::Keyboard;
 use gg_ipc::{
     Bindings, BindingsState, Event, Experimental, Feature, KeyAction, KeyBinding, Layer, Request,
@@ -304,7 +304,7 @@ pub async fn handle(req: Request, kb: &Handle) -> ResponseData {
 
 /// A key's name on the keyboard picture, for messages.
 fn label(code: u8) -> String {
-    match ANSI_TKL.iter().find(|k| k.0 == code) {
+    match US.iter().find(|k| k.0 == code) {
         Some((_, "", ..)) => "Space".into(),
         Some((_, label, ..)) => (*label).to_owned(),
         None => format!("key {code:#04x}"),
@@ -777,7 +777,7 @@ mod tests {
         assert!(with(Layer::Normal, CAPS).is_ok());
         assert_eq!(
             with(Layer::Normal, 0x46).unwrap_err(),
-            "PrtSc can't be bound on this keyboard"
+            "key 0x46 can't be bound on this keyboard"
         );
         assert_eq!(
             with(Layer::Second, 0x29).unwrap_err(),
@@ -789,7 +789,10 @@ mod tests {
             fn_key: Some(0x48),
             ..Bindings::default()
         };
-        assert_eq!(check(&fn_key).unwrap_err(), "Pause can't hold the Fn layer");
+        assert_eq!(
+            check(&fn_key).unwrap_err(),
+            "key 0x48 can't hold the Fn layer"
+        );
         let twice = Bindings {
             normal: vec![bind(4, KeyAction::Cpi), bind(4, KeyAction::Unbound)],
             ..Bindings::default()

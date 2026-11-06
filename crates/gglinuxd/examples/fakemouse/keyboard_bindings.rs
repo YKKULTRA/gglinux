@@ -12,7 +12,7 @@
 use std::sync::Mutex;
 
 use gg_device_keyboard::bindings::{self as kb, Action, Block, Change, FIRMWARE, STOCK_FN_LAYER};
-use gg_device_keyboard::layout::ANSI_TKL;
+use gg_device_keyboard::layout::US;
 use gg_ipc::{
     Bindings, BindingsState, Feature, KeyAction, KeyBinding, Layer, Request, ResponseData,
 };
@@ -114,7 +114,7 @@ fn set(board: &mut Board, bindings: Bindings, enabled: bool) -> Result<(), Strin
 }
 
 fn label(code: u8) -> String {
-    match ANSI_TKL.iter().find(|k| k.0 == code) {
+    match US.iter().find(|k| k.0 == code) {
         Some((_, "", ..)) => "Space".into(),
         Some((_, label, ..)) => (*label).to_owned(),
         None => format!("key {code:#04x}"),

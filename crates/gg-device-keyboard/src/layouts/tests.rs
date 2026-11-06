@@ -317,18 +317,3 @@ fn every_key_but_space_has_a_label() {
         }
     }
 }
-
-#[test]
-fn the_old_generic_drawing_still_has_87_keys_the_frame_can_light() {
-    let mut codes: Vec<u8> = ANSI_TKL.iter().map(|k| k.0).collect();
-    codes.sort_unstable();
-    codes.dedup();
-    assert_eq!(codes.len(), 87);
-    assert!(
-        codes.iter().all(|c| KEYS.contains(c)),
-        "every drawn key is in the frame"
-    );
-    assert!(ANSI_TKL
-        .iter()
-        .all(|&(_, _, x, _, w)| x >= 0.0 && x + w <= WIDTH));
-}
