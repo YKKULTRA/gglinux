@@ -4,13 +4,15 @@
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { NavItem, Card, Title, Hint, Code, Shown } from "widgets.slint";
-import { EngineUi, DeviceList, DevicePanels } from "devices.slint";
+import { EngineUi, DeviceList, HeadsetPanel } from "devices.slint";
+import { MousePanel } from "mouse.slint";
 import { KeyboardPanel } from "keyboard.slint";
 import { SonarPanel } from "sonar.slint";
 import { GamesPanel, MomentsPanel, PartsPanel, ProfilesPanel, SettingsPanel } from "pages.slint";
 
 export { Theme, EngineUi }
-export { MouseUi, HeadsetUi } from "devices.slint";
+export { HeadsetUi } from "devices.slint";
+export { MouseUi } from "mouse.slint";
 export { KeyboardUi, SwitchesUi, ScreenUi, TapRow } from "keyboard.slint";
 export { Key } from "widgets.slint";
 export { SonarUi, SonarChannel, SonarApp, EqHandle } from "sonar.slint";
@@ -64,6 +66,31 @@ component Offline inherits Card {
     if root.how : Hint { text: "Start the daemon, and this fills in by itself:"; }
     if root.how : Code { text: "systemctl --user enable --now gglinuxd"; }
     if root.how : Hint { text: "The app reconnects on its own; there's no need to restart it."; }
+}
+
+/// The mouse and headset panels: side by side once both fit at a readable
+/// width, else one above the other. Each is capped as in the old app, since a
+/// column of short rows stretched wide leaves each label far from its control.
+component DevicePanels {
+    property <length> gap: 18px;
+    property <length> cap: 560px;
+    property <bool> side: EngineUi.mouse && EngineUi.headset && root.width >= 2 * 420px + root.gap;
+    property <length> lane: root.side ? min(root.cap, (root.width - root.gap) / 2) : min(root.cap, root.width);
+    m := Shown {
+        x: 0;
+        y: 0;
+        width: root.lane;
+        shown: EngineUi.mouse;
+        MousePanel { }
+    }
+    h := Shown {
+        x: root.side ? root.lane + root.gap : 0;
+        y: root.side ? 0 : m.height;
+        width: root.lane;
+        shown: EngineUi.headset;
+        HeadsetPanel { }
+    }
+    height: root.side ? max(m.height, h.height) : m.height + h.height;
 }
 
 component EnginePage {

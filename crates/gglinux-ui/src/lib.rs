@@ -13,6 +13,7 @@ pub mod client;
 pub mod engine;
 pub mod eq;
 pub mod keyboard;
+pub mod mouse;
 pub mod pages;
 pub mod shell;
 pub mod sonar;
@@ -30,7 +31,7 @@ use client::{Changed, Client, State};
 /// The panels' working copies.
 #[derive(Default)]
 pub struct Forms {
-    pub mouse: Rc<RefCell<engine::MouseForm>>,
+    pub mouse: Rc<RefCell<mouse::MouseForm>>,
     pub headset: Rc<RefCell<engine::HeadsetForm>>,
     pub keyboard: RefCell<keyboard::KeyboardForm>,
     pub sonar: Rc<RefCell<sonar::SonarForm>>,
@@ -42,8 +43,8 @@ impl Forms {
     /// the daemon came back, and a copy made against a daemon process that's gone
     /// would show settings the new one never applied.
     fn reset(&self) {
-        *self.mouse.borrow_mut() = Default::default();
-        *self.headset.borrow_mut() = Default::default();
+        mouse::reset(self);
+        engine::reset(self);
         *self.keyboard.borrow_mut() = Default::default();
         *self.sonar.borrow_mut() = Default::default();
         *self.parts.borrow_mut() = Default::default();
@@ -112,7 +113,7 @@ pub fn start(ui: &AppWindow) -> Client {
 /// Answer the window's callbacks.
 pub fn wire(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     engine::bind_devices(ui, client);
-    engine::bind_mouse(ui, client, forms.mouse.clone());
+    mouse::bind_mouse(ui, client, forms.mouse.clone());
     engine::bind_headset(ui, client, forms.headset.clone());
     keyboard::bind(ui, client, forms);
     sonar::bind(ui, client, forms.sonar.clone());
@@ -156,7 +157,7 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
             pages::show_parts(ui, s, &forms.parts);
         }
         Changed::Devices => engine::show_devices(ui, s),
-        Changed::Mouse => engine::show_mouse(ui, s, &forms.mouse),
+        Changed::Mouse => mouse::show_mouse(ui, s, &forms.mouse),
         Changed::Headset => engine::show_headset(ui, s, &forms.headset),
         Changed::Keyboard => keyboard::show(ui, s, &forms),
         Changed::Sonar => sonar::show(ui, s, &forms.sonar),
@@ -234,6 +235,7 @@ pub fn poke(ui: &AppWindow, step: &str) {
     let n: i32 = arg.parse().unwrap_or(0);
     // Each page module answers for its own steps.
     let known = engine::poke(ui, name, n)
+        || mouse::poke(ui, name, n)
         || keyboard::poke(ui, name, n)
         || sonar::poke(ui, name, n)
         || pages::poke(ui, name, n);
