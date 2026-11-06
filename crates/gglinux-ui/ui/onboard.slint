@@ -25,6 +25,11 @@ export global OnboardUi {
     /// The daemon is reading or writing (its own word, or ours while we wait).
     in property <bool> busy;
     in property <string> error;
+    /// What the last operation noticed though it went through; empty for nothing.
+    in property <string> note;
+    /// The terminal command that puts a backup back into each slot that doesn't check
+    /// out; empty while they all do.
+    in property <string> recovery;
     callback read-all();
     callback load(int);
     callback write(int);
@@ -84,6 +89,8 @@ export component OnboardPanel {
             Hint { text: OnboardUi.busy ? "Working with the keyboard's memory…" : "Reads each slot and saves a copy of it."; vertical-alignment: center; }
         } }
         Opt { Hint { text: "gglinux writes its screen picture and Rapid Tap pairs into a slot. Actuation points, Rapid Trigger and key bindings stay as the slot has them for now: the keyboard keeps them in its own key order, which isn't known yet."; } }
+        Opt { shown: OnboardUi.recovery != ""; Hint { text: OnboardUi.recovery; color: Theme.danger; } }
+        Opt { shown: OnboardUi.note != ""; Hint { text: OnboardUi.note; } }
         Opt { shown: OnboardUi.error != ""; ErrorLine { text: OnboardUi.error; } }
     }
 }

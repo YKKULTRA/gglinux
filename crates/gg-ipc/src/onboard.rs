@@ -35,17 +35,28 @@ pub struct OnboardState {
     pub busy: bool,
     /// Why the last operation didn't go through, and what was done about it.
     pub error: Option<String>,
+    /// Something the last operation noticed though it went through (what the keyboard's
+    /// own check of a written slot answered, while what a good answer looks like isn't
+    /// known).
+    pub note: Option<String>,
 }
 
 /// What to write into a slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OnboardSource {
-    /// The slot as it is, with gglinux's current switch settings, bindings and screen picture
-    /// written into it. Everything gglinux doesn't set (macros, lighting, the rest) is kept.
+    /// The slot as it is, with gglinux's screen picture (text or a picture) and, if gglinux
+    /// sets the switches, its Rapid Tap pairs written into it. Everything else is kept as
+    /// the slot has it: macros, lighting, bindings, and the per-key actuation and Rapid
+    /// Trigger tables (the firmware's key order for them isn't known yet).
     Current,
     /// A backup file made earlier (absolute path).
     Backup { path: String },
+    /// A backup file (absolute path) put into a slot that doesn't check out any more, such
+    /// as one a write left half written: `ggctl onboard restore N <file> --damaged`. The
+    /// slot's bytes are saved first as `slot<N>-<UTC>-damaged.bin`. Refused for a slot that
+    /// checks out, which takes [`OnboardSource::Backup`].
+    Recover { path: String },
 }
 
 /// Check a slot number, with a message meant for the user.
@@ -55,7 +66,7 @@ pub fn check_slot(slot: u8) -> Result<(), String> {
     } else {
         Err(format!(
             "the keyboard has slots 1 to {SLOTS}, not {}",
-            slot + 1
+            u16::from(slot) + 1
         ))
     }
 }
@@ -70,6 +81,8 @@ mod tests {
             check_slot(s).unwrap();
         }
         assert!(check_slot(5).unwrap_err().contains("slots 1 to 5"));
+        // Any byte a client sends, without overflowing.
+        assert!(check_slot(255).unwrap_err().contains("not 256"));
     }
 
     #[test]
@@ -85,5 +98,18 @@ mod tests {
             serde_json::from_str::<OnboardSource>(&serde_json::to_string(&b).unwrap()).unwrap(),
             b
         );
+        assert_eq!(
+            serde_json::to_string(&OnboardSource::Recover {
+                path: "/x/slot5.bin".into()
+            })
+            .unwrap(),
+            r#"{"kind":"recover","path":"/x/slot5.bin"}"#
+        );
+    }
+
+    #[test]
+    fn a_state_from_an_older_daemon_has_no_note() {
+        let state: OnboardState = serde_json::from_str(r#"{"busy":false}"#).unwrap();
+        assert_eq!(state.note, None);
     }
 }

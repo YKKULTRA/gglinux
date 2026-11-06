@@ -16,10 +16,12 @@
 //!   actuation point's table `38 61 44 02 [key, h, l] × 68`. RAM only.
 //! - **onboard** (`keyboard_onboard`), the profile slots in flash: `02 01 <file>` (erase),
 //!   `B1 <slot>` (validate) and `B2 <slot>` (load), output reports followed by zeros;
-//!   `03 01 <file> <size u16> <offset u32> <data>` (write a chunk, a feature report that
-//!   holds all `size` bytes) and `83 01 <file> <size u16> <offset u32>` (ask for a chunk
-//!   back, then zeros), with `size` 1 to 500 and `offset + size` within the 12 324-byte
-//!   image. `file` is `0x80 + slot`, slot 0 to 4. Integers are little-endian.
+//!   `03 01 <file> F4 01 <offset u32> <data>` (write a chunk, a feature report) and
+//!   `83 01 <file> F4 01 <offset u32>` (ask for a chunk back, then zeros): exactly 500
+//!   bytes at a multiple of 500 from 0 to 12 000, as Apex Control's code sends them. A
+//!   write's data is the image's bytes there, then `0xFF` up to 500 (the last chunk runs
+//!   176 bytes past the 12 324-byte image), then zeros. `file` is `0x80 + slot`, slot 0
+//!   to 4. Integers are little-endian.
 //!
 //! Never, whatever is on: `04` (the firmware's file checksum), `02`, `03` or `83` with a
 //! sub-command other than `01` or a file other than the five slots' (other files hold
@@ -82,10 +84,12 @@ pub const BLOCKS: RangeInclusive<u8> = 1..=106;
 pub const BLOCK: usize = 6;
 /// The Fn-lit keys' mask.
 pub const FN_MASK_BYTES: usize = 32;
-/// Bytes in one flash chunk.
-pub const CHUNK: RangeInclusive<u16> = 1..=500;
+/// Bytes in one flash chunk: every `03`/`83` carries exactly this many.
+pub const CHUNK: u16 = 500;
 /// A slot's image: a 12 320-byte body and its CRC.
 pub const IMAGE_BYTES: u32 = 12_324;
+/// Where the last chunk starts; it runs 176 bytes past the image.
+pub const LAST_CHUNK: u32 = 12_000;
 /// The second actuation point's layer byte in a `38 61` table.
 pub const SECOND_LAYER: u8 = 0x02;
 
@@ -269,7 +273,10 @@ fn erase(r: &[u8]) -> Result<()> {
     zeros_after(r, 4)
 }
 
-/// `03 01 <file> <size> <offset> <data>` and `83 01 <file> <size> <offset>`, inside the image.
+/// `03 01 <file> F4 01 <offset> <data>` and `83 01 <file> F4 01 <offset>`: exactly the
+/// builder's chunks. 500 bytes at a multiple of 500 from 0 to 12 000, as Apex Control's
+/// code sends them; a write holds the image's bytes there, `0xFF` up to 500 (past the
+/// image's end, in the last), then zeros. A read request has zeros after its header.
 fn chunk(r: &[u8]) -> Result<()> {
     let op = r[1];
     slot_file(r)?;
@@ -280,25 +287,28 @@ fn chunk(r: &[u8]) -> Result<()> {
     let size = u16::from_le_bytes([r[4], r[5]]);
     let offset = u32::from_le_bytes([r[6], r[7], r[8], r[9]]);
     ensure!(
-        CHUNK.contains(&size),
-        "keyboard command {op:#04x} 0x01: a chunk is 1 to {} bytes, not {size}",
-        CHUNK.end()
+        size == CHUNK,
+        "keyboard command {op:#04x} 0x01: a chunk is {CHUNK} bytes, not {size}"
     );
-    let end = u64::from(offset) + u64::from(size);
     ensure!(
-        end <= u64::from(IMAGE_BYTES),
-        "keyboard command {op:#04x} 0x01: bytes {offset} to {end} run past the image ({IMAGE_BYTES} bytes)"
+        offset.is_multiple_of(u32::from(CHUNK)) && offset <= LAST_CHUNK,
+        "keyboard command {op:#04x} 0x01: a chunk starts at a multiple of {CHUNK} from 0 to {LAST_CHUNK}, not {offset}"
     );
-    if op == OP_WRITE_CHUNK {
-        let held = r.len() - FILE_HEADER;
-        ensure!(
-            held >= usize::from(size),
-            "keyboard command 0x03 0x01: the report holds {held} of its chunk's {size} bytes"
-        );
-        Ok(())
-    } else {
-        zeros_after(r, FILE_HEADER)
+    if op != OP_WRITE_CHUNK {
+        return zeros_after(r, FILE_HEADER);
     }
+    let end = FILE_HEADER + usize::from(CHUNK);
+    let held = r.len() - FILE_HEADER;
+    ensure!(
+        held >= usize::from(CHUNK),
+        "keyboard command 0x03 0x01: the report holds {held} of its chunk's {CHUNK} bytes"
+    );
+    let image = (IMAGE_BYTES - offset).min(u32::from(CHUNK)) as usize;
+    ensure!(
+        r[FILE_HEADER + image..end].iter().all(|&b| b == 0xFF),
+        "keyboard command 0x03 0x01: past the image's end only 0xff may follow"
+    );
+    zeros_after(r, end)
 }
 
 /// `B1`/`B2 <slot>`, then zeros.
@@ -529,37 +539,56 @@ mod tests {
         never(&output(&[OP_ERASE, 0x01, 0x80, 0x01]), "zeros");
     }
 
+    /// A chunk write as the builder makes it: size 500 at `offset`, the image's bytes
+    /// there (`data` of them, `0x5A` here), `0xFF` up to 500, then zeros.
+    fn chunk_write(file: u8, offset: u32) -> Vec<u8> {
+        let data = (12_324 - offset as usize).min(500);
+        let mut r = file_report(OP_WRITE_CHUNK, file, 500, offset, FEATURE_REPORT);
+        r[FILE_HEADER..FILE_HEADER + data].fill(0x5A);
+        r
+    }
+
     #[test]
-    fn a_chunk_write_must_hold_its_bytes_and_stay_inside_the_image() {
-        let w = |file, size, offset, len| file_report(OP_WRITE_CHUNK, file, size, offset, len);
+    fn a_chunk_write_has_only_the_builders_shape() {
         for file in SLOT_FILES {
+            passes_only_with(&chunk_write(file, 0), &[ONBOARD_ON, BOTH], ONBOARD_GATE);
+        }
+        for offset in (0..=12_000).step_by(500) {
             passes_only_with(
-                &w(file, 500, 0, FEATURE_REPORT),
+                &chunk_write(0x84, offset),
                 &[ONBOARD_ON, BOTH],
                 ONBOARD_GATE,
             );
         }
-        let last = 12_324 - 500;
-        passes_only_with(
-            &w(0x84, 500, last, FEATURE_REPORT),
-            &[ONBOARD_ON, BOTH],
-            ONBOARD_GATE,
-        );
-        passes_only_with(
-            &w(0x84, 324, 12_000, FEATURE_REPORT),
-            &[ONBOARD_ON, BOTH],
-            ONBOARD_GATE,
-        );
-        passes_only_with(&w(0x84, 1, 12_323, 11), &[ONBOARD_ON, BOTH], ONBOARD_GATE);
-        never(&w(0x84, 500, last + 1, FEATURE_REPORT), "past the image");
-        never(&w(0x84, 500, 12_000, FEATURE_REPORT), "past the image");
-        never(&w(0x84, 500, u32::MAX, FEATURE_REPORT), "past the image");
-        never(&w(0x84, 0, 0, FEATURE_REPORT), "1 to 500 bytes, not 0");
-        never(&w(0x84, 501, 0, FEATURE_REPORT), "1 to 500 bytes, not 501");
-        never(&w(0x84, 500, 0, FILE_HEADER + 499), "holds 499");
-        never(&w(0x85, 500, 0, FEATURE_REPORT), "file 0x85");
+        // The last chunk as Apex Control sends it: size 500 at 12000, 324 image bytes,
+        // then 176 x 0xFF.
+        let last = chunk_write(0x84, 12_000);
+        assert_eq!(last[4..10], [0xF4, 0x01, 0xE0, 0x2E, 0x00, 0x00]);
+        assert!(last[334..510].iter().all(|&b| b == 0xFF));
+        passes_only_with(&last[..510], &[ONBOARD_ON, BOTH], ONBOARD_GATE);
+
+        let w = |size, offset| file_report(OP_WRITE_CHUNK, 0x84, size, offset, FEATURE_REPORT);
+        never(&w(324, 12_000), "500 bytes, not 324");
+        never(&w(1, 12_323), "500 bytes, not 1");
+        never(&w(0, 0), "500 bytes, not 0");
+        never(&w(501, 0), "500 bytes, not 501");
+        never(&w(500, 250), "multiple of 500");
+        never(&w(500, 12_500), "multiple of 500");
+        never(&w(500, 11_824), "multiple of 500");
+        never(&w(500, u32::MAX), "multiple of 500");
+        never(&chunk_write(0x84, 0)[..FILE_HEADER + 499], "holds 499");
+        let mut tail = chunk_write(0x84, 12_000);
+        tail[FILE_HEADER + 324] = 0x00;
+        never(&tail, "only 0xff");
+        let mut tail = chunk_write(0x84, 12_000);
+        tail[FILE_HEADER + 499] = 0x5A;
+        never(&tail, "only 0xff");
+        let mut past = chunk_write(0x84, 0);
+        past[FILE_HEADER + 500] = 0x01;
+        never(&past, "zeros");
+        never(&chunk_write(0x85, 0), "file 0x85");
         never(&report(9, &[OP_WRITE_CHUNK, 0x01, 0x84]), "header");
-        let mut sub = w(0x84, 500, 0, FEATURE_REPORT);
+        let mut sub = chunk_write(0x84, 0);
         sub[2] = 0x02;
         never(&sub, "sub-command 0x02");
         never(
@@ -569,16 +598,20 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_read_request_has_the_same_bounds_and_nothing_after_its_header() {
+    fn a_chunk_read_request_is_500_bytes_at_a_chunk_and_nothing_after_its_header() {
         let r = |file, size, offset| file_report(OP_READ_CHUNK, file, size, offset, FEATURE_REPORT);
         passes_only_with(&r(0x80, 500, 0), &[ONBOARD_ON, BOTH], ONBOARD_GATE);
-        passes_only_with(&r(0x82, 36, 12_288), &[ONBOARD_ON, BOTH], ONBOARD_GATE);
+        // The last as Apex Control reads it: 500 bytes at 12000.
+        passes_only_with(&r(0x82, 500, 12_000), &[ONBOARD_ON, BOTH], ONBOARD_GATE);
         passes_only_with(
             &file_report(OP_READ_CHUNK, 0x80, 500, 0, FILE_HEADER),
             &[ONBOARD_ON, BOTH],
             ONBOARD_GATE,
         );
-        never(&r(0x82, 36, 12_289), "past the image");
+        never(&r(0x82, 324, 12_000), "500 bytes, not 324");
+        never(&r(0x82, 36, 12_288), "500 bytes, not 36");
+        never(&r(0x82, 500, 12_500), "multiple of 500");
+        never(&r(0x80, 500, 1), "multiple of 500");
         never(&r(0x80, 501, 0), "not 501");
         never(&r(0x80, 0, 0), "not 0");
         never(&r(0x7F, 500, 0), "file 0x7f");
@@ -743,18 +776,16 @@ mod tests {
             }
             OP_ERASE => output(&[op, FILE_SUB, rng.pick(&[0x80, 0x81, 0x82, 0x83, 0x84])]),
             OP_WRITE_CHUNK | OP_READ_CHUNK => {
-                let size = 1 + rng.below(500) as u16;
-                let offset = rng.below(12_324 - usize::from(size) + 1) as u32;
+                let offset = 500 * rng.below(25) as u32;
                 let len = if op == OP_WRITE_CHUNK {
-                    FILE_HEADER
-                        + usize::from(size)
-                        + rng.below(FEATURE_REPORT - FILE_HEADER - usize::from(size) + 1)
+                    FILE_HEADER + 500 + rng.below(FEATURE_REPORT - FILE_HEADER - 500 + 1)
                 } else {
                     FILE_HEADER + rng.below(FEATURE_REPORT - FILE_HEADER + 1)
                 };
-                let mut r = file_report(op, 0x80 + rng.below(5) as u8, size, offset, len);
+                let mut r = file_report(op, 0x80 + rng.below(5) as u8, 500, offset, len);
                 if op == OP_WRITE_CHUNK {
-                    for b in r.iter_mut().skip(FILE_HEADER).take(usize::from(size)) {
+                    let data = (12_324 - offset as usize).min(500);
+                    for b in r.iter_mut().skip(FILE_HEADER).take(data) {
                         *b = rng.byte();
                     }
                 }
@@ -870,10 +901,14 @@ mod tests {
                     && r.len() >= 10
                     && at(2) == Some(1)
                     && matches!(at(3), Some(0x80..=0x84))
-                    && (1..=500).contains(&le16(4))
-                    && le32(6) + u64::from(le16(4)) <= 12_324
+                    && le16(4) == 500
+                    && le32(6).is_multiple_of(500)
+                    && le32(6) <= 12_000
                     && if r[1] == 0x03 {
-                        r.len() >= 10 + le16(4) as usize
+                        let data = (12_324 - le32(6) as usize).min(500);
+                        r.len() >= 510
+                            && r[10 + data..510].iter().all(|&b| b == 0xFF)
+                            && zeros_from(510)
                     } else {
                         zeros_from(10)
                     }

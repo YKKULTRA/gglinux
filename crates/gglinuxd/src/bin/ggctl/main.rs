@@ -259,6 +259,8 @@ fn positional(args: &[String]) -> Result<Vec<&str>> {
                 }
             }
             a if a.starts_with("--layer=") => words.push(a),
+            // `ggctl onboard restore`'s, which onboard.rs reads from the words.
+            "--damaged" => words.push(a),
             a if a.starts_with("--") => {
                 bail!("unknown option '{a}' (try: --save, --select N, --help)")
             }
@@ -274,15 +276,33 @@ fn connect() -> Result<UnixStream> {
         .with_context(|| format!("connecting to {} — is gglinuxd running?", path.display()))
 }
 
+/// How long to wait for the daemon's answer to `req`, and what to say if none comes. A
+/// slot read or write can take most of a minute when the keyboard is slow to answer.
+fn answer_wait(req: &Request) -> (Duration, &'static str) {
+    match req {
+        Request::ReadOnboard { .. } | Request::WriteOnboard { .. } => (
+            Duration::from_secs(60),
+            "no answer from the daemon within a minute: it may still be reading or writing the \
+             keyboard's slot. Leave the keyboard plugged in and the daemon running; wait, then run \
+             `ggctl onboard` to see how it ended",
+        ),
+        _ => (
+            Duration::from_secs(10),
+            "daemon closed the connection or timed out",
+        ),
+    }
+}
+
 /// Send one request and return its response, ignoring events that arrive first.
 fn send(mut stream: UnixStream, req: Request) -> Result<ResponseData> {
     const ID: u64 = 1;
+    let (wait, silent) = answer_wait(&req);
     let frame = serde_json::to_string(&RequestFrame { id: ID, req })?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_read_timeout(Some(wait))?;
     writeln!(stream, "{frame}")?;
 
     for line in BufReader::new(stream).lines() {
-        let line = line.context("daemon closed the connection or timed out")?;
+        let line = line.context(silent)?;
         match serde_json::from_str::<ServerMessage>(&line) {
             // The daemon pushes a snapshot on connect; that is not our answer.
             Ok(ServerMessage::Notification { .. }) => continue,
@@ -442,6 +462,30 @@ mod tests {
             Action::EditActions(actions::Edit::Remove(0x68))
         ));
         assert!(parse(&args("actions set f12 clip")).is_err());
+    }
+
+    #[test]
+    fn a_slot_read_or_write_is_waited_for_a_minute() {
+        for req in [
+            Request::ReadOnboard { slot: None },
+            Request::WriteOnboard {
+                slot: 4,
+                from: gg_ipc::OnboardSource::Current,
+            },
+        ] {
+            let (wait, silent) = answer_wait(&req);
+            assert_eq!(wait, Duration::from_secs(60));
+            assert!(
+                silent.contains("may still be") && silent.contains("`ggctl onboard`"),
+                "{silent}"
+            );
+        }
+        assert_eq!(answer_wait(&Request::GetOnboard).0, Duration::from_secs(10));
+        // `--damaged` reaches `ggctl onboard` as a word.
+        assert_eq!(
+            positional(&args("onboard restore 5 x.bin --damaged")).unwrap(),
+            ["onboard", "restore", "5", "x.bin", "--damaged"]
+        );
     }
 
     #[test]
