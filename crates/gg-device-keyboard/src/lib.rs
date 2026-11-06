@@ -3,21 +3,34 @@
 //! screen and its switches.
 //!
 //! Everything sent is framed by [`proto`], which only frames commands on its
-//! allowlist, and checked against it once more at the write. Nothing here writes the
-//! keyboard's flash: the screen and switch settings last until it loses power.
+//! allowlist, and checked against [`allow`] once more at the write, with the gated
+//! command families the daemon has turned on ([`Families`], all off by default). With
+//! them off nothing here writes the keyboard's flash: the screen and switch settings last
+//! until it loses power.
+//!
+//! The bytes reach the keyboard through a [`Transport`]: the hidapi device, or in tests a
+//! fake ([`testing::FakeTransport`], also built for other crates with the `testing`
+//! feature).
 
+use std::cell::Cell;
 use std::ffi::CString;
 
 use anyhow::{anyhow, Context, Result};
 use hidapi::{DeviceInfo, HidApi, HidDevice};
 use tracing::debug;
 
+pub mod allow;
+pub mod bindings;
 pub mod font;
 pub mod keys;
 pub mod layout;
 pub mod oled;
+pub mod onboard;
 pub mod proto;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
+pub use allow::Families;
 pub use oled::Bitmap;
 pub use proto::{Rgb, TapMode, TapPair};
 
@@ -29,6 +42,39 @@ const CONTROL_INTERFACE: i32 = 1;
 const VENDOR_USAGE_PAGE: u16 = 0xffc0;
 
 const READ_TIMEOUT_MS: i32 = 200;
+
+/// How reports reach the keyboard's control interface. Every report starts with its
+/// report id, 0, as hidapi takes them.
+pub trait Transport: Send {
+    /// Send a feature report.
+    fn send_feature(&self, report: &[u8]) -> Result<()>;
+    /// Read a feature report into `buf`, which holds the report id (0) in `buf[0]` on
+    /// entry, as hidapi expects. Returns how many bytes were read, the report id included.
+    fn get_feature(&self, buf: &mut [u8]) -> Result<usize>;
+    /// Send an output report.
+    fn write(&self, report: &[u8]) -> Result<()>;
+    /// Read one input report, waiting at most `ms` milliseconds; 0 bytes when none came.
+    fn read_timeout(&self, buf: &mut [u8], ms: i32) -> Result<usize>;
+}
+
+impl Transport for HidDevice {
+    fn send_feature(&self, report: &[u8]) -> Result<()> {
+        Ok(self.send_feature_report(report)?)
+    }
+
+    fn get_feature(&self, buf: &mut [u8]) -> Result<usize> {
+        Ok(self.get_feature_report(buf)?)
+    }
+
+    fn write(&self, report: &[u8]) -> Result<()> {
+        HidDevice::write(self, report)?;
+        Ok(())
+    }
+
+    fn read_timeout(&self, buf: &mut [u8], ms: i32) -> Result<usize> {
+        Ok(HidDevice::read_timeout(self, buf, ms)?)
+    }
+}
 
 /// What [`Keyboard::set_switches`] sends, per analog key by HID code.
 pub struct Switches<'a> {
@@ -42,9 +88,12 @@ pub struct Switches<'a> {
 }
 
 pub struct Keyboard {
-    device: HidDevice,
-    /// The lighting interface's node, to tell whether it's still there.
-    path: CString,
+    transport: Box<dyn Transport>,
+    /// The lighting interface's node, to tell whether it's still there; `None` for a
+    /// transport that isn't a listed device.
+    path: Option<CString>,
+    /// The gated command families [`allow::check`] lets through, checked at every send.
+    families: Cell<Families>,
 }
 
 /// Whether `d` is an Apex Pro TKL Gen 3's lighting interface.
@@ -53,6 +102,13 @@ fn is_lighting(d: &DeviceInfo) -> bool {
         && d.product_id() == PRODUCT_ID
         && d.interface_number() == CONTROL_INTERFACE
         && d.usage_page() == VENDOR_USAGE_PAGE
+}
+
+/// Which kind of report a send is.
+#[derive(Clone, Copy)]
+enum Kind {
+    Feature,
+    Output,
 }
 
 impl Keyboard {
@@ -69,14 +125,40 @@ impl Keyboard {
             .open_path(&path)
             .with_context(|| format!("opening {}", path.to_string_lossy()))?;
         debug!(path = %path.to_string_lossy(), "opened keyboard lighting interface");
-        Ok(Self { device, path })
+        Ok(Self {
+            transport: Box::new(device),
+            path: Some(path),
+            families: Cell::new(Families::default()),
+        })
+    }
+
+    /// A keyboard reached through `transport`, a fake in tests. It's never in a device
+    /// list, so [`Keyboard::is_listed`] says no.
+    pub fn with_transport(transport: Box<dyn Transport>) -> Keyboard {
+        Keyboard {
+            transport,
+            path: None,
+            families: Cell::new(Families::default()),
+        }
     }
 
     /// Whether `api`'s device list, as last refreshed, still has this
     /// keyboard's lighting interface.
     pub fn is_listed(&self, api: &HidApi) -> bool {
-        api.device_list()
-            .any(|d| is_lighting(d) && d.path() == self.path.as_c_str())
+        self.path.as_ref().is_some_and(|path| {
+            api.device_list()
+                .any(|d| is_lighting(d) && d.path() == path.as_c_str())
+        })
+    }
+
+    /// Let the gated command families through from now on (or stop them).
+    pub fn set_families(&self, families: Families) {
+        self.families.set(families);
+    }
+
+    /// The gated command families let through now.
+    pub fn families(&self) -> Families {
+        self.families.get()
     }
 
     /// Take over the lighting; send before the first frame.
@@ -96,13 +178,9 @@ impl Keyboard {
 
     /// The region (layout) byte; 1 is US ANSI.
     pub fn region(&self) -> Result<Option<u8>> {
-        self.output(&proto::command(proto::OP_REGION, &[])?)?;
-        let mut buf = [0u8; 64];
-        let n = self
-            .device
-            .read_timeout(&mut buf, READ_TIMEOUT_MS)
-            .context("reading the region reply")?;
-        Ok(proto::decode_region(&buf[..n]))
+        let reply =
+            self.exchange_output(&proto::command(proto::OP_REGION, &[])?, READ_TIMEOUT_MS)?;
+        Ok(reply.and_then(|r| proto::decode_region(&r)))
     }
 
     /// Show a picture on the screen until the next one, or until the screen is released.
@@ -128,20 +206,187 @@ impl Keyboard {
         self.output(&proto::rapid_tap_enable(switches.rapid_tap))
     }
 
-    /// Send a feature report. The allowlist is checked again here, at the one
-    /// place bytes reach the wire.
+    /// Send a feature report and read the keyboard's answer: the feature report it holds
+    /// for the last command, [`proto::FEATURE_REPORT`] bytes long. Returns what follows the
+    /// report id.
+    pub fn exchange_feature(&self, report: &[u8]) -> Result<Vec<u8>> {
+        self.feature(report)?;
+        let mut buf = vec![0u8; proto::FEATURE_REPORT];
+        let n = self
+            .transport
+            .get_feature(&mut buf)
+            .with_context(|| format!("reading the reply to keyboard command {:#04x}", report[1]))?;
+        Ok(buf.get(1..n.min(buf.len())).unwrap_or_default().to_vec())
+    }
+
+    /// Send an output report and read one input report back, waiting at most
+    /// `timeout_ms`; `None` if none came in that time.
+    pub fn exchange_output(&self, report: &[u8], timeout_ms: i32) -> Result<Option<Vec<u8>>> {
+        self.output(report)?;
+        let mut buf = [0u8; proto::INPUT_REPORT];
+        let n = self
+            .transport
+            .read_timeout(&mut buf, timeout_ms)
+            .with_context(|| format!("reading the reply to keyboard command {:#04x}", report[1]))?;
+        Ok((n > 0).then(|| buf[..n.min(buf.len())].to_vec()))
+    }
+
     fn feature(&self, report: &[u8]) -> Result<()> {
-        proto::check_report(report)?;
-        self.device
-            .send_feature_report(report)
-            .with_context(|| format!("sending keyboard command {:#04x}", report[1]))
+        self.send(Kind::Feature, report)
     }
 
     fn output(&self, report: &[u8]) -> Result<()> {
-        proto::check_report(report)?;
-        self.device
-            .write(report)
-            .map(|_| ())
-            .with_context(|| format!("sending keyboard command {:#04x}", report[1]))
+        self.send(Kind::Output, report)
+    }
+
+    /// The one place bytes reach the wire: the allowlist, with the families on now, is
+    /// checked again right before the transport gets them.
+    fn send(&self, kind: Kind, report: &[u8]) -> Result<()> {
+        allow::check(report, self.families())?;
+        match kind {
+            Kind::Feature => self.transport.send_feature(report),
+            Kind::Output => self.transport.write(report),
+        }
+        .with_context(|| format!("sending keyboard command {:#04x}", report[1]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testing::{FakeTransport, Key, Kind as Sent};
+
+    #[test]
+    fn todays_commands_go_out_through_the_transport_as_before() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        kb.init().unwrap();
+        kb.show(|_| Rgb { r: 1, g: 2, b: 3 }).unwrap();
+        kb.show_screen(&Bitmap::default()).unwrap();
+        kb.release_screen().unwrap();
+        kb.set_switches(&Switches {
+            actuation: &|_| 15,
+            rapid_trigger: &|_| false,
+            sensitivity: &|_| 2,
+            rapid_tap: false,
+            tap_pairs: &[],
+        })
+        .unwrap();
+        kb.hand_back().unwrap();
+        let sent: Vec<(Sent, u8, usize)> = fake
+            .sent()
+            .iter()
+            .map(|s| (s.kind, s.report[1], s.report.len()))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                (Sent::Feature, 0x4B, 65),
+                (Sent::Feature, 0x40, 643),
+                (Sent::Feature, 0x1F, 645),
+                (Sent::Output, 0x1F, 65),
+                (Sent::Feature, 0x38, 645),
+                (Sent::Feature, 0x38, 645),
+                (Sent::Feature, 0x38, 645),
+                (Sent::Output, 0x38, 65),
+                (Sent::Output, 0x38, 65),
+                (Sent::Output, 0x41, 65),
+            ]
+        );
+        assert_eq!(fake.sent()[0].report, proto::command(0x4B, &[]).unwrap());
+        assert_eq!(fake.sent()[4].report, proto::actuation_table(|_| 15));
+    }
+
+    #[test]
+    fn the_region_is_read_from_the_input_report_after_asking() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        assert_eq!(kb.region().unwrap(), None, "no reply: unknown");
+        fake.answer_input(Key::op(0xF5), &[0xF5, 0x00, 0x01]);
+        assert_eq!(kb.region().unwrap(), Some(1));
+        assert_eq!(fake.sent()[1].report[..2], [0x00, 0xF5]);
+        assert_eq!(fake.sent()[1].kind, Sent::Output);
+    }
+
+    #[test]
+    fn exchange_feature_sends_then_reads_a_full_feature_report_after_the_id() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        kb.set_families(Families {
+            bindings: true,
+            onboard: false,
+        });
+        fake.answer_feature(Key::op(0xB6), &[0xB6, 0x00, 0x00, 0x01, 0x04, 0x51, 0x04]);
+        let mut request = vec![0u8; proto::FEATURE_REPORT];
+        request[1..5].copy_from_slice(&[0xB6, 0x00, 0x01, 0x04]);
+        let reply = kb.exchange_feature(&request).unwrap();
+        assert_eq!(
+            reply.len(),
+            proto::FEATURE_REPORT - 1,
+            "the report id is left off"
+        );
+        assert_eq!(reply[..7], [0xB6, 0x00, 0x00, 0x01, 0x04, 0x51, 0x04]);
+        assert!(reply[7..].iter().all(|&b| b == 0));
+        assert_eq!(fake.sent().len(), 1);
+        assert_eq!(fake.sent()[0].kind, Sent::Feature);
+    }
+
+    #[test]
+    fn exchange_output_writes_then_reads_one_input_report_or_none() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        let ask = proto::command(proto::OP_FIRMWARE, &[0x00]).unwrap();
+        assert_eq!(kb.exchange_output(&ask, 10).unwrap(), None);
+        fake.answer_input(Key::op(0x90), b"\x90\x001.19.7");
+        let reply = kb.exchange_output(&ask, 10).unwrap().unwrap();
+        assert_eq!(&reply[..8], b"\x90\x001.19.7");
+        assert_eq!(reply.len(), proto::INPUT_REPORT, "a whole input report");
+        assert!(fake.sent().iter().all(|s| s.kind == Sent::Output));
+    }
+
+    #[test]
+    fn every_send_path_checks_the_allowlist_with_the_families_on_now() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        let mut read = vec![0u8; proto::FEATURE_REPORT];
+        read[1..5].copy_from_slice(&[0xB6, 0x00, 0x01, 0x04]);
+        let mut fn_key = vec![0u8; proto::COMMAND_REPORT];
+        fn_key[1..3].copy_from_slice(&[0x35, 0xF0]);
+        let refused = kb.exchange_feature(&read).unwrap_err();
+        assert!(format!("{refused:#}").contains("bindings"), "{refused:#}");
+        assert!(kb.exchange_output(&fn_key, 10).is_err());
+        assert!(fake.sent().is_empty(), "nothing reached the transport");
+
+        kb.set_families(Families {
+            bindings: true,
+            onboard: false,
+        });
+        assert!(kb.families().bindings);
+        kb.exchange_feature(&read).unwrap();
+        kb.exchange_output(&fn_key, 10).unwrap();
+        assert_eq!(fake.sent().len(), 2);
+
+        kb.set_families(Families::default());
+        assert!(kb.exchange_feature(&read).is_err(), "turned off again");
+        assert_eq!(fake.sent().len(), 2);
+    }
+
+    #[test]
+    fn a_failed_send_is_an_error_naming_the_command() {
+        let fake = FakeTransport::new();
+        fake.fail_send(2);
+        let kb = fake.keyboard();
+        kb.init().unwrap();
+        let e = kb.hand_back().unwrap_err();
+        assert!(format!("{e:#}").contains("0x41"), "{e:#}");
+        kb.hand_back().unwrap();
+        assert_eq!(fake.sent().len(), 2);
+    }
+
+    #[test]
+    fn a_keyboard_on_a_transport_is_never_in_a_device_list() {
+        let kb = FakeTransport::new().keyboard();
+        assert!(kb.path.is_none());
+        assert_eq!(kb.families(), Families::default());
     }
 }

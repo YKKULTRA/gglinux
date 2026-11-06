@@ -44,6 +44,8 @@ pub const SW_RAPID_TAP_PAIRS: u8 = 0x67;
 /// Every plain opcode gglinux may send. The firmware-update and flash commands (`0x02`
 /// erase, `0x03` write, `0x04`) share this interface and can brick the keyboard; an
 /// allowlist makes them — and anything else unvetted, typos included — impossible to frame.
+/// Only [`crate::allow`] lets narrow shapes of `0x02` and `0x03` out (the five profile
+/// slots), and only while the daemon has the onboard family on.
 pub const ALLOWED: [u8; 7] = [
     OP_INIT,
     OP_DIRECT,
@@ -77,6 +79,8 @@ pub const DIRECT_REPORT: usize = 643;
 /// The control interface's feature report: report id 0 and the 644 bytes its descriptor
 /// declares. Screen frames and switch tables use it.
 pub const FEATURE_REPORT: usize = 645;
+/// An input report, the keyboard's answer to a query: 64 bytes, no report id.
+pub const INPUT_REPORT: usize = 64;
 
 /// HID usage code of every LED, in the order a direct frame lists them.
 pub const KEYS: [u8; 112] = [
@@ -160,29 +164,10 @@ pub fn check(op: u8) -> Result<()> {
 }
 
 /// Check a whole report before it goes out: report id 0, then an allowed opcode, and for
-/// the screen and switch commands an allowed sub-command too.
+/// the screen and switch commands an allowed sub-command too. This is
+/// [`crate::allow::check`] with every gated family off.
 pub fn check_report(report: &[u8]) -> Result<()> {
-    ensure!(
-        report.len() >= 2 && report[0] == 0,
-        "keyboard reports start with report id 0"
-    );
-    let op = report[1];
-    if let Some((_, subs)) = ALLOWED_SUB.iter().find(|(o, _)| *o == op) {
-        let sub = report.get(2).copied().unwrap_or(0);
-        ensure!(
-            subs.contains(&sub),
-            "keyboard command {op:#04x} {sub:#04x} is not on the allowlist"
-        );
-        if op == OP_SWITCHES && sub == SW_THRESHOLDS {
-            // Byte 4 picks the layer; only the primary actuation point (0) is built here.
-            ensure!(
-                report.get(4) == Some(&0),
-                "only the primary actuation layer may be written"
-            );
-        }
-        return Ok(());
-    }
-    check(op)
+    crate::allow::check(report, crate::allow::Families::default())
 }
 
 /// A command report for an allowed opcode.
