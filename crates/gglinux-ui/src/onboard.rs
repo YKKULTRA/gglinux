@@ -52,6 +52,9 @@ pub fn lines(state: &OnboardState) -> Vec<Line> {
                     ..OnboardSlot::default()
                 });
             let mut notes = Vec::new();
+            if state.active == Some(s.index) {
+                notes.push("running".to_owned());
+            }
             match s.valid {
                 Some(true) => notes.push("checks out".to_owned()),
                 Some(false) => notes.push("doesn't check out".to_owned()),
@@ -63,9 +66,6 @@ pub fn lines(state: &OnboardState) -> Vec<Line> {
                     Some(when) => format!("backed up {when}"),
                     None => "backed up".to_owned(),
                 });
-            }
-            if state.active == Some(s.index) {
-                notes.push("running".to_owned());
             }
             Line {
                 name: s.name.clone().unwrap_or_else(|| "—".to_owned()),
@@ -185,8 +185,9 @@ pub fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
     match name {
         "onboard.read-all" => g.invoke_read_all(),
         "onboard.load" => g.invoke_load(n),
-        // Slot n's write, waiting for its yes.
+        // Slot n's write, waiting for its yes; then the yes.
         "onboard.confirm" => g.set_confirm(n),
+        "onboard.write" => g.invoke_write(n),
         // Everything drawn again from what the daemon said last.
         "onboard.redraw" => crate::refresh(ui),
         _ => return false,
@@ -240,7 +241,7 @@ mod tests {
             }
         );
         assert_eq!(l[1].name, "—");
-        assert_eq!(l[1].note, "not read yet · running");
+        assert_eq!(l[1].note, "running · not read yet");
         assert_eq!((l[2].note.as_str(), l[2].bad), ("doesn't check out", true));
         assert_eq!(
             l[3].note, "backed up 2026-11-05 09:00 UTC",

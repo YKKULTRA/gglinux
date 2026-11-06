@@ -42,12 +42,17 @@ export component OnboardPanel {
         Opt { Hint { text: "The keyboard keeps five profiles in its own memory and runs one of them when it powers up. What gglinux sets lives in the keyboard's RAM and is sent again each time gglinux connects; written into a slot, it stays when gglinux isn't running."; } }
         Opt { shown: !OnboardUi.enabled; Hint { text: OnboardUi.refused; color: Theme.accent; } }
         Opt { gap: 12px; VerticalLayout {
-            spacing: 6px;
+            spacing: 8px;
             for name[i] in OnboardUi.names : HorizontalLayout {
                 spacing: 10px;
                 Text { text: "Slot " + (i + 1); width: 48px; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; }
-                Text { text: name; min-width: 90px; horizontal-stretch: 1; color: OnboardUi.enabled ? Theme.text : Theme.text-dim; vertical-alignment: center; overflow: elide; }
-                Text { text: OnboardUi.notes[i]; horizontal-stretch: 0; color: OnboardUi.bad[i] ? Theme.danger : Theme.text-dim; font-size: Theme.small; vertical-alignment: center; }
+                // The name, and under it what's known; both give way in a narrow window.
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text { text: name; min-width: 0; color: OnboardUi.enabled ? Theme.text : Theme.text-dim; overflow: elide; }
+                    Text { text: OnboardUi.notes[i]; min-width: 0; color: OnboardUi.bad[i] ? Theme.danger : Theme.text-dim; font-size: Theme.tiny; overflow: elide; }
+                }
                 VerticalLayout { alignment: center; horizontal-stretch: 0; SlotButton { text: "Load"; clicked => { OnboardUi.load(i); } } }
                 VerticalLayout { alignment: center; horizontal-stretch: 0; SlotButton { text: "Write gglinux's settings into this slot…"; clicked => { OnboardUi.confirm = i; } } }
             }
