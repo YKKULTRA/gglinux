@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use gg_ipc::{DeviceInfo, Event, Part, Parts, Request, RequestFrame, ResponseData, ServerMessage};
+use gg_ipc::{
+    DeviceInfo, Event, Feature, Part, Parts, Request, RequestFrame, ResponseData, ServerMessage,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
@@ -150,7 +152,7 @@ async fn main() -> Result<()> {
     let actions = actions::spawn(event_tx.clone(), profiles.clone(), clips.clone());
     let workers = Workers {
         mouse: if run.mouse {
-            mouse::spawn(event_tx.clone())
+            mouse::spawn(event_tx.clone(), gates.subscribe())
         } else {
             MouseHandle::off()
         },
@@ -459,6 +461,18 @@ async fn dispatch(
                 .await,
         ),
         Request::SaveMouse => outcome(workers.mouse.send(MouseCommand::Save).await),
+        // Refused here too, so the gate holds before the worker is even asked.
+        Request::SetMouseSleep { minutes } => {
+            match workers.experimental.current().refusal(Feature::MousePower) {
+                Some(message) => ResponseData::Error { message },
+                None => outcome(
+                    workers
+                        .mouse
+                        .send::<()>(|reply| MouseCommand::SetSleep { minutes, reply })
+                        .await,
+                ),
+            }
+        }
         Request::GetHeadsetState => match workers.headset.send(HeadsetCommand::GetState).await {
             Ok(state) => ResponseData::Headset { state },
             Err(message) => ResponseData::Error { message },
@@ -1269,6 +1283,14 @@ mod tests {
             }
         }
         assert!(fake.sent().is_empty(), "none of it reached the keyboard");
+        // The mouse's sleep timer has its own gate, off here: refused before the worker.
+        match ask("set_mouse_sleep", r#"{"minutes":20}"#).await {
+            ResponseData::Error { message } => assert!(
+                message.starts_with("Mouse: sleep timer") && message.contains("Experimental"),
+                "{message}"
+            ),
+            other => panic!("set_mouse_sleep: {other:?}"),
+        }
         // The onboard slots are built: with the gate on (above), a read reaches the keyboard,
         // whose unscripted answers aren't a slot image, and says so.
         match ask("read_onboard", r#"{"slot":0}"#).await {

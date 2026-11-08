@@ -36,8 +36,15 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
         Some((&"buttons", _)) => bail!("usage: ggctl mouse buttons button1,...,dpi [--save]"),
         Some((&"save", [])) => Request::SaveMouse,
         Some((&"save", _)) => bail!("usage: ggctl mouse save"),
+        Some((&"sleep", [minutes])) => Request::SetMouseSleep {
+            minutes: minutes
+                .trim_end_matches("min")
+                .parse()
+                .context("the sleep timer is a number of minutes, 1 to 20")?,
+        },
+        Some((&"sleep", _)) => bail!("usage: ggctl mouse sleep 20   (minutes, 1 to 20; saved)"),
         Some((other, _)) => {
-            bail!("unknown mouse command '{other}' (try: dpi, polling, buttons, save)")
+            bail!("unknown mouse command '{other}' (try: dpi, polling, buttons, sleep, save)")
         }
     })
 }
@@ -56,6 +63,9 @@ pub fn print(state: &MouseState) {
             None => "unknown (asleep — move the mouse and retry)".into(),
         }
     );
+    if let Some(secs) = state.sleep_secs {
+        println!("sleep:     {} (as the mouse reports it)", sleep_text(secs));
+    }
     match &state.applied {
         Some(s) => {
             if let Some(dpi) = &s.dpi {
@@ -67,10 +77,21 @@ pub fn print(state: &MouseState) {
             if let Some(hz) = s.polling_hz {
                 println!("polling:   {hz} Hz");
             }
+            if let (Some(m), None) = (s.sleep_minutes, state.sleep_secs) {
+                println!("sleep:     {m} min (written)");
+            }
         }
         // The mouse protocol is write-only, so an unwritten setting is
         // genuinely unknown rather than assumed to be the default.
         None => println!("applied:   nothing yet this session (mouse is on its onboard settings)"),
+    }
+}
+
+/// A sleep timer in seconds as minutes, or minutes and seconds if it isn't whole.
+fn sleep_text(secs: u16) -> String {
+    match secs % 60 {
+        0 => format!("{} min", secs / 60),
+        s => format!("{} min {s} s", secs / 60),
     }
 }
 
@@ -180,6 +201,26 @@ mod tests {
         ] {
             assert!(parse(&args(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn sleep_takes_minutes_and_nothing_else() {
+        for line in ["mouse sleep 20", "mouse sleep 20min"] {
+            assert!(
+                matches!(sends(line), Request::SetMouseSleep { minutes: 20 }),
+                "{line}"
+            );
+        }
+        for bad in [
+            "mouse sleep",
+            "mouse sleep twenty",
+            "mouse sleep 5 10",
+            "mouse sleep -1",
+        ] {
+            assert!(parse(&args(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(sleep_text(1200), "20 min");
+        assert_eq!(sleep_text(90), "1 min 30 s");
     }
 
     #[test]

@@ -14,9 +14,12 @@ use std::time::{Duration, Instant};
 
 use gg_device_mouse::proto::nearest_dpi;
 use gg_device_mouse::{ButtonAction, Mouse, PollingRate, BUTTON_COUNT};
-use gg_ipc::{BatteryState, DpiStage, Event, MouseDpi, MouseSettings, MouseState};
+use gg_ipc::{
+    BatteryState, DpiStage, Event, Experimental, Feature, MouseDpi, MouseSettings, MouseState,
+    MOUSE_SLEEP_MINUTES,
+};
 use hidapi::HidApi;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 use tracing::{debug, error, warn};
 
 use crate::clock::is_older_than;
@@ -55,6 +58,11 @@ pub enum Command {
         reply: Reply<()>,
     },
     Save(Reply<()>),
+    /// The sleep timer, saved with it (see [`gg_ipc::Request::SetMouseSleep`]).
+    SetSleep {
+        minutes: u8,
+        reply: Reply<()>,
+    },
 }
 
 /// Cloneable handle used by client tasks to reach the worker.
@@ -85,12 +93,13 @@ impl Handle {
     }
 }
 
-/// Start the worker thread and return a handle to it.
-pub fn spawn(event_tx: broadcast::Sender<Event>) -> Handle {
+/// Start the worker thread and return a handle to it. `gates` are the experimental
+/// gates: the sleep timer is only read or written while [`Feature::MousePower`] is on.
+pub fn spawn(event_tx: broadcast::Sender<Event>, gates: watch::Receiver<Experimental>) -> Handle {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("gg-mouse".into())
-        .spawn(move || worker(rx, event_tx))
+        .spawn(move || worker(rx, event_tx, gates))
         .expect("spawn gg-mouse thread");
     Handle { tx }
 }
@@ -102,9 +111,23 @@ struct State {
     battery: Option<BatteryState>,
     /// When the battery was last read, however that read was triggered.
     last_poll: Option<Instant>,
+    gates: watch::Receiver<Experimental>,
+    /// The sleep timer as last read, in seconds: kept while the mouse sleeps, dropped
+    /// when it goes away or the gate goes off.
+    sleep_secs: Option<u16>,
 }
 
-fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
+impl State {
+    fn power_on(&self) -> bool {
+        self.gates.borrow().on(Feature::MousePower)
+    }
+}
+
+fn worker(
+    rx: Receiver<Command>,
+    event_tx: broadcast::Sender<Event>,
+    gates: watch::Receiver<Experimental>,
+) {
     let hid = gg_hid::lock();
     let api = match HidApi::new() {
         Ok(api) => api,
@@ -119,6 +142,8 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>) {
         applied: None,
         battery: None,
         last_poll: None,
+        gates,
+        sleep_secs: None,
     };
 
     // Read once at startup so a UI connecting immediately has a value.
@@ -153,6 +178,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 connected: gg_device_mouse::is_connected(&state.api),
                 battery: state.battery,
                 applied: state.applied.clone(),
+                sleep_secs: state.sleep_secs.filter(|_| state.power_on()),
             }));
             return;
         }
@@ -226,6 +252,23 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             // Nothing changed that a client would want re-read.
             return;
         }
+
+        Command::SetSleep { minutes, reply } => {
+            let refusal = sleep_refusal(&state.gates.borrow(), minutes);
+            let result = match refusal {
+                Some(why) => Err(why),
+                None => with_mouse(state, |mouse| {
+                    mouse.set_sleep_timer(minutes)?;
+                    // Read back what the mouse now has, for the state.
+                    mouse.sleep_timer()
+                }),
+            };
+            let result = result.map(|read| {
+                written(&mut state.applied).sleep_minutes = Some(minutes);
+                state.sleep_secs = read.or(Some(u16::from(minutes) * 60));
+            });
+            let _ = reply.send(result);
+        }
     }
 
     // A setting was just applied, which means the mouse is awake and talking —
@@ -266,17 +309,29 @@ fn poll_battery(state: &mut State, event_tx: &broadcast::Sender<Event>) {
     }
     let opened = Mouse::open(&state.api);
     drop(hid);
+    let power = state.power_on();
     let reading = match opened {
-        Ok(mouse) => match mouse.battery() {
-            Ok(battery) => battery,
-            Err(e) => {
-                warn!(error = %format!("{e:#}"), "battery read failed");
-                None
+        Ok(mouse) => {
+            if power {
+                read_sleep(&mouse, &mut state.sleep_secs);
             }
-        },
+            match mouse.battery() {
+                Ok(battery) => battery,
+                Err(e) => {
+                    warn!(error = %format!("{e:#}"), "battery read failed");
+                    None
+                }
+            }
+        }
         // Not connected at all — report unknown rather than a stale value.
-        Err(_) => None,
+        Err(_) => {
+            state.sleep_secs = None;
+            None
+        }
     };
+    if !power {
+        state.sleep_secs = None;
+    }
     let reading = reading.map(|b| BatteryState {
         level: b.level,
         charging: b.charging,
@@ -287,6 +342,29 @@ fn poll_battery(state: &mut State, event_tx: &broadcast::Sender<Event>) {
         state.battery = reading;
         let _ = event_tx.send(Event::MouseBattery { battery: reading });
     }
+}
+
+/// Read the sleep timer into `sleep_secs`. An asleep mouse answers nothing, and the
+/// reading it gave before stands: the timer doesn't change while it sleeps.
+fn read_sleep(mouse: &Mouse, sleep_secs: &mut Option<u16>) {
+    match mouse.sleep_timer() {
+        Ok(Some(secs)) => *sleep_secs = Some(secs),
+        Ok(None) => {}
+        Err(e) => warn!(error = %format!("{e:#}"), "sleep timer read failed"),
+    }
+}
+
+/// Why a sleep timer of `minutes` isn't sent, or `None` if it may be.
+fn sleep_refusal(gates: &Experimental, minutes: u8) -> Option<String> {
+    gates.refusal(Feature::MousePower).or_else(|| {
+        (!MOUSE_SLEEP_MINUTES.contains(&minutes)).then(|| {
+            format!(
+                "the sleep timer takes {} to {} minutes, not {minutes}",
+                MOUSE_SLEEP_MINUTES.start(),
+                MOUSE_SLEEP_MINUTES.end()
+            )
+        })
+    })
 }
 
 fn parse_actions(actions: &[String]) -> Result<[ButtonAction; BUTTON_COUNT], String> {
@@ -345,6 +423,20 @@ mod tests {
             claimed.is_empty(),
             "reported as applied but never written: {claimed:?} in {json}"
         );
+    }
+
+    #[test]
+    fn the_sleep_timer_is_refused_with_its_gate_off_or_outside_ggs_range() {
+        let mut gates = Experimental::default();
+        let why = sleep_refusal(&gates, 20).unwrap();
+        assert!(why.contains("Settings → Experimental"), "{why}");
+        gates.set(Feature::MousePower, true);
+        assert_eq!(sleep_refusal(&gates, 20), None);
+        assert_eq!(sleep_refusal(&gates, 1), None);
+        for minutes in [0, 21] {
+            let why = sleep_refusal(&gates, minutes).unwrap();
+            assert!(why.contains("1 to 20 minutes"), "{minutes}: {why}");
+        }
     }
 
     #[test]

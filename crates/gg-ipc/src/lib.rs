@@ -77,15 +77,22 @@ pub struct MouseDpi {
 
 /// Mouse settings, as written by gglinux.
 ///
-/// Each part is `None` until it has been written. The mouse cannot be read back,
-/// so a part never written is unknown, not its factory default.
+/// Each part is `None` until it has been written. A part never written is unknown, not its
+/// factory default: only the sleep timer is read back (see [`MouseState::sleep_secs`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseSettings {
     pub dpi: Option<MouseDpi>,
     pub polling_hz: Option<u16>,
     /// One action name per physical button, in button order.
     pub buttons: Option<Vec<String>>,
+    /// The sleep timer, in minutes ([`MOUSE_SLEEP_MINUTES`]).
+    #[serde(default)]
+    pub sleep_minutes: Option<u8>,
 }
+
+/// The sleep timers the mouse takes, in whole minutes: GG's own range, the only values seen
+/// on the wire.
+pub const MOUSE_SLEEP_MINUTES: std::ops::RangeInclusive<u8> = 1..=20;
 
 /// What the daemon knows about the mouse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,10 +103,13 @@ pub struct MouseState {
     /// Settings this daemon has written since it started.
     ///
     /// `None` means we have not written any: the mouse is running whatever is in
-    /// its onboard memory. The vendor protocol is write-only — there is no command
-    /// to read settings back — so this is the only honest answer available, and it
-    /// deliberately does not pretend to reflect the hardware's actual state.
+    /// its onboard memory. Most settings can't be read back (rivalcfg has no reads),
+    /// so this deliberately does not pretend to reflect the hardware's actual state.
     pub applied: Option<MouseSettings>,
+    /// The sleep timer as the mouse reports it, in seconds. Read only while
+    /// [`Feature::MousePower`] is on; `None` while it's off, or the mouse is asleep.
+    #[serde(default)]
+    pub sleep_secs: Option<u16>,
 }
 
 /// Burn-in protection for the headset base station's screen.
@@ -1186,6 +1196,12 @@ pub enum Request {
     },
     /// Commit current settings to the mouse's onboard memory.
     SaveMouse,
+    /// Set the sleep timer ([`MOUSE_SLEEP_MINUTES`]) and save. The mouse takes the timer with
+    /// a save, as GG sends it, so this also commits the other settings it's running to its
+    /// onboard memory. Needs [`Feature::MousePower`].
+    SetMouseSleep {
+        minutes: u8,
+    },
     /// Headset battery, power, and screen settings.
     GetHeadsetState,
     /// Replace the base-station screen settings.
@@ -1381,7 +1397,8 @@ impl Request {
             | R::SetMouseDpi { .. }
             | R::SetMousePolling { .. }
             | R::SetMouseButtons { .. }
-            | R::SaveMouse => Part::Mouse,
+            | R::SaveMouse
+            | R::SetMouseSleep { .. } => Part::Mouse,
             R::GetHeadsetState | R::SetHeadsetScreen { .. } | R::SetHeadset { .. } => Part::Headset,
             R::GetSonarState
             | R::SetSonarEnabled { .. }
@@ -1792,6 +1809,7 @@ mod tests {
                 charging: false,
             }),
             applied: None,
+            sleep_secs: None,
         };
         let json = serde_json::to_string(&ResponseData::Mouse { state }).unwrap();
         assert!(json.contains(r#""applied":null"#), "{json}");
@@ -1805,7 +1823,28 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_string(&applied).unwrap();
-        assert_eq!(json, r#"{"dpi":null,"polling_hz":500,"buttons":null}"#);
+        assert_eq!(
+            json,
+            r#"{"dpi":null,"polling_hz":500,"buttons":null,"sleep_minutes":null}"#
+        );
+    }
+
+    /// The sleep timer's request, and a state from an older daemon without the reading.
+    #[test]
+    fn the_sleep_timer_has_its_request_and_an_older_state_still_reads() {
+        let line = r#"{"id":5,"req":{"method":"set_mouse_sleep","params":{"minutes":20}}}"#;
+        let req = serde_json::from_str::<RequestFrame>(line).unwrap().req;
+        assert!(
+            matches!(req, Request::SetMouseSleep { minutes: 20 }),
+            "{req:?}"
+        );
+        assert_eq!(req.part(), Some(Part::Mouse));
+        let old = r#"{"connected":true,"battery":null,"applied":{"dpi":null,"polling_hz":null,"buttons":null}}"#;
+        let state: MouseState = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            (state.sleep_secs, state.applied.unwrap().sleep_minutes),
+            (None, None)
+        );
     }
 
     #[test]

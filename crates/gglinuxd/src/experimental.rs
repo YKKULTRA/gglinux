@@ -82,14 +82,7 @@ impl Gates {
     }
 
     /// Follow the gates from a worker: the receiver has the value now, and is told of
-    /// each change. For the workers whose gates come with wave B (mouse, headset).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the mouse and headset workers follow it from wave B on"
-        )
-    )]
+    /// each change. The mouse worker follows them; the headset's comes with its gates.
     pub fn subscribe(&self) -> watch::Receiver<Experimental> {
         self.tx.subscribe()
     }

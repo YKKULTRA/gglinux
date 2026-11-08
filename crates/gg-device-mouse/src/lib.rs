@@ -157,6 +157,25 @@ impl Mouse {
         self.send(&proto::buttons_packet(actions))
     }
 
+    /// Read the sleep timer, in seconds. `None` means asleep or no answer.
+    pub fn sleep_timer(&self) -> Result<Option<u16>> {
+        self.drain();
+        self.send(&proto::read_sleep_timer_packet())?;
+        Ok(self
+            .recv()?
+            .and_then(|data| proto::decode_sleep_timer(&data)))
+    }
+
+    /// Set the sleep timer and save, as GG does: it sends the timer only when saving, so
+    /// whether the mouse takes it without the save is unknown. The save also commits the
+    /// other settings the mouse is running to its onboard memory.
+    pub fn set_sleep_timer(&self, minutes: u8) -> Result<()> {
+        let packet = proto::sleep_timer_packet(minutes)?;
+        debug!(minutes, "setting the sleep timer");
+        self.send(&packet)?;
+        self.save()
+    }
+
     /// Commit the current settings to the mouse's onboard memory so they survive
     /// a power cycle. Settings applied without this are lost when the mouse sleeps.
     pub fn save(&self) -> Result<()> {

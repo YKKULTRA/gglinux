@@ -22,6 +22,14 @@ export global MouseUi {
     in property <bool> split;
     in property <int> active;
     in property <int> polling: 1000;
+    /// The sleep timer to send, in minutes.
+    in property <int> sleep: 5;
+    /// What the mouse reports for it, or "" while it isn't read.
+    in property <string> sleep-read;
+    /// `mouse_power` is on in Settings → Experimental.
+    in property <bool> power-gated;
+    /// The sentence shown while it's off.
+    in property <string> power-refusal;
     /// Per button, its place in `actions`, or -1 for a name set elsewhere that
     /// the menu doesn't offer.
     in property <[int]> buttons: [0, 1, 2, 3, 4, 5];
@@ -65,6 +73,8 @@ export global MouseUi {
     callback remove-stage(int);
     callback pick-stage(int);
     callback pick-polling(int);
+    callback pick-sleep(int);
+    callback apply-sleep();
     callback pick-button(int, int);
     callback factory-buttons();
     callback apply-dpi();
@@ -84,7 +94,7 @@ component Caveat inherits Rectangle {
         padding-top: 8px;
         padding-bottom: 8px;
         spacing: 2px;
-        Hint { text: "This mouse has no way to report its settings back, so nothing here is read from the hardware."; }
+        Hint { text: "This mouse reports only its battery and sleep timer back, so the rest here isn't read from the hardware."; }
         HorizontalLayout {
             spacing: root.applied != "" ? 5px : 0;
             Hint {
@@ -285,6 +295,30 @@ export component MousePanel inherits Card {
     HorizontalLayout {
         alignment: start;
         Button { text: MouseUi.busy == "polling" ? "Applying…" : "Apply polling rate"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-polling(); } }
+    }
+    Divider { }
+    Head { text: "SLEEP TIMER"; }
+    Shown { shown: !MouseUi.power-gated; gap: 0; Hint { text: MouseUi.power-refusal; color: Theme.accent; } }
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        NumberBox {
+            width: 130px;
+            minimum: 1;
+            maximum: 20;
+            step: 1;
+            value: MouseUi.sleep;
+            enabled: MouseUi.power-gated;
+            edited(v) => { MouseUi.pick-sleep(v); }
+            committed(v) => { MouseUi.pick-sleep(v); }
+        }
+        Text { text: "minutes without use"; color: Theme.text-dim; vertical-alignment: center; }
+    }
+    Shown { shown: MouseUi.sleep-read != ""; gap: 0; Hint { text: MouseUi.sleep-read; } }
+    Hint { text: "1 to 20 minutes, as in GG. The mouse takes the timer with a save, so this also writes its other current settings to its onboard memory."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "sleep" ? "Saving…" : "Save sleep timer"; enabled: MouseUi.busy == "" && MouseUi.power-gated; clicked => { MouseUi.apply-sleep(); } }
     }
     Divider { }
     Head {

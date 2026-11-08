@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The Rival 3 Wireless Gen 2 panel on the Engine page: DPI stages, polling
-//! rate, buttons and the onboard save.
+//! rate, sleep timer, buttons and the onboard save.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use gg_ipc::mouse_keys::{self, KEYS, MEDIA};
-use gg_ipc::{DpiStage, Request};
+use gg_ipc::{DpiStage, Experimental, Feature, Request, MOUSE_SLEEP_MINUTES};
 use slint::{ComponentHandle, SharedString};
 
 use crate::client::{Client, State, TIMEOUT};
@@ -115,7 +115,11 @@ pub struct MouseForm {
     pub buttons: Vec<String>,
     /// The key list under a button, while it's open.
     pub picker: Option<KeyPicker>,
+    /// The sleep timer to send, in minutes ([`MOUSE_SLEEP_MINUTES`]).
+    pub sleep: u8,
     seeded: bool,
+    /// The sleep timer was taken from the mouse (or from what was written) once.
+    sleep_seeded: bool,
 }
 
 impl Default for MouseForm {
@@ -127,7 +131,10 @@ impl Default for MouseForm {
             polling: 1000,
             buttons: FACTORY_BUTTONS.map(String::from).to_vec(),
             picker: None,
+            // GG's own default.
+            sleep: 5,
             seeded: false,
+            sleep_seeded: false,
         }
     }
 }
@@ -148,7 +155,36 @@ impl MouseForm {
                 if let Some(a) = &m.applied {
                     self.seed(a);
                 }
+                self.seed_sleep(m);
             }
+        }
+    }
+
+    /// The sleep timer once, from what the mouse reports, or else what was written.
+    fn seed_sleep(&mut self, m: &gg_ipc::MouseState) {
+        if self.sleep_seeded {
+            return;
+        }
+        let minutes = m
+            .sleep_secs
+            .map(|s| (s / 60) as u8)
+            .or_else(|| m.applied.as_ref().and_then(|a| a.sleep_minutes));
+        if let Some(minutes) = minutes {
+            self.set_sleep(minutes as i32);
+            self.sleep_seeded = true;
+        }
+    }
+
+    /// A sleep timer from the box, kept to what the mouse takes.
+    pub fn set_sleep(&mut self, minutes: i32) {
+        let (lo, hi) = (*MOUSE_SLEEP_MINUTES.start(), *MOUSE_SLEEP_MINUTES.end());
+        self.sleep = minutes.clamp(lo.into(), hi.into()) as u8;
+    }
+
+    /// The sleep timer's request; it always saves (see [`Request::SetMouseSleep`]).
+    pub fn sleep_request(&mut self, _save: bool) -> Request {
+        Request::SetMouseSleep {
+            minutes: self.sleep,
         }
     }
 
@@ -461,6 +497,7 @@ fn show_mouse_form(ui: &AppWindow, f: &MouseForm) {
     g.set_split(f.split);
     g.set_active(f.active as i32);
     g.set_polling(f.polling as i32);
+    g.set_sleep(f.sleep as i32);
     g.set_buttons(ints(f.button_menu()));
     let keys: Vec<SharedString> = f.buttons.iter().map(|b| button_text(b).into()).collect();
     sync_rows(g.get_button_keys(), keys, |m| g.set_button_keys(m));
@@ -497,9 +534,26 @@ fn show_picker(g: &MouseUi, f: &MouseForm) {
     sync_rows(g.get_key_choices(), labels, |m| g.set_key_choices(m));
 }
 
+/// What the sleep timer line says the mouse reports, or "" while it isn't read.
+pub fn sleep_read(secs: Option<u16>) -> String {
+    match secs {
+        Some(s) if s % 60 == 0 => format!("The mouse reports {} min.", s / 60),
+        Some(s) => format!("The mouse reports {} min {} s.", s / 60, s % 60),
+        None => String::new(),
+    }
+}
+
 pub fn show_mouse(ui: &AppWindow, s: &State, form: &RefCell<MouseForm>) {
     let g = ui.global::<MouseUi>();
     g.set_known(s.mouse.is_some());
+    g.set_power_gated(s.experimental.is_some_and(|e| e.on(Feature::MousePower)));
+    g.set_power_refusal(
+        Experimental::default()
+            .refusal(Feature::MousePower)
+            .unwrap_or_default()
+            .into(),
+    );
+    g.set_sleep_read(sleep_read(s.mouse.as_ref().and_then(|m| m.sleep_secs)).into());
     form.borrow_mut().follow(s.mouse.as_ref());
     let Some(m) = s.mouse.as_ref() else {
         // Onboard writes start off again too: they can't be undone.
@@ -544,6 +598,8 @@ pub fn bind_mouse(ui: &AppWindow, client: &Client, form: Rc<RefCell<MouseForm>>)
     g.on_pick_stage(move |i| pick(i, 0));
     let polling = edit(|f, hz, _| f.polling = hz as u16);
     g.on_pick_polling(move |hz| polling(hz, 0));
+    let sleep = edit(|f, m, _| f.set_sleep(m));
+    g.on_pick_sleep(move |m| sleep(m, 0));
     g.on_pick_button(edit(|f, i, a| f.pick_button(i as usize, a as usize)));
     let factory = edit(|f, _, _| f.factory_buttons());
     g.on_factory_buttons(move || factory(0, 0));
@@ -584,6 +640,7 @@ pub fn bind_mouse(ui: &AppWindow, client: &Client, form: Rc<RefCell<MouseForm>>)
     };
     g.on_apply_dpi(send("dpi", MouseForm::dpi_request));
     g.on_apply_polling(send("polling", MouseForm::polling_request));
+    g.on_apply_sleep(send("sleep", MouseForm::sleep_request));
     g.on_apply_buttons(send("buttons", MouseForm::buttons_request));
     g.on_save(send("save", |_, _| Request::SaveMouse));
 }
@@ -628,6 +685,8 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
             "mouse.persist" => m.set_persist(n != 0),
             "mouse.apply-dpi" => m.invoke_apply_dpi(),
             "mouse.apply-polling" => m.invoke_apply_polling(),
+            "mouse.pick-sleep" => m.invoke_pick_sleep(n),
+            "mouse.apply-sleep" => m.invoke_apply_sleep(),
             "mouse.apply-buttons" => m.invoke_apply_buttons(),
             "mouse.save" => m.invoke_save(),
             _ => return false,
@@ -737,6 +796,7 @@ mod tests {
                     .map(String::from)
                     .to_vec(),
             ),
+            sleep_minutes: None,
         };
         let mut f = MouseForm::default();
         f.seed(&applied);
@@ -1039,6 +1099,7 @@ mod tests {
             connected: true,
             battery: None,
             applied,
+            sleep_secs: None,
         };
         let first = MouseSettings {
             polling_hz: Some(500),
@@ -1061,5 +1122,52 @@ mod tests {
             ..MouseSettings::default()
         }))));
         assert_eq!(f.polling, 125);
+    }
+
+    fn reporting(sleep_secs: Option<u16>, written: Option<u8>) -> gg_ipc::MouseState {
+        gg_ipc::MouseState {
+            connected: true,
+            battery: None,
+            applied: written.map(|m| MouseSettings {
+                sleep_minutes: Some(m),
+                ..MouseSettings::default()
+            }),
+            sleep_secs,
+        }
+    }
+
+    #[test]
+    fn the_sleep_timer_comes_from_the_mouse_once_and_then_stays_as_edited() {
+        let mut f = MouseForm::default();
+        assert_eq!(f.sleep, 5, "GG's default before anything is known");
+        f.follow(Some(&reporting(None, None)));
+        assert_eq!(f.sleep, 5);
+        f.follow(Some(&reporting(Some(1200), None)));
+        assert_eq!(f.sleep, 20);
+        f.set_sleep(10);
+        // A later reading (a poll) doesn't undo what's being edited.
+        f.follow(Some(&reporting(Some(1200), None)));
+        assert_eq!(f.sleep, 10);
+        // Without a reading (gate off), what was written seeds it.
+        let mut g = MouseForm::default();
+        g.follow(Some(&reporting(None, Some(15))));
+        assert_eq!(g.sleep, 15);
+    }
+
+    #[test]
+    fn the_sleep_timer_sent_is_kept_to_what_the_mouse_takes() {
+        let mut f = MouseForm::default();
+        for (typed, kept) in [(0, 1), (1, 1), (20, 20), (99, 20), (-3, 1)] {
+            f.set_sleep(typed);
+            assert_eq!(f.sleep, kept, "{typed}");
+        }
+        f.set_sleep(12);
+        assert!(matches!(
+            f.sleep_request(false),
+            Request::SetMouseSleep { minutes: 12 }
+        ));
+        assert_eq!(sleep_read(Some(600)), "The mouse reports 10 min.");
+        assert_eq!(sleep_read(Some(90)), "The mouse reports 1 min 30 s.");
+        assert_eq!(sleep_read(None), "");
     }
 }

@@ -39,6 +39,7 @@ ggctl mouse dpi 400:800,1600:1600       # per-axis X:Y
 ggctl mouse polling 1000 [--save]
 ggctl mouse buttons button1,button2,button3,button4,button5,dpi [--save]
 ggctl mouse save                        # commit whatever is applied to onboard memory
+ggctl mouse sleep 20                    # sleep timer, 1 to 20 min; saved (needs mouse_power)
 ggctl clip save                         # save the instant replay (bind this to a key)
 ggctl profile list                      # saved lighting profiles
 ggctl profile apply <name>
@@ -162,7 +163,7 @@ fn main() -> Result<()> {
             // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.
             let save = args.iter().any(|a| a == "--save");
             if !save
-                && matches!(positional(&args)?.as_slice(), ["mouse", command, ..] if *command != "save")
+                && matches!(positional(&args)?.as_slice(), ["mouse", command, ..] if !["save", "sleep"].contains(command))
             {
                 println!("note: not saved — pass --save to keep this across a power cycle");
             }

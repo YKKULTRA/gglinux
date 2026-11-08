@@ -57,8 +57,27 @@ strips byte 0 and the device receives a 64-byte report beginning with the opcode
 - Kernel `hid-steelseries` does **not** export this mouse's battery to upower → poll `0xAA 0x01`
   ourselves (Solaar-style). Treat timeout/`0` as "asleep/unknown".
 - Original 2020 model `1038:1830` deltas: sensitivity `0x20` with `dpi_length_byte=2`; everything else same.
-- **Not covered by any public RE (fresh-RE candidates):** macros, sleep/dim timers, high-efficiency
-  mode, Bluetooth-side config.
+- **Not covered by any public RE (fresh-RE candidates):** macros, Bluetooth-side config. The sleep
+  timer, High-Efficiency Mode and Wireless Stability are now captured (below).
+
+### 1a. Captured from GG 123 (2026-11-08)
+
+Our own USB captures of GG 123.0.0 in a Windows VM with the mouse passed through (pcaps, action logs
+and the full write-up: `RIVAL-PROTOCOL.md` in the M11 capture folder). Same transport as above; answers
+to queries are 64-byte input reports, first byte at index 0.
+
+| Function | Bytes | Notes |
+|---|---|---|
+| Sleep timer | `2B 00 00 00 00 <seconds u16 LE>` | GG sends it only when saving, then `09`; GG offers 1–20 min (seen: `58 02` = 10 min, `B0 04` = 20 min). **Built (gated `mouse_power`), untested here.** |
+| Read sleep timer | `AB` → `00 00 00 00 <seconds u16 LE>` | 300, 600, 1200 read back as set. **Built (gated `mouse_power`).** |
+| High-Efficiency / Wireless Stability | `2E 00` (High-Efficiency on), `2E 02 00` (normal), `2E 02 01` (normal + stability) | sent live; read back with `AE` → `<mode> <stability>` |
+| Wheel bindings | `1A 31 00 00 00 00 32 …` | wheel up/down, same codes as `19` |
+| Read DPI stages | `AC` → `<count> <current> <X×count> <Y×count>` | the layout of `2C` |
+| Read polling rate | `97` → `<code>` | the codes of `17` |
+| Unknown queries | `D0`, `90` → `01 05`; `E8` → `04`/`01` | GG polls `E8` every ~2 s |
+
+Acceleration, deceleration and angle snapping send nothing to the mouse (only `09` on save): GG
+applies them on the PC.
 
 Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.py`, `handlers/multidpi_range_choice_xy.py`, `devices/dpi.py` (all WTFPL).
 

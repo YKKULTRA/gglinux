@@ -14,6 +14,16 @@ pub const CMD_POLLING_RATE: u8 = 0x17;
 pub const CMD_BUTTONS: u8 = 0x19;
 pub const CMD_SAVE: u8 = 0x09;
 pub const CMD_BATTERY: [u8; 2] = [0xAA, 0x01];
+/// Set the sleep timer. Not in rivalcfg: from our own GG 123 captures (2026-11-08,
+/// `docs/PROTOCOLS.md`), where GG sends it only when saving, followed by [`CMD_SAVE`].
+pub const CMD_SLEEP_TIMER: u8 = 0x2B;
+/// Read the sleep timer back (same captures); the answer is laid out as [`CMD_SLEEP_TIMER`]'s
+/// arguments.
+pub const CMD_READ_SLEEP_TIMER: u8 = 0xAB;
+/// The sleep timers GG offers, in whole minutes: the only values seen on the wire.
+pub const SLEEP_MINUTES: std::ops::RangeInclusive<u8> = 1..=20;
+/// Where the timer's seconds (`u16`, little-endian) sit, counting from the command byte.
+const SLEEP_OFFSET: usize = 5;
 
 /// The firmware always parses five DPI slots, whatever `count` says.
 pub const MAX_PRESETS: usize = 5;
@@ -249,6 +259,36 @@ pub fn battery_packet() -> Vec<u8> {
     CMD_BATTERY.to_vec()
 }
 
+/// `2B 00 00 00 00 <seconds u16 LE>`: the mouse sleeps after `minutes` without use.
+///
+/// Only GG's own range is taken (1 to 20 minutes): no other value has been seen on the
+/// wire, so what the mouse does with one is unknown.
+pub fn sleep_timer_packet(minutes: u8) -> Result<Vec<u8>> {
+    if !SLEEP_MINUTES.contains(&minutes) {
+        bail!(
+            "the sleep timer takes {} to {} minutes, not {minutes}",
+            SLEEP_MINUTES.start(),
+            SLEEP_MINUTES.end()
+        );
+    }
+    let mut packet = vec![0u8; SLEEP_OFFSET + 2];
+    packet[0] = CMD_SLEEP_TIMER;
+    packet[SLEEP_OFFSET..].copy_from_slice(&(u16::from(minutes) * 60).to_le_bytes());
+    Ok(packet)
+}
+
+pub fn read_sleep_timer_packet() -> Vec<u8> {
+    vec![CMD_READ_SLEEP_TIMER]
+}
+
+/// The answer to `AB`: `00 00 00 00 <seconds u16 LE>`, the arguments of `2B` without its
+/// command byte. `None` for a short answer or a zero (no timer GG would set).
+pub fn decode_sleep_timer(data: &[u8]) -> Option<u16> {
+    let at = SLEEP_OFFSET - 1;
+    let secs = u16::from_le_bytes(data.get(at..at + 2)?.try_into().ok()?);
+    (secs != 0).then_some(secs)
+}
+
 /// Battery state as reported by `AA 01`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Battery {
@@ -452,5 +492,44 @@ mod tests {
         assert_eq!(decode_battery(&[0x00, 0, 0]), None, "0 means asleep");
         assert_eq!(decode_battery(&[0xFF, 0, 0]), None, "out of range");
         assert_eq!(decode_battery(&[0x10, 0x00]), None, "short reply");
+    }
+
+    /// Byte for byte as GG 123 sent them when saving 20 and 10 minutes (rival-2/-3b captures).
+    #[test]
+    fn the_sleep_timer_goes_out_as_gg_sends_it() {
+        assert_eq!(
+            sleep_timer_packet(20).unwrap(),
+            [0x2B, 0x00, 0x00, 0x00, 0x00, 0xB0, 0x04]
+        );
+        assert_eq!(
+            sleep_timer_packet(10).unwrap(),
+            [0x2B, 0x00, 0x00, 0x00, 0x00, 0x58, 0x02]
+        );
+        assert_eq!(sleep_timer_packet(1).unwrap()[5..], [0x3C, 0x00]);
+    }
+
+    #[test]
+    fn a_sleep_timer_outside_ggs_range_is_refused() {
+        for minutes in [0, 21, 255] {
+            let e = sleep_timer_packet(minutes).unwrap_err().to_string();
+            assert!(e.contains("1 to 20 minutes"), "{minutes}: {e}");
+        }
+    }
+
+    /// The mouse's answers to `AB` in the captures: 5, 10 and 20 minutes.
+    #[test]
+    fn the_sleep_timer_reads_back_from_the_mouses_answer() {
+        assert_eq!(read_sleep_timer_packet(), [0xAB]);
+        let mut answer = [0u8; 64];
+        for (bytes, secs) in [
+            ([0x2C, 0x01], 300),
+            ([0x58, 0x02], 600),
+            ([0xB0, 0x04], 1200),
+        ] {
+            answer[4..6].copy_from_slice(&bytes);
+            assert_eq!(decode_sleep_timer(&answer), Some(secs));
+        }
+        assert_eq!(decode_sleep_timer(&[0, 0, 0, 0, 0x2C]), None, "short");
+        assert_eq!(decode_sleep_timer(&[0u8; 64]), None, "zero");
     }
 }
