@@ -49,12 +49,12 @@ const MAX_DRAIN_REPORTS: usize = 16;
 /// 40 ms between its commands, and so do we.
 pub const COMMAND_PACE: Duration = Duration::from_millis(35);
 
-/// The least time between a save (`09`) and the next command. A sleep timer sent a few
-/// milliseconds after another command's save was lost too (same day), so the mouse seems
-/// to take nothing while it writes its memory. How long that lasts isn't measured yet; in
-/// our captures GG never sent anything within 5 s of a save. Half a second is a guess on
-/// the safe side.
-pub const SAVE_PACE: Duration = Duration::from_millis(500);
+/// The time the mouse is given after a polling-rate command (`17`) before the next one.
+/// GG 123 waits 3.0 s after it in both of our captures (`17`, then `19` and the save `09`
+/// three seconds later). On the owner's mouse (2026-11-13) the dongle answered no query
+/// for about a second after a `17`, even one that set the rate it already had, and a sleep
+/// timer sent 0.5 s after it was lost; 1.5 s after it was kept.
+pub const POLLING_PACE: Duration = Duration::from_secs(3);
 
 /// When the last command went out, and which it was. For the whole process, not per
 /// [`Mouse`]: the daemon opens the mouse afresh for each request, and two requests in a
@@ -65,8 +65,8 @@ static LAST_COMMAND: Mutex<Option<(Instant, u8)>> = Mutex::new(None);
 /// `at`.
 fn pace(last: Option<(Instant, u8)>, now: Instant) -> Duration {
     last.map_or(Duration::ZERO, |(at, command)| {
-        let gap = if command == proto::CMD_SAVE {
-            SAVE_PACE
+        let gap = if command == proto::CMD_POLLING_RATE {
+            POLLING_PACE
         } else {
             COMMAND_PACE
         };
@@ -282,16 +282,15 @@ mod tests {
         assert_eq!(pace(Some((ago(10), dpi)), now), Duration::from_millis(25));
         assert_eq!(pace(Some((ago(1000), dpi)), now), Duration::ZERO);
         assert!(COMMAND_PACE >= Duration::from_millis(30), "GG's own pacing");
-        // After a save the mouse is given longer: it takes nothing while it writes.
-        assert_eq!(pace(Some((now, proto::CMD_SAVE)), now), SAVE_PACE);
+        // After a polling-rate command the mouse is given GG's three seconds; a save
+        // needs no more than any other command (a timer 40 ms after one was kept).
+        let polling = proto::CMD_POLLING_RATE;
+        assert_eq!(pace(Some((now, polling)), now), POLLING_PACE);
         assert_eq!(
-            pace(Some((ago(100), proto::CMD_SAVE)), now),
-            SAVE_PACE - Duration::from_millis(100)
+            pace(Some((ago(1000), polling)), now),
+            POLLING_PACE - Duration::from_secs(1)
         );
-        assert_eq!(
-            pace(Some((ago(1000), proto::CMD_SAVE)), now),
-            Duration::ZERO
-        );
-        assert!(SAVE_PACE > COMMAND_PACE);
+        assert_eq!(pace(Some((ago(3000), polling)), now), Duration::ZERO);
+        assert_eq!(pace(Some((now, proto::CMD_SAVE)), now), COMMAND_PACE);
     }
 }
