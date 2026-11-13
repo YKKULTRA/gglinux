@@ -58,6 +58,8 @@ ggctl clip save                         # save the instant replay (bind this to 
 ggctl profile list                      # saved lighting profiles
 ggctl profile apply <name>
 ggctl gamesense test|on|off
+ggctl gamesense                         # the games, and what each event draws: keys, screen, every key
+ggctl gamesense test screen             # a short test on the keyboard's screen (3.6 s), as a game would
 ggctl keyboard                          # lighting, switch settings and screen, as the daemon has them
 ggctl lighting on|off                   # gglinux draws the lighting, or the keyboard's own profile does
 ggctl lighting zones add NAME KEYS EFFECT   # a zone on top (later zones paint over earlier ones); KEYS:
@@ -211,6 +213,7 @@ fn main() -> Result<()> {
         ResponseData::Bindings { state } => bind::print(&state),
         ResponseData::Onboard { state } => onboard::print(&state),
         ResponseData::Macros { state } => macros::print(&state),
+        ResponseData::Gamesense { state } => gamesense::print(&state),
         ResponseData::Success => {
             println!("ok");
             // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.

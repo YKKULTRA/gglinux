@@ -59,6 +59,7 @@ pub fn method_name(req: &Request) -> &'static str {
         Request::SetGameEnabled { .. } => "set_game_enabled",
         Request::RemoveGame { .. } => "remove_game",
         Request::GamesenseTest => "gamesense_test",
+        Request::GamesenseTestScreen => "gamesense_test_screen",
         Request::GetProfiles => "get_profiles",
         Request::SaveProfile { .. } => "save_profile",
         Request::ApplyProfile { .. } => "apply_profile",
