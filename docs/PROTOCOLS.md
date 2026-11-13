@@ -383,11 +383,28 @@ come as input reports on endpoint `0x82`.
 | What | Bytes | Notes |
 |---|---|---|
 | Protection Mode | release-mode table `38 62 44 [key, mode] × 68` | mode `00` neither, `02` Rapid Trigger, `03` Protection Mode, `04` both. **Built (gated `keyboard_protection`).** |
-| Deep press, "none" | `38 61 44 02 [key, h, l] × 68` | GG sends `00 00` for keys never set and `FF FF` for a key switched off; Apex Control sends `FF FF`. gglinux sends `FF FF`. His flash images hold `00 00`. |
+| Deep press, "none" | `38 61 44 02 [key, h, l] × 68` | GG sends `00 00` for keys never set and `FF FF` for a key switched off; Apex Control sends `FF FF`. gglinux now sends what GG does. His flash images hold `00 00`. |
 | Deep-press bindings | (GG's text) | "Maximum of 8 dual actuation keybinds permitted": enforced in `Bindings::validate`. |
 | Slot write | `02 01 <file>` → input `02 00` (125 ms); 25 × `03 01 <file> F4 01 <offset u32>` ~15 ms apart, the last at 12000 with size 500; `B1 <slot>` → `B1 00 <slot> 01`; `B2 <slot>` → `B2 00 <slot>` | GG's Save. The shapes of §3d; `B2` does answer. GG doesn't read back; gglinux does. |
 | Slot read | `83 01 <file> F4 01 <offset u32>` (feature), read 15–17 ms later → `83 00 <data>` | GG reads all five slots when it opens the keyboard. |
 | Queries | `90` → `90 00 "1.19.7"`; `F5` → `F5 00 01` (region); `F2` → `F2 00 00` (layout); `34` → `34 00 00` (unknown) | GG's connect sequence: `90 F5 90 F2 F5`, the five slots, `1F 82`, `B2 <its config>`, `34`, `90`. |
+
+**Deep press on his keyboard (firmware 1.19.7, 2026-11-13, finger tests with `hwtest/apex_probe.py`):**
+
+- A deep-press binding (`36 02`) is kept only on a key that already has a second point. Written before the point, the
+  keyboard drops it without an error (read back empty 5 times of 5; point first, kept 4 of 4). So gglinux sends the
+  points, then the deep layer, and writes the deep layer again after every points table.
+- With W at 3.0 mm and W → x: a gentle press types `w`, a full press `wxw` (the key's own action comes back as it
+  rises past the point again).
+- In RAM no table takes a point away: not `00 00` (which leaves a key as it is), not GG's `FF FF` for that key, not
+  `FF FF` for all 68 keys. A profile load (`B2`) or unplugging does. A point with nothing bound past it does nothing (a
+  full press types the key once), so when gglinux takes a point away it sends GG's reset for that key and clears the
+  key's deep binding.
+- Switch tables (`38 61 44 00`, `38 62`, `38 65`, `38 66`, `38 67`) and points tables don't touch the deep layer; `B2`
+  clears it.
+- Once, right after gglinux's first deep-press attempt (bindings, then switch tables at 1.5 mm without Rapid Trigger,
+  then the points table with `FF FF` for 67 keys), the keyboard sent `` ` `` over and over with nobody touching it,
+  until unplugged. Not seen again; the cause is unknown.
 
 On his keyboard (2026-11-13): the firmware key order of every per-key table in a slot image is Apex
 Control's `deviceKeyIndexToHID` (pinned `Key.swift`), which the images' own normal layers confirm; the 91

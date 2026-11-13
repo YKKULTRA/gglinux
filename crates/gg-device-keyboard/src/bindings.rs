@@ -13,8 +13,10 @@
 //! keyboard's own shortcuts on the Fn layer (function `62`) can't be made again once
 //! erased, so a merge keeps every one of them byte for byte.
 //!
-//! Not checked on hardware yet: which 91 keys a layer has ([`KEYS`]) and the `FF FF` of a
-//! key without a second actuation point ([`second_actuation_table`]).
+//! Checked on the owner's keyboard (firmware 1.19.7, 2026-11-13): the 91 keys ([`KEYS`]);
+//! a deep-press binding is kept only on a key that already has a second actuation point
+//! (written before the point, the keyboard drops it without a word); and no table takes a
+//! point away again ([`second_actuation_table`]).
 
 use anyhow::{bail, ensure, Context, Result};
 
@@ -67,9 +69,15 @@ pub const USAGES: std::ops::RangeInclusive<u8> = 0x04..=0xE7;
 pub const MAX_USAGES: usize = 4;
 /// The most blocks one report holds.
 const MAX_BLOCKS: usize = *BLOCKS.end() as usize;
-/// `(h, l)` for a key without a second actuation point, as the flash image marks one.
-/// Unverified for the RAM table until a capture shows it; the gate stays off till then.
-pub const NO_SECOND_POINT: (u8, u8) = (0xFF, 0xFF);
+/// `(h, l)` for a key the second actuation table leaves as it is: what GG 123 sends for
+/// every key it isn't changing (our capture apex-4). On the owner's keyboard it changes
+/// nothing, a point the key has included.
+pub const LEAVE_POINT: (u8, u8) = (0x00, 0x00);
+/// `(h, l)` GG 123 sends for the one key whose second point its Reset takes away (our
+/// capture apex-5). On the owner's keyboard (firmware 1.19.7) the point stays all the same,
+/// until a profile is loaded or the keyboard loses power; with nothing bound past it, it
+/// does nothing (a full press types the key once).
+pub const RESET_POINT: (u8, u8) = (0xFF, 0xFF);
 /// The key that holds the Fn layer from the factory: the SteelSeries key (the flash
 /// image's "Fn trigger key … factory `0xF0`").
 pub const STOCK_FN_KEY: u8 = 0xF0;
@@ -501,17 +509,25 @@ pub fn fn_mask_report(mask: &[u8; FN_MASK_BYTES]) -> Vec<u8> {
     report
 }
 
-/// The second actuation point's table, `38 61 44 02 [key, h, l] × 68`: the same
-/// thresholds as the primary one ([`proto::thresholds`], tenths of a millimetre clamped to
-/// 0.1–4.0 mm), and [`NO_SECOND_POINT`] for a key without one (unverified).
-pub fn second_actuation_table(second_of: impl Fn(u8) -> Option<u8>) -> Vec<u8> {
+/// The second actuation point's table, `38 61 44 02 [key, h, l] × 68`, as GG 123 sends it:
+/// the same thresholds as the primary one for a key with a point ([`proto::thresholds`],
+/// tenths of a millimetre clamped to 0.1–4.0 mm), [`RESET_POINT`] for a key whose point
+/// goes (`reset`), and [`LEAVE_POINT`] for every other key.
+pub fn second_actuation_table(
+    second_of: impl Fn(u8) -> Option<u8>,
+    reset: impl Fn(u8) -> bool,
+) -> Vec<u8> {
     let mut report = vec![0u8; FEATURE_REPORT];
     report[1] = OP_SWITCHES;
     report[2] = SW_THRESHOLDS;
     report[3] = ANALOG_KEYS.len() as u8;
     report[4] = SECOND_LAYER;
     for (i, &code) in ANALOG_KEYS.iter().enumerate() {
-        let (h, l) = second_of(code).map_or(NO_SECOND_POINT, proto::thresholds);
+        let (h, l) = match second_of(code) {
+            Some(tenths) => proto::thresholds(tenths),
+            None if reset(code) => RESET_POINT,
+            None => LEAVE_POINT,
+        };
         report[5 + i * 3..8 + i * 3].copy_from_slice(&[code, h, l]);
     }
     report
@@ -571,10 +587,15 @@ impl Keyboard {
         self.output(&fn_mask_report(mask))
     }
 
-    /// Set every adjustable key's second actuation point, in tenths of a millimetre;
-    /// `None` for none.
-    pub fn set_second_actuation(&self, second_of: impl Fn(u8) -> Option<u8>) -> Result<()> {
-        self.feature(&second_actuation_table(second_of))
+    /// Give keys a second actuation point, in tenths of a millimetre (`None`: none), and
+    /// reset the points of the keys in `reset`, as [`second_actuation_table`] says. A
+    /// deep-press binding written after this sticks on the keys with a point.
+    pub fn set_second_actuation(
+        &self,
+        second_of: impl Fn(u8) -> Option<u8>,
+        reset: impl Fn(u8) -> bool,
+    ) -> Result<()> {
+        self.feature(&second_actuation_table(second_of, reset))
     }
 }
 
@@ -1119,30 +1140,32 @@ mod tests {
     }
 
     #[test]
-    fn the_second_point_table_is_the_primary_table_on_layer_2_with_ff_for_none() {
-        let t = second_actuation_table(|code| (code == 0x1A).then_some(30));
+    fn the_second_point_table_is_the_primary_table_on_layer_2_with_ggs_leave_and_reset() {
+        let t = second_actuation_table(|code| (code == 0x1A).then_some(30), |c| c == 0x05);
         assert_eq!(t.len(), FEATURE_REPORT);
         assert_eq!(t[..5], [0x00, 0x38, 0x61, 0x44, 0x02]);
         let w = ANALOG_KEYS.iter().position(|&c| c == 0x1A).unwrap();
         // 3.0 mm is l 113, h 124: h first.
         assert_eq!(t[5 + w * 3..8 + w * 3], [0x1A, 124, 113]);
-        assert_eq!(t[5..8], [0x04, 0xFF, 0xFF], "A has none");
+        // As GG 123 sends it: 00 00 leaves a key as it is, FF FF is its Reset of one key.
+        assert_eq!(t[5..8], [0x04, 0x00, 0x00], "A left as it is");
+        assert_eq!(t[8..11], [0x05, 0xFF, 0xFF], "B's point reset");
         for (i, &code) in ANALOG_KEYS.iter().enumerate() {
             assert_eq!(t[5 + i * 3], code);
         }
         assert!(t[5 + 68 * 3..].iter().all(|&b| b == 0));
         // The same thresholds as the primary table, clamped the same way.
         let primary = proto::actuation_table(|_| 40);
-        let second = second_actuation_table(|_| Some(40));
+        let second = second_actuation_table(|_| Some(40), |_| true);
         assert_eq!(primary[5..], second[5..]);
         assert_eq!(primary[..4], second[..4]);
         assert_eq!(
-            second_actuation_table(|_| Some(0))[5..8],
+            second_actuation_table(|_| Some(0), |_| false)[5..8],
             [0x04, 4, 4],
             "below 0.1 mm: 0.1"
         );
         assert_eq!(
-            second_actuation_table(|_| Some(99))[5..8],
+            second_actuation_table(|_| Some(99), |_| false)[5..8],
             [0x04, 219, 213],
             "past 4.0 mm: 4.0"
         );
@@ -1182,7 +1205,7 @@ mod tests {
             .unwrap();
         kb.set_fn_key(0xE7).unwrap();
         kb.set_fn_mask(&fn_mask(&stock(Layer::Fn))).unwrap();
-        kb.set_second_actuation(|_| None).unwrap();
+        kb.set_second_actuation(|_| None, |_| false).unwrap();
         let sent: Vec<(Kind, u8)> = fake.sent().iter().map(|s| (s.kind, s.report[1])).collect();
         assert_eq!(
             sent,
@@ -1214,7 +1237,8 @@ mod tests {
             kb.write_bindings(Layer::Fn, &stock(Layer::Fn)).unwrap_err(),
             kb.set_fn_key(0xF0).unwrap_err(),
             kb.set_fn_mask(&[0; 32]).unwrap_err(),
-            kb.set_second_actuation(|_| Some(30)).unwrap_err(),
+            kb.set_second_actuation(|_| Some(30), |_| false)
+                .unwrap_err(),
         ];
         for e in refusals {
             assert!(format!("{e:#}").contains("keyboard_bindings"), "{e:#}");

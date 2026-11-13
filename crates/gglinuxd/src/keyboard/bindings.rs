@@ -13,6 +13,14 @@
 //! change reads again first. Turning the bindings off sends nothing: what was sent stays
 //! on the keyboard until it's unplugged.
 //!
+//! The keyboard keeps a deep-press binding only on a key that already has a deep-press
+//! point (the owner's keyboard, 2026-11-13: written before the point, it was dropped
+//! without a word). So a deep-press binding does something only on a key the switches gave
+//! a point ([`Store::set_deep_keys`]); on any other key it's written as nothing, and the
+//! deep layer goes again each time the points do ([`on_points_sent`]). A point gglinux
+//! took away stays on the keyboard till a profile loads, and does nothing with nothing
+//! bound past it.
+//!
 //! Everything here that talks to the keyboard waits for `keyboard_bindings`: a request
 //! is refused with [`gg_ipc::Experimental::refusal`] while it's off, and the open
 //! keyboard's allowlist lets the reports out only while it's on.
@@ -64,6 +72,9 @@ pub struct Store {
     written: [Option<Vec<Block>>; 3],
     /// The Fn key and its lit keys as last sent on this connection.
     fn_sent: Option<(u8, [u8; 32])>,
+    /// The keys with a deep-press point of gglinux's on the open keyboard, as the
+    /// switches say: the only keys a deep-press binding is written on.
+    deep_keys: Vec<u8>,
 }
 
 /// A normal layer with fewer keys typing themselves than this is taken for a bad read: a
@@ -88,7 +99,31 @@ impl Store {
             loaded: false,
             written: Default::default(),
             fn_sent: None,
+            deep_keys: Vec::new(),
         }
+    }
+
+    /// The keys with a deep-press point of gglinux's on the open keyboard
+    /// ([`super::switches::SwitchesState::points`]).
+    pub fn set_deep_keys(&mut self, keys: &[u8]) {
+        if self.deep_keys != keys {
+            self.deep_keys = keys.to_vec();
+        }
+    }
+
+    /// The deep layer's changes: each deep-press binding of `new` on a key with a point,
+    /// every other key `new` or `old` binds there back to its default (nothing).
+    fn deep_changes(&self, new: &Bindings, old: &Bindings) -> Vec<(u8, Change)> {
+        changes(new, old, Layer::Second)
+            .into_iter()
+            .map(|(code, c)| {
+                if self.deep_keys.contains(&code) {
+                    (code, c)
+                } else {
+                    (code, Change::Default)
+                }
+            })
+            .collect()
     }
 
     fn save(&self) {
@@ -125,7 +160,10 @@ impl Store {
         };
         let mut out: Layers = Default::default();
         for (i, (layer, kl)) in LAYERS.into_iter().enumerate() {
-            let changes = changes(new, old, layer);
+            let changes = match layer {
+                Layer::Second => self.deep_changes(new, old),
+                Layer::Normal | Layer::Fn => changes(new, old, layer),
+            };
             if layer == Layer::Fn && !changes.is_empty() {
                 check_fn(&base[i])?;
             }
@@ -166,6 +204,29 @@ impl Store {
             self.fn_sent = self.state.bindings.fn_key.map(|key| (key, mask));
         }
         Ok(())
+    }
+
+    /// The deep layer again, after a deep-press table: from what gglinux last wrote there
+    /// (or the keyboard's own), each binding on a key with a point, every other one
+    /// nothing. Written even when it's what went last, since the keyboard dropped the
+    /// bindings on keys that had no point then; not at all while nothing of gglinux's is
+    /// on the layer, or nothing was read on this connection.
+    fn rewrite_deep(&mut self, device: &Keyboard) -> Result<bool, String> {
+        let Some(base) = self.base.as_ref() else {
+            return Ok(false);
+        };
+        let start = self.written[2].clone().unwrap_or_else(|| base[2].clone());
+        let now = self.state.bindings.clone();
+        let deep = kb::merge(kb::Layer::Second, &start, &self.deep_changes(&now, &now))
+            .map_err(|e| e.to_string())?;
+        if self.written[2].is_none() && deep == start {
+            return Ok(false);
+        }
+        device
+            .write_bindings(kb::Layer::Second, &deep)
+            .map_err(|e| format!("{e:#}"))?;
+        self.written[2] = Some(deep);
+        Ok(true)
     }
 
     /// New bindings, checked and saved, and sent if they're on and the keyboard is here.
@@ -311,6 +372,29 @@ pub fn on_command(
                 .and_then(|()| check(&bindings))
                 .and_then(|()| store.set(bindings, enabled, device));
             let _ = reply.send(result);
+        }
+    }
+    publish(store, &before, event_tx);
+}
+
+/// A deep-press table just went to the keyboard: the deep layer goes again after it, if the
+/// bindings are on and gglinux has written them on this connection.
+pub fn on_points_sent(
+    store: &mut Store,
+    device: &Keyboard,
+    exp: &Experimental,
+    event_tx: &broadcast::Sender<Event>,
+) {
+    if !store.state.enabled || gate(exp).is_err() {
+        return;
+    }
+    let before = store.state.clone();
+    match store.rewrite_deep(device) {
+        Ok(true) => info!("deep-press bindings sent after the deep-press points"),
+        Ok(false) => {}
+        Err(e) => {
+            warn!(error = %e, "the keyboard did not take the deep-press bindings");
+            store.state.error = Some(e);
         }
     }
     publish(store, &before, event_tx);
@@ -1008,8 +1092,36 @@ mod tests {
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 
+    /// The switch settings with W's deep-press point at 3.0 mm, or with none.
+    fn w_point(on: bool) -> gg_ipc::Switches {
+        gg_ipc::Switches {
+            enabled: true,
+            actuation: 15,
+            second: if on {
+                vec![gg_ipc::KeyActuation {
+                    code: 0x1A,
+                    actuation: 30,
+                }]
+            } else {
+                Vec::new()
+            },
+            ..gg_ipc::Switches::default()
+        }
+    }
+
+    /// The blocks of a deep-layer write (`36 02`), one per adjustable key.
+    fn deep_blocks(report: &[u8]) -> Vec<[u8; 6]> {
+        assert_eq!(report[1..4], [0x36, 0x02, 68], "every adjustable key");
+        assert!(report[4 + 68 * 6..].iter().all(|&b| b == 0));
+        (0..68)
+            .map(|i| report[4 + i * 6..10 + i * 6].try_into().unwrap())
+            .collect()
+    }
+
     #[tokio::test]
-    async fn a_deep_press_binding_writes_layer_2_whole() {
+    async fn a_deep_press_binding_goes_after_its_point_and_is_cleared_when_the_point_goes() {
+        // The owner's keyboard (2026-11-13) drops a deep-press binding written on a key
+        // without a point, and keeps a point a reset tried to take away.
         let d = Scratch::new("bindings-layer-2");
         let fake = stock_keyboard();
         let (tx, _rx) = broadcast::channel(16);
@@ -1028,20 +1140,121 @@ mod tests {
         ));
         assert_eq!(
             sent_ops(&fake),
-            [READS[0], READS[1], READS[2], (Kind::Feature, 0x36, 0x02)]
+            READS,
+            "W has no point yet: nothing on the deep layer, which the keyboard would drop"
         );
-        let write = &fake.sent()[3].report;
-        assert_eq!(write[3], 68, "every adjustable key");
+        assert_eq!(get(&kb).await.bindings.second.len(), 1, "kept for later");
+
+        // W gets its point: the switches, the point, then the deep layer with W on it.
+        fake.clear_sent();
+        kb.send(|reply| Command::SetSwitches {
+            switches: w_point(true),
+            reply,
+        })
+        .await
+        .unwrap();
+        settle(&kb).await;
+        let sent = fake.sent();
+        let ops = sent_ops(&fake);
+        assert_eq!(ops.len(), 7, "{ops:?}");
+        assert_eq!(
+            sent[5].report[1..5],
+            [0x38, 0x61, 68, 0x02],
+            "the point first"
+        );
         let at = ANALOG_KEYS.iter().position(|&c| c == 0x1A).unwrap();
-        for (i, &code) in ANALOG_KEYS.iter().enumerate() {
-            let block = &write[4 + i * 6..10 + i * 6];
+        for (i, (block, &code)) in deep_blocks(&sent[6].report)
+            .iter()
+            .zip(&ANALOG_KEYS)
+            .enumerate()
+        {
             if i == at {
-                assert_eq!(block, [0x1A, 0x51, 0x04, 0, 0, 0]);
+                assert_eq!(*block, [0x1A, 0x51, 0x04, 0, 0, 0]);
             } else {
-                assert_eq!(block, [code, 0, 0, 0, 0, 0], "{code:#04x}");
+                assert_eq!(*block, [code, 0, 0, 0, 0, 0], "{code:#04x}");
             }
         }
-        assert!(write[4 + 68 * 6..].iter().all(|&b| b == 0));
+
+        // The point goes: GG's reset for W, then W does nothing past it.
+        fake.clear_sent();
+        kb.send(|reply| Command::SetSwitches {
+            switches: w_point(false),
+            reply,
+        })
+        .await
+        .unwrap();
+        settle(&kb).await;
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 7, "{:?}", sent_ops(&fake));
+        assert_eq!(
+            sent[5].report[5 + at * 3..8 + at * 3],
+            [0x1A, 0xFF, 0xFF],
+            "W reset"
+        );
+        assert_eq!(sent[5].report[5..8], [0x04, 0x00, 0x00], "A left as it is");
+        assert!(deep_blocks(&sent[6].report)
+            .iter()
+            .zip(&ANALOG_KEYS)
+            .all(|(b, &code)| *b == [code, 0, 0, 0, 0, 0]));
+        assert_eq!(
+            get(&kb).await.bindings.second.len(),
+            1,
+            "the binding itself stays saved, for when W has a point again"
+        );
+
+        // Nothing more while nothing changes.
+        fake.clear_sent();
+        settle(&kb).await;
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn on_connect_the_points_go_before_the_deep_layer() {
+        let d = Scratch::new("bindings-connect-order");
+        std::fs::write(
+            d.0.join("switches.json"),
+            serde_json::to_string(&w_point(true)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            d.0.join("bindings.json"),
+            r#"{"enabled":true,"bindings":{"normal":[],"fn_layer":[],"second":[{"code":26,"action":{"kind":"keys","codes":[27]}}],"fn_key":null}}"#,
+        )
+        .unwrap();
+        let fake = stock_keyboard();
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        let ops = sent_ops(&fake);
+        let primary = fake
+            .sent()
+            .iter()
+            .position(|s| s.report[1..5] == [0x38, 0x61, 68, 0x00])
+            .expect("the switches");
+        let deep_table = fake
+            .sent()
+            .iter()
+            .position(|s| s.report[1..5] == [0x38, 0x61, 68, 0x02])
+            .expect("the deep-press table");
+        let deep_layer = ops
+            .iter()
+            .position(|&o| o == (Kind::Feature, 0x36, 0x02))
+            .expect("the deep layer");
+        assert!(primary < deep_table && deep_table < deep_layer, "{ops:?}");
+        let at = ANALOG_KEYS.iter().position(|&c| c == 0x1A).unwrap();
+        assert_eq!(
+            deep_blocks(&fake.sent()[deep_layer].report)[at],
+            [0x1A, 0x51, 0x1B, 0, 0, 0],
+            "W types x past its point"
+        );
+        assert_eq!(
+            ops.iter()
+                .filter(|&&o| o == (Kind::Feature, 0x36, 0x02))
+                .count(),
+            1,
+            "once"
+        );
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 

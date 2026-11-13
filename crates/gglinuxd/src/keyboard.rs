@@ -447,11 +447,23 @@ fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Ev
         read_region(&mut state, event_tx);
         render(&mut state);
         state.switches.sync(state.device.as_ref());
+        // A deep-press binding sticks only on a key with a point: the points go first.
+        state.bindings.set_deep_keys(state.switches.points());
+        let points_sent = state.switches.take_points_sent();
         if std::mem::take(&mut state.just_opened) {
             if let Some(device) = state.device.as_ref() {
                 let exp = &state.experimental;
                 bindings::on_connect(&mut state.bindings, device, exp, event_tx);
                 onboard::on_connect(&mut state.onboard, device, exp, event_tx);
+            }
+        } else if points_sent {
+            if let Some(device) = state.device.as_ref() {
+                bindings::on_points_sent(
+                    &mut state.bindings,
+                    device,
+                    &state.experimental,
+                    event_tx,
+                );
             }
         }
         state.screen.render(state.device.as_ref());
@@ -817,6 +829,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             {
                 ask_region(state); // bindings that are on take the keyboard
             }
+            state.bindings.set_deep_keys(state.switches.points());
             bindings::on_command(
                 cmd,
                 &mut state.bindings,

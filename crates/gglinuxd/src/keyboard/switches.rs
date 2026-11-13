@@ -6,8 +6,14 @@
 //! Keys may also have a second (deep-press) actuation point. Its table goes after the
 //! others, and only while the keyboard lets the bindings family out (`keyboard_bindings`
 //! on); with the gate off exactly the same reports go out as without deep-press points.
-//! Removing the last one sends the table once more, with none for every key, and a deep
-//! press must reach the keyboard deeper than the key's first press ([`check_deeper`]).
+//! The table is GG 123's: the keys with a point, a reset for each key whose point gglinux
+//! takes away, and every other key left as it is. On the owner's keyboard a reset doesn't
+//! take the point away (only a profile load or unplugging does), so the bindings module
+//! clears what such a key does past it: then it does nothing. The keyboard keeps a
+//! deep-press binding only on a key that has a point, so after each table the worker has
+//! the bindings module write the deep layer again ([`SwitchesState::take_points_sent`]).
+//! A deep press must reach the keyboard deeper than the key's first press
+//! ([`check_deeper`]).
 
 use std::path::{Path, PathBuf};
 
@@ -29,9 +35,12 @@ pub struct SwitchesState {
     /// Whether the keyboard let Protection Mode out when the settings last went: they go
     /// again when that changes, with or without the protected keys.
     protection: Option<bool>,
-    /// The open keyboard holds deep-press points of gglinux's: a table with some went out
-    /// since it connected. They stay there until a table without them replaces them.
-    second_out: bool,
+    /// The keys gglinux gave a deep-press point on the open keyboard, as the last table
+    /// that went out since it connected says.
+    points: Vec<u8>,
+    /// A deep-press table went out since the worker last asked
+    /// ([`SwitchesState::take_points_sent`]).
+    points_sent: bool,
 }
 
 impl SwitchesState {
@@ -44,7 +53,8 @@ impl SwitchesState {
             sent: None,
             second: None,
             protection: None,
-            second_out: false,
+            points: Vec::new(),
+            points_sent: false,
         }
     }
 
@@ -116,33 +126,37 @@ impl SwitchesState {
     }
 
     /// The deep-press points, once the others went through: only while the keyboard lets
-    /// the bindings family out, and again when that comes on. With none left, a table of
-    /// "none" for every key takes back points of gglinux's the keyboard still holds.
+    /// the bindings family out, and again when that comes on. A key whose point gglinux
+    /// took away gets GG's reset, once; with no points before or now, nothing goes.
     fn sync_second(&mut self, device: &Keyboard) {
         let on = device.families().bindings;
         let s = &self.switches;
         if !matches!(self.sent, Some(Ok(()))) || self.second == Some(on) {
             return;
         }
-        if s.second.is_empty() && !self.second_out {
+        if s.second.is_empty() && self.points.is_empty() {
             return;
         }
         self.second = Some(on);
         if !on {
             return;
         }
+        let point = |code: u8| {
+            s.second
+                .iter()
+                .find(|k| k.code == code)
+                .map(|k| k.actuation)
+        };
+        let gone =
+            |code: u8| self.points.contains(&code) && !s.second.iter().any(|k| k.code == code);
         let result = device
-            .set_second_actuation(|code| {
-                s.second
-                    .iter()
-                    .find(|k| k.code == code)
-                    .map(|k| k.actuation)
-            })
+            .set_second_actuation(point, gone)
             .map_err(|e| format!("{e:#}"));
         match result {
             Ok(()) => {
                 info!("keyboard deep-press points sent");
-                self.second_out = !s.second.is_empty();
+                self.points = s.second.iter().map(|k| k.code).collect();
+                self.points_sent = true;
             }
             Err(e) => {
                 warn!(error = %e, "the keyboard did not take the deep-press points");
@@ -157,7 +171,21 @@ impl SwitchesState {
         self.sent = None;
         self.second = None;
         self.protection = None;
-        self.second_out = false;
+        self.points.clear();
+        self.points_sent = false;
+    }
+
+    /// The keys with a deep-press point of gglinux's on the open keyboard: the only keys
+    /// a deep-press binding of gglinux's may do something on.
+    pub fn points(&self) -> &[u8] {
+        &self.points
+    }
+
+    /// Whether a deep-press table went out since the last time this was asked: the deep
+    /// layer is due again then, since the keyboard dropped bindings on keys that had no
+    /// point when they were written.
+    pub fn take_points_sent(&mut self) -> bool {
+        std::mem::take(&mut self.points_sent)
     }
 
     pub fn settings(&self) -> &Switches {
@@ -274,7 +302,8 @@ mod tests {
             sent: None,
             second: None,
             protection: None,
-            second_out: false,
+            points: Vec::new(),
+            points_sent: false,
         }
     }
 
@@ -446,9 +475,15 @@ mod tests {
         assert_eq!((sent[5].kind, sent[5].report[1]), (Kind::Feature, 0x38));
         assert_eq!(
             sent[5].report,
-            gg_device_keyboard::bindings::second_actuation_table(|c| (c == 0x1A).then_some(30))
+            gg_device_keyboard::bindings::second_actuation_table(
+                |c| (c == 0x1A).then_some(30),
+                |_| false
+            )
         );
         assert_eq!(sent[0].report[4], 0, "the primary table first");
+        assert_eq!(s.points(), [0x1A]);
+        assert!(s.take_points_sent(), "the deep layer is due after it");
+        assert!(!s.take_points_sent(), "once");
         s.forget();
         s.sync(Some(&kb));
         assert_eq!(fake.sent().len(), 12, "sent again after a reconnect");
@@ -494,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_the_last_deep_press_sends_one_table_with_none_for_every_key() {
+    fn removing_a_deep_press_sends_ggs_reset_for_its_key_once() {
         let d = Scratch::new("switches-deep-cleared");
         let fake = FakeTransport::new();
         let kb = fake.keyboard();
@@ -516,8 +551,11 @@ mod tests {
         assert_eq!(sent.len(), 6, "the switches, then one deep-press table");
         assert_eq!(
             sent[5].report,
-            gg_device_keyboard::bindings::second_actuation_table(|_| None)
+            gg_device_keyboard::bindings::second_actuation_table(|_| None, |c| c == 0x1A),
+            "W reset, every other key left as it is"
         );
+        assert!(s.points().is_empty(), "W's binding is due to be cleared");
+        assert!(s.take_points_sent());
 
         // Once: the keyboard has none now.
         fake.clear_sent();
@@ -544,7 +582,7 @@ mod tests {
         assert_eq!(sent.len(), 6);
         assert_eq!(
             sent[5].report,
-            gg_device_keyboard::bindings::second_actuation_table(|_| None)
+            gg_device_keyboard::bindings::second_actuation_table(|_| None, |c| c == 0x1A)
         );
 
         // A keyboard that reconnects has its own: nothing to take back there.
