@@ -497,7 +497,11 @@ impl Client {
         // they existed answers with an error, which leaves them unknown.
         let mut extra = vec![Request::GetExperimental, Request::GetActions];
         if running.keyboard {
-            extra.extend([Request::GetBindings, Request::GetOnboard]);
+            extra.extend([
+                Request::GetBindings,
+                Request::GetOnboard,
+                Request::GetMacros,
+            ]);
         }
         for req in extra {
             let this = self.clone();

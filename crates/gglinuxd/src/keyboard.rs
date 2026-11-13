@@ -126,6 +126,8 @@ pub enum Command {
     Bindings(bindings::Cmd),
     /// For the onboard profile slots: see [`onboard`].
     Onboard(onboard::Cmd),
+    /// For the keyboard macros: see [`macros`].
+    Macros(macros::Cmd),
     /// The experimental gates as they are now. The open keyboard, and every keyboard
     /// opened from now on, lets a gated command family out only while its gate is on.
     /// No reply.
@@ -158,6 +160,7 @@ impl std::fmt::Debug for Command {
             Command::ListenTo(_) => "ListenTo",
             Command::Bindings(_) => "Bindings",
             Command::Onboard(_) => "Onboard",
+            Command::Macros(_) => "Macros",
             Command::SetExperimental(_) => "SetExperimental",
             Command::Shutdown(_) => "Shutdown",
             #[cfg(test)]
@@ -326,6 +329,7 @@ struct State {
     screen: ScreenState,
     bindings: bindings::Store,
     onboard: onboard::Store,
+    macros: macros::Store,
     /// The experimental gates, as last told; the open keyboard's families follow them.
     experimental: Experimental,
     /// The keyboard opened since the last loop: `on_connect` is due once its switches
@@ -374,6 +378,7 @@ impl State {
             screen: ScreenState::load(config_dir),
             bindings: bindings::Store::load(config_dir),
             onboard: onboard::Store::load(config_dir),
+            macros: macros::Store::load(config_dir),
             experimental,
             just_opened: false,
             region: None,
@@ -870,6 +875,25 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             &state.experimental,
             event_tx,
         ),
+        Command::Macros(cmd) => {
+            // The slot the keyboard runs, as the onboard slots know it: a write into it
+            // loads it again, and then the bindings and switches hear what a load tells
+            // them.
+            let (tx, mut rx) = oneshot::channel();
+            let get = onboard::Cmd::Get(tx);
+            onboard::on_command(get, &mut state.onboard, None, &state.experimental, event_tx);
+            let active = rx
+                .try_recv()
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|s| s.active);
+            let device = state.device.as_ref();
+            let exp = &state.experimental;
+            if macros::on_command(cmd, &mut state.macros, device, exp, event_tx, active) {
+                bindings::on_slot_loaded(&mut state.bindings, event_tx);
+                state.switches.forget();
+            }
+        }
         Command::SetExperimental(experimental) => {
             state.experimental = experimental;
             if let Some(device) = state.device.as_ref() {

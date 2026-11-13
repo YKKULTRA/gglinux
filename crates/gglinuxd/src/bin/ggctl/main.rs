@@ -80,6 +80,14 @@ ggctl onboard write N current           # write gglinux's screen picture and Rap
 ggctl onboard restore N <backup file>   # write a backup into slot N (also: write N <file>)
                                         #   both back the slot up first and put it back on any failure
 ggctl onboard restore N <file> --damaged  # put a backup into a slot that doesn't check out (asks first)
+ggctl macro                             # keyboard macros, the keys that play them, the slot last written
+ggctl macro set NAME a ctrl+c wait:100  # steps: keys, ctrl+c, down:shift, up:shift, wait:MS, click:1,
+                                        #   'text:\"hello\"' (US layout); saved, nothing sent yet
+ggctl macro rm NAME
+ggctl macro bind KEY NAME [hold]        # KEY plays it once per press, or again and again while held
+ggctl macro unbind KEY                  #   (two keys at most, for now)
+ggctl macro write N                     # write them into slot N; backs the slot up first (needs
+                                        #   keyboard_macros and keyboard_onboard)
 ggctl actions                           # actions on the spare keys F13–F24, and what the desktop bound
 ggctl actions set f13 run kitty         # or: type <text>, profile <name>, clip, media playpause|next|
                                         #   previous|stop|mute|volup|voldown; a program's own options
@@ -163,6 +171,7 @@ fn main() -> Result<()> {
         ResponseData::Actions { state } => actions::print(&state),
         ResponseData::Bindings { state } => bind::print(&state),
         ResponseData::Onboard { state } => onboard::print(&state),
+        ResponseData::Macros { state } => macros::print(&state),
         ResponseData::Success => {
             println!("ok");
             // Only the mouse forgets what isn't saved; `mouse save` is the saving itself.
@@ -290,7 +299,9 @@ fn connect() -> Result<UnixStream> {
 /// slot read or write can take most of a minute when the keyboard is slow to answer.
 fn answer_wait(req: &Request) -> (Duration, &'static str) {
     match req {
-        Request::ReadOnboard { .. } | Request::WriteOnboard { .. } => (
+        Request::ReadOnboard { .. }
+        | Request::WriteOnboard { .. }
+        | Request::WriteMacros { .. } => (
             Duration::from_secs(60),
             "no answer from the daemon within a minute: it may still be reading or writing the \
              keyboard's slot. Leave the keyboard plugged in and the daemon running; wait, then run \

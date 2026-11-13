@@ -98,6 +98,8 @@ struct Fake {
     parts: Parts,
     /// The experimental gates as the client last set them.
     experimental: Experimental,
+    /// The keyboard macros, and the slots they're written into.
+    macros: keyboard_macros::Macros,
     looks: Looks,
 }
 
@@ -157,6 +159,7 @@ fn main() -> Result<()> {
         fail: value("--fail"),
         parts: Parts::default(),
         experimental: Experimental::default(),
+        macros: keyboard_macros::Macros::default(),
         looks,
     }));
     if let Some(variant) = value("--sonar") {

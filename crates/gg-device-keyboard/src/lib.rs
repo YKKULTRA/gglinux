@@ -26,6 +26,7 @@ pub mod bindings;
 pub mod font;
 pub mod keys;
 pub mod layout;
+pub mod macros;
 pub mod oled;
 pub mod onboard;
 pub mod proto;

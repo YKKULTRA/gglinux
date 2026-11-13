@@ -324,9 +324,48 @@ impl Image {
         (self.bytes[at::RAPID_TAP_ENABLE] != 0, entries)
     }
 
-    /// The macro events, opaque.
+    /// The macro events, opaque here; [`crate::macros`] reads and writes them.
     pub fn macros(&self) -> &[u8] {
         &self.bytes[at::MACROS..at::MACROS + at::MACRO_BYTES]
+    }
+
+    /// The normal layer's bindings: 5 bytes (function, then four codes) for each of the
+    /// 100 places, in the firmware's key order.
+    pub fn normal_bindings(&self) -> &[u8] {
+        &self.bytes[at::NORMAL_BINDINGS..at::FN_BINDINGS]
+    }
+
+    /// The Fn layer's bindings, laid out as the normal layer's.
+    pub fn fn_bindings(&self) -> &[u8] {
+        &self.bytes[at::FN_BINDINGS..at::DEVICE_SCHEMA]
+    }
+
+    /// The second actuation point's bindings: 5 bytes for each of the 70 places.
+    pub fn second_bindings(&self) -> &[u8] {
+        &self.bytes[at::SECOND_BINDINGS..at::OLED]
+    }
+
+    /// Put in a whole new macro area and the normal-layer bindings of some places (each
+    /// place's 5 bytes), as one change. Nothing else moves. [`crate::macros::write`] makes
+    /// both.
+    pub fn set_macros(&mut self, area: &[u8], places: &[(usize, [u8; 5])]) -> Result<()> {
+        ensure!(
+            area.len() == at::MACRO_BYTES,
+            "the macro area is {} bytes, not {}",
+            at::MACRO_BYTES,
+            area.len()
+        );
+        let count = (at::FN_BINDINGS - at::NORMAL_BINDINGS) / 5;
+        if let Some((place, _)) = places.iter().find(|(p, _)| *p >= count) {
+            bail!("a layer has places 0 to {}, not {place}", count - 1);
+        }
+        self.bytes[at::MACROS..at::MACROS + at::MACRO_BYTES].copy_from_slice(area);
+        for (place, binding) in places {
+            let start = at::NORMAL_BINDINGS + place * 5;
+            self.bytes[start..start + 5].copy_from_slice(binding);
+        }
+        self.seal();
+        Ok(())
     }
 
     pub fn guid(&self) -> &[u8] {

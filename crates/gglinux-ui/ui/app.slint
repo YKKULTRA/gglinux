@@ -12,6 +12,7 @@ import { SwitchesPanel } from "switches.slint";
 import { BindingsUi, BindingsPanel } from "bindings.slint";
 import { ScreenPanel } from "screen.slint";
 import { OnboardUi, OnboardPanel } from "onboard.slint";
+import { MacrosUi, MacrosPanel } from "macros.slint";
 import { SonarPanel } from "sonar.slint";
 import { GamesPanel, MomentsPanel, PartsPanel, ProfilesPanel, SettingsPanel } from "pages.slint";
 import { ActionsUi, ActionsPanel } from "actions.slint";
@@ -25,6 +26,7 @@ export { SwitchesUi, TapRow } from "switches.slint";
 export { ScreenUi } from "screen.slint";
 export { BindingsUi } from "bindings.slint";
 export { OnboardUi } from "onboard.slint";
+export { MacrosUi, MacroRow } from "macros.slint";
 export { Key } from "widgets.slint";
 export { SonarUi, SonarChannel, SonarApp, EqHandle } from "sonar.slint";
 export { GamesUi, Game, MomentsUi, Clip, PartsUi, PartRow, ProfilesUi, RuleRow, SettingsUi } from "pages.slint";
@@ -108,7 +110,7 @@ component DevicePanels {
 }
 
 /// The Apex Pro TKL Gen 3's card: the lighting, the switches, key bindings,
-/// the screen and the onboard slots. Put together here, so each panel's file
+/// the screen, the onboard slots and the macros. Put together here, so each panel's file
 /// may use the keyboard's own (keyboard.slint) without the files importing
 /// each other.
 component KeyboardPanel inherits Card {
@@ -142,6 +144,11 @@ component KeyboardPanel inherits Card {
                 spacing: 16px;
                 Divider { }
                 OnboardPanel { }
+            } }
+            Opt { shown: MacrosUi.shown; gap: 16px; VerticalLayout {
+                spacing: 16px;
+                Divider { }
+                MacrosPanel { }
             } }
         }
     } }

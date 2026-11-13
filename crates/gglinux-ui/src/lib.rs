@@ -16,6 +16,7 @@ pub mod engine;
 pub mod eq;
 pub mod experimental;
 pub mod keyboard;
+pub mod macros;
 pub mod mouse;
 pub mod onboard;
 pub mod pages;
@@ -44,6 +45,7 @@ pub struct Forms {
     pub screen: RefCell<screen::ScreenForm>,
     pub bindings: RefCell<bindings::BindingsForm>,
     pub onboard: RefCell<onboard::OnboardForm>,
+    pub macros: RefCell<macros::MacrosForm>,
     pub sonar: Rc<RefCell<sonar::SonarForm>>,
     pub parts: Rc<RefCell<pages::PartsForm>>,
     pub actions: RefCell<actions::ActionsForm>,
@@ -62,6 +64,7 @@ impl Forms {
         screen::reset(self);
         bindings::reset(self);
         onboard::reset(self);
+        macros::reset(self);
         *self.sonar.borrow_mut() = Default::default();
         *self.parts.borrow_mut() = Default::default();
         actions::reset(self);
@@ -138,6 +141,7 @@ pub fn wire(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     screen::bind(ui, client, forms);
     bindings::bind(ui, client, forms);
     onboard::bind(ui, client, forms);
+    macros::bind(ui, client, forms);
     sonar::bind(ui, client, forms.sonar.clone());
     pages::bind_games(ui, client);
     pages::bind_moments(ui, client);
@@ -189,6 +193,7 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
             switches::show(ui, s, &forms);
             screen::show(ui, s, &forms);
             bindings::show(ui, s);
+            macros::show(ui, s);
         }
         Changed::Sonar => sonar::show(ui, s, &forms.sonar),
         Changed::Gamesense => pages::show_games(ui, s),
@@ -201,12 +206,16 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
             bindings::show(ui, s);
             switches::show(ui, s, &forms);
             onboard::show(ui, s);
+            macros::show(ui, s);
         }
         Changed::Bindings => bindings::show(ui, s),
-        Changed::Onboard => onboard::show(ui, s),
+        // The macros panel names the slots.
+        Changed::Onboard => {
+            onboard::show(ui, s);
+            macros::show(ui, s);
+        }
         Changed::Actions => actions::show(ui, s),
-        // No panel yet: the macros unit adds it.
-        Changed::Macros => {}
+        Changed::Macros => macros::show(ui, s),
     }
 }
 
@@ -282,6 +291,7 @@ pub fn poke(ui: &AppWindow, step: &str) {
         || screen::poke(ui, name, n)
         || bindings::poke(ui, name, n)
         || onboard::poke(ui, name, n)
+        || macros::poke(ui, name, n)
         || sonar::poke(ui, name, n)
         || pages::poke(ui, name, n)
         || actions::poke(ui, name, n)
