@@ -155,7 +155,7 @@ impl Macros {
             Written::Unchanged => None,
             Written::Written(check) => Some(check.warning().unwrap_or_else(|| {
                 format!(
-                    "the keyboard plays these macros once it runs slot {}: `ggctl onboard load {}`, or the slot's button on the keyboard",
+                    "the keyboard plays these macros once it runs slot {}: `ggctl onboard load {}` (or the slot's Load button in the app)",
                     slot + 1,
                     slot + 1
                 )

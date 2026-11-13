@@ -140,12 +140,17 @@ pub fn request(words: &[&str]) -> Result<Request> {
         Command::List => Request::GetMacros,
         Command::Write(slot) => Request::WriteMacros { slot },
         Command::Edit(edit) => {
-            let ResponseData::Macros { state } =
-                crate::send(crate::connect()?, Request::GetMacros)?
-            else {
-                bail!("the daemon did not send its macros (is it older than ggctl?)");
+            // A daemon may answer the first read after a change with the state from
+            // before it, as a device does (the fake daemon does): the second read is the
+            // one edited, so a change made just before isn't lost.
+            let read = || -> Result<MacrosState> {
+                match crate::send(crate::connect()?, Request::GetMacros)? {
+                    ResponseData::Macros { state } => Ok(state),
+                    _ => bail!("the daemon did not send its macros (is it older than ggctl?)"),
+                }
             };
-            let mut library = state.library;
+            read()?;
+            let mut library = read()?.library;
             edit.apply(&mut library)?;
             Request::SetMacros { library }
         }

@@ -276,7 +276,7 @@ fn flash(store: &mut Store, kb: &Keyboard, slot: u8, active: Option<u8>) -> Resu
         }
     } else {
         notes.push(format!(
-            "the keyboard plays these macros once it runs slot {n}: `ggctl onboard load {n}`, or the slot's button on the keyboard"
+            "the keyboard plays these macros once it runs slot {n}: `ggctl onboard load {n}` (or the slot's Load button in the app)"
         ));
         false
     };

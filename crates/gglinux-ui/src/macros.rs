@@ -23,9 +23,12 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use crate::client::{lost_connection, Client, State, TIMEOUT};
 use crate::keyboard::{label, SURFACE_2, TEXT, TEXT_DIM};
 
-/// The key that holds the Fn layer: it keeps that job, so it can't have a macro. Other keys
-/// the keyboard has no place for are refused by the daemon, with the reason.
-const FN_KEY: u8 = 0xF0;
+/// Whether a key on the picture can have a macro: the keyboard keys. Not the Fn key (it
+/// keeps its job) nor the media button beside the screen (hard-wired). The daemon checks
+/// each key against the keyboard's own key order too.
+fn can_have(code: u8) -> bool {
+    (0x04..=0xE7).contains(&code)
+}
 use crate::{sync_rows, AppWindow, Forms, Key, MacroRow, MacrosUi};
 
 /// A write takes about 2 s, but the erase may take up to 6, and a failed one is written
@@ -218,7 +221,7 @@ fn board(kb: &KeyboardState, lib: &MacroLibrary, name: &str, gated: bool) -> Vec
     kb.layout
         .iter()
         .map(|k| {
-            let can = k.code != FN_KEY;
+            let can = can_have(k.code);
             let bound = lib.bindings.iter().find(|b| b.code == k.code);
             Key {
                 x: k.x,
@@ -243,6 +246,15 @@ fn short(name: &str) -> String {
         s.push('…');
     }
     s
+}
+
+/// `text` with its first letter made a capital, to stand alone as a sentence.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// Show the daemon's macros.
@@ -305,7 +317,14 @@ fn draw(ui: &AppWindow, s: &State, state: &MacrosState, form: &mut MacrosForm) {
     g.set_slot(i32::from(slot(form, s.onboard.as_ref())));
     g.set_written(written(state).into());
     g.set_busy(state.busy);
-    g.set_note(state.note.clone().unwrap_or_default().into());
+    g.set_note(
+        state
+            .note
+            .as_deref()
+            .map(sentence)
+            .unwrap_or_default()
+            .into(),
+    );
     if let Some(e) = &state.error {
         g.set_error(e.into());
     }
@@ -393,7 +412,7 @@ pub fn bind(ui: &AppWindow, client: &Client, _forms: &Rc<Forms>) {
         };
         let picked = crate::with_forms(|f| f.macros.borrow().picked.clone());
         let Picked::Named(name) = picked else { return };
-        if code == FN_KEY {
+        if !can_have(code) {
             let key = kb.layout[i as usize].clone();
             ui.global::<MacrosUi>()
                 .set_error(format!("{} can't play a macro", label(&key)).into());
@@ -463,6 +482,7 @@ pub fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
         // Open row n in the editor (-1: a new macro).
         "macros.pick" => g.invoke_pick(n),
         "macros.key" => g.invoke_key_clicked(n),
+        "macros.save" => g.invoke_save(),
         "macros.slot" => g.invoke_pick_slot(n),
         "macros.write" => g.invoke_write(),
         _ => return false,
@@ -566,6 +586,12 @@ mod tests {
         assert_eq!(slot(&form, Some(&onboard)), 0, "the running one");
         form.slot = Some(2);
         assert_eq!(slot(&form, Some(&onboard)), 2, "the one picked");
+    }
+
+    #[test]
+    fn the_fn_key_and_the_media_button_cant_have_a_macro() {
+        assert!(can_have(0x13) && can_have(0xE7));
+        assert!(!can_have(0xF0) && !can_have(0xFB));
     }
 
     #[test]

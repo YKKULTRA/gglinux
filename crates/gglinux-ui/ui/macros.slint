@@ -114,7 +114,7 @@ export component MacrosPanel {
             SubTitle { text: MacrosUi.picked == -1 ? "New macro" : MacrosUi.name; }
             Opt { Row {
                 label: "Name";
-                LineEdit { text <=> MacrosUi.name; enabled: root.can; placeholder-text: "copy and paste"; }
+                LineEdit { text <=> MacrosUi.name; enabled: root.can; placeholder-text: "Its name"; }
             } }
             Opt { Row {
                 label: "Steps";
