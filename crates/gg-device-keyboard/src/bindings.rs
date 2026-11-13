@@ -17,13 +17,14 @@
 //! a deep-press binding is kept only on a key that already has a second actuation point
 //! (written before the point, the keyboard drops it without a word); no table takes a
 //! point away again ([`second_actuation_table`]); and now and then a layer write is
-//! dropped without a word, so every write is read back ([`Keyboard::write_bindings`]).
+//! dropped without a word, so every write is read back, and one that doesn't stick is
+//! undone by writing back the layer the keyboard held ([`Keyboard::write_bindings`]).
 
 use anyhow::{bail, ensure, Context, Result};
 use tracing::warn;
 
 use crate::allow::{
-    BLOCK, BLOCKS, FN_MASK_BYTES, OP_BINDINGS, OP_FN_KEY, OP_FN_MASK, OP_READ_BINDINGS,
+    self, BLOCK, BLOCKS, FN_MASK_BYTES, OP_BINDINGS, OP_FN_KEY, OP_FN_MASK, OP_READ_BINDINGS,
     SECOND_LAYER,
 };
 use crate::proto::{self, ANALOG_KEYS, COMMAND_REPORT, FEATURE_REPORT, OP_SWITCHES, SW_THRESHOLDS};
@@ -544,6 +545,50 @@ pub fn second_actuation_table(
     report
 }
 
+/// A layer write the keyboard didn't keep ([`Keyboard::write_bindings`]), and what its
+/// layer was left as once gglinux wrote back the layer it held before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotKept {
+    pub layer: Layer,
+    /// What the last try met: a failed send, a failed read, or a layer that read back
+    /// different from what was sent.
+    pub why: String,
+    /// The layer read back as the one it held before, once that was written back: nothing
+    /// of the write stayed. If not, the layer may hold a mix of old and new blocks.
+    pub put_back: bool,
+}
+
+impl std::fmt::Display for NotKept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = self.layer.name();
+        if self.put_back {
+            write!(
+                f,
+                "{}. gglinux wrote back the {name} bindings the keyboard had before, and it reads \
+                 back with them again. gglinux tries again with the next change; if this keeps \
+                 happening, unplug the keyboard and plug it back in",
+                self.why
+            )
+        } else {
+            write!(
+                f,
+                "{}. Writing back the {name} bindings the keyboard had before didn't check out \
+                 either, so its {name} layer may be a mix of old and new bindings: unplug the \
+                 keyboard and plug it back in",
+                self.why
+            )
+        }
+    }
+}
+
+impl std::error::Error for NotKept {}
+
+/// Whether a layer read back holds the blocks of `want`, a whole layer: both hold each key
+/// once, so the same blocks, in any order.
+fn same(want: &[Block], back: &[Block]) -> bool {
+    want.iter().all(|b| back.contains(b))
+}
+
 /// Whether `reply` is an answer left in the read slot from before this read of `layer`:
 /// another command's, or a bindings read of another layer. A refusal (`B6` with an error
 /// byte) is this read's own answer.
@@ -582,33 +627,90 @@ impl Keyboard {
 
     /// Write `layer` whole, and see that the keyboard kept it: a [`READ_SETTLE`] after the
     /// write the layer is read back, and if it isn't what was written it's written again,
-    /// [`WRITE_TRIES`] times in all, then it's an error that names the layer. A kept write
-    /// costs one write and one read. Lasts until the keyboard loses power.
-    pub fn write_bindings(&self, layer: Layer, blocks: &[Block]) -> Result<()> {
+    /// [`WRITE_TRIES`] times in all. A kept write costs one write and one read. A failed
+    /// send is read back too (it may have reached the keyboard, whole or in part), and ends
+    /// the tries. Lasts until the keyboard loses power.
+    ///
+    /// `kept` is the layer the keyboard is known to hold now: what gglinux last wrote and
+    /// read back, or else what it read. If the write doesn't stick, `kept` is written once
+    /// and read back, so the layer isn't left half old and half new, and the error is a
+    /// [`NotKept`] that says which of the two the keyboard holds now. Both lists are
+    /// checked, and the allowlist asked, before anything goes out.
+    pub fn write_bindings(&self, layer: Layer, blocks: &[Block], kept: &[Block]) -> Result<()> {
         let reports = write_reports(layer, blocks)?;
+        let restore = write_reports(layer, kept)?;
+        let read = read_request(layer, layer.keys())?;
+        for report in reports.iter().chain(&restore).chain([&read]) {
+            allow::check(report, self.families())?;
+        }
+        let name = layer.name();
+        let mut why = String::new();
         for attempt in 1..=WRITE_TRIES {
-            for report in &reports {
-                self.feature(report)?;
-            }
-            std::thread::sleep(READ_SETTLE);
-            let back = self
-                .read_bindings(layer)
-                .with_context(|| format!("checking the {} layer after writing it", layer.name()))?;
-            // Both hold each key of the layer once: the same blocks, in any order.
-            if blocks.iter().all(|b| back.contains(b)) {
+            let (sent, back) = self.write_and_read(layer, &reports);
+            if back.as_ref().is_ok_and(|back| same(blocks, back)) {
+                if let Err(e) = sent {
+                    let e = format!("{e:#}");
+                    warn!(layer = name, error = %e, "a bindings write failed, but the layer reads back as written");
+                }
                 return Ok(());
             }
-            warn!(
-                layer = layer.name(),
-                attempt, "the keyboard didn't keep a bindings write; writing it again"
-            );
+            if let Err(e) = sent {
+                why = format!("the keyboard didn't take the {name} bindings: {e:#}");
+                break;
+            }
+            why = match back {
+                Err(e) => format!(
+                    "the keyboard didn't keep the {name} bindings after {WRITE_TRIES} tries: the \
+                     last time the layer couldn't be read back ({e:#})"
+                ),
+                Ok(_) => format!(
+                    "the keyboard didn't keep the {name} bindings after {WRITE_TRIES} tries: each \
+                     time the layer read back different from what was sent"
+                ),
+            };
+            if attempt < WRITE_TRIES {
+                warn!(
+                    layer = name,
+                    attempt, "the keyboard didn't keep a bindings write; writing it again"
+                );
+            }
         }
-        bail!(
-            "the keyboard didn't keep the {} bindings after {WRITE_TRIES} tries: each time the \
-             layer read back different from what was sent. gglinux tries again with the next \
-             change; if this keeps happening, unplug the keyboard and plug it back in",
-            layer.name()
-        )
+        // The layer it held, once, so a write that stuck in part doesn't stay.
+        let put_back = match self.write_and_read(layer, &restore) {
+            (_, Ok(back)) if same(kept, &back) => true,
+            (sent, back) => {
+                let sent = sent.err().map(|e| format!("{e:#}"));
+                let back = back.map_err(|e| format!("{e:#}")).err();
+                warn!(
+                    layer = name,
+                    ?sent,
+                    ?back,
+                    "writing back the bindings layer the keyboard had didn't check out"
+                );
+                false
+            }
+        };
+        Err(NotKept {
+            layer,
+            why,
+            put_back,
+        }
+        .into())
+    }
+
+    /// Send `reports`, stopping at the first that fails, wait [`READ_SETTLE`] and read
+    /// `layer` back, whatever the send gave.
+    fn write_and_read(
+        &self,
+        layer: Layer,
+        reports: &[Vec<u8>],
+    ) -> (Result<()>, Result<Vec<Block>>) {
+        let sent = reports.iter().try_for_each(|r| self.feature(r));
+        std::thread::sleep(READ_SETTLE);
+        let back = self
+            .read_bindings(layer)
+            .with_context(|| format!("checking the {} layer after writing it", layer.name()));
+        (sent, back)
     }
 
     /// Make `code` the key that holds the Fn layer.
@@ -1235,8 +1337,8 @@ mod tests {
     #[test]
     fn the_keyboard_writes_and_sets_the_fn_key_mask_and_second_point_with_the_right_kinds() {
         let (fake, kb) = holding();
-        kb.write_bindings(Layer::Normal, &stock(Layer::Normal))
-            .unwrap();
+        let normal = stock(Layer::Normal);
+        kb.write_bindings(Layer::Normal, &normal, &normal).unwrap();
         kb.set_fn_key(0xE7).unwrap();
         kb.set_fn_mask(&fn_mask(&stock(Layer::Fn))).unwrap();
         kb.set_second_actuation(|_| None, |_| false).unwrap();
@@ -1256,9 +1358,14 @@ mod tests {
             write_report(Layer::Normal, &stock(Layer::Normal)).unwrap()
         );
         assert!(
-            kb.write_bindings(Layer::Normal, &stock(Layer::Normal)[1..])
+            kb.write_bindings(Layer::Normal, &normal[1..], &normal)
                 .is_err(),
             "not whole: nothing sent"
+        );
+        assert!(
+            kb.write_bindings(Layer::Normal, &normal, &normal[1..])
+                .is_err(),
+            "what it holds not whole: nothing sent"
         );
         assert_eq!(fake.sent().len(), 5);
     }
@@ -1299,7 +1406,8 @@ mod tests {
     fn a_kept_layer_write_costs_one_write_and_one_read_a_settle_later() {
         for layer in Layer::ALL {
             let (fake, kb) = holding();
-            kb.write_bindings(layer, &changed(layer)).unwrap();
+            kb.write_bindings(layer, &changed(layer), &stock(layer))
+                .unwrap();
             let l = layer.byte();
             assert_eq!(
                 ops(&fake),
@@ -1321,7 +1429,8 @@ mod tests {
         for layer in Layer::ALL {
             let (fake, kb) = holding();
             fake.drop_layer_writes(1);
-            kb.write_bindings(layer, &changed(layer)).unwrap();
+            kb.write_bindings(layer, &changed(layer), &stock(layer))
+                .unwrap();
             let (write, read) = (
                 (Kind::Feature, 0x36, layer.byte()),
                 (Kind::Feature, 0xB6, layer.byte()),
@@ -1336,21 +1445,44 @@ mod tests {
         }
     }
 
+    /// The [`NotKept`] in a failed layer write.
+    fn not_kept(e: &anyhow::Error) -> &NotKept {
+        e.downcast_ref::<NotKept>()
+            .unwrap_or_else(|| panic!("not a layer the keyboard didn't keep: {e:#}"))
+    }
+
     #[test]
-    fn a_layer_the_keyboard_drops_three_times_is_an_error_naming_it() {
+    fn a_layer_the_keyboard_drops_three_times_is_written_back_as_it_was_and_named() {
         let (fake, kb) = holding();
         fake.drop_layer_writes(3);
-        let e = format!(
-            "{:#}",
-            kb.write_bindings(Layer::Second, &changed(Layer::Second))
-                .unwrap_err()
+        let e = kb
+            .write_bindings(
+                Layer::Second,
+                &changed(Layer::Second),
+                &stock(Layer::Second),
+            )
+            .unwrap_err();
+        let message = format!("{e:#}");
+        assert!(
+            message.contains("the keyboard didn't keep the deep-press bindings after 3 tries"),
+            "{message}"
         );
         assert!(
-            e.contains("the keyboard didn't keep the deep-press bindings after 3 tries"),
-            "{e}"
+            message.contains("wrote back the deep-press bindings the keyboard had before"),
+            "{message}"
         );
+        assert!(not_kept(&e).put_back);
+        assert_eq!(not_kept(&e).layer, Layer::Second);
+        // Three tries, then what it held, once, read back.
         let (write, read) = ((Kind::Feature, 0x36, 0x02), (Kind::Feature, 0xB6, 0x02));
-        assert_eq!(ops(&fake), [write, read, write, read, write, read]);
+        assert_eq!(
+            ops(&fake),
+            [write, read, write, read, write, read, write, read]
+        );
+        assert_eq!(
+            fake.sent()[6].report,
+            write_report(Layer::Second, &stock(Layer::Second)).unwrap()
+        );
         assert_eq!(
             fake.held_layer(Layer::Second).unwrap(),
             stock(Layer::Second)
@@ -1358,9 +1490,199 @@ mod tests {
         let (fake, kb) = holding();
         fake.drop_layer_writes(3);
         let e = kb
-            .write_bindings(Layer::Fn, &changed(Layer::Fn))
+            .write_bindings(Layer::Fn, &changed(Layer::Fn), &stock(Layer::Fn))
             .unwrap_err();
         assert!(format!("{e:#}").contains("the Fn bindings"), "{e:#}");
+    }
+
+    /// What [`PartWay`] does with one layer write (`36`).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Write {
+        /// Only the first half of its blocks reach the keyboard.
+        Half,
+        /// The first half reach the keyboard, then the send fails.
+        HalfThenFail,
+        /// All of it reaches the keyboard, then the send fails all the same.
+        WholeThenFail,
+        /// The keyboard drops it.
+        Drop,
+    }
+
+    /// A keyboard on [`FakeTransport`] that takes some layer writes only in part, as one
+    /// could when something goes wrong in the middle of a report. `plan` names the writes
+    /// by number, counting from 1; the others go through whole.
+    struct PartWay {
+        inner: FakeTransport,
+        writes: std::cell::Cell<usize>,
+        plan: Vec<(usize, Write)>,
+    }
+
+    impl PartWay {
+        fn keyboard(inner: &FakeTransport, plan: &[(usize, Write)]) -> Keyboard {
+            let kb = Keyboard::with_transport(Box::new(PartWay {
+                inner: inner.clone(),
+                writes: std::cell::Cell::new(0),
+                plan: plan.to_vec(),
+            }));
+            kb.set_families(ON);
+            kb
+        }
+    }
+
+    impl crate::Transport for PartWay {
+        fn send_feature(&self, report: &[u8]) -> Result<()> {
+            if report[1] != OP_BINDINGS {
+                return self.inner.send_feature(report);
+            }
+            let n = self.writes.get() + 1;
+            self.writes.set(n);
+            let half = || {
+                let mut r = report.to_vec();
+                r[3] /= 2;
+                r
+            };
+            match self.plan.iter().find(|p| p.0 == n).map(|p| p.1) {
+                None => self.inner.send_feature(report),
+                Some(Write::Half) => self.inner.send_feature(&half()),
+                Some(Write::HalfThenFail) => {
+                    self.inner.send_feature(&half())?;
+                    bail!("the fake keyboard failed part-way through write {n}")
+                }
+                Some(Write::WholeThenFail) => {
+                    self.inner.send_feature(report)?;
+                    bail!("the fake keyboard failed write {n} after taking it")
+                }
+                Some(Write::Drop) => {
+                    self.inner.drop_layer_writes(1);
+                    self.inner.send_feature(report)
+                }
+            }
+        }
+
+        fn get_feature(&self, buf: &mut [u8]) -> Result<usize> {
+            self.inner.get_feature(buf)
+        }
+
+        fn write(&self, report: &[u8]) -> Result<()> {
+            self.inner.write(report)
+        }
+
+        fn read_timeout(&self, buf: &mut [u8], ms: i32) -> Result<usize> {
+            self.inner.read_timeout(buf, ms)
+        }
+    }
+
+    /// A normal layer with every key doing nothing: half of it kept is a mix.
+    fn all_unbound() -> Vec<Block> {
+        KEYS.iter()
+            .map(|&code| Block::new(code, &Action::Unbound).unwrap())
+            .collect()
+    }
+
+    fn holding_stock() -> FakeTransport {
+        let fake = FakeTransport::new();
+        for layer in Layer::ALL {
+            fake.hold_layer(layer, &stock(layer));
+        }
+        fake
+    }
+
+    #[test]
+    fn a_layer_kept_only_in_part_every_time_is_written_back_whole() {
+        let fake = holding_stock();
+        let plan = [(1, Write::Half), (2, Write::Half), (3, Write::Half)];
+        let kb = PartWay::keyboard(&fake, &plan);
+        let normal = stock(Layer::Normal);
+        let e = kb
+            .write_bindings(Layer::Normal, &all_unbound(), &normal)
+            .unwrap_err();
+        assert!(not_kept(&e).put_back, "{e:#}");
+        assert!(format!("{e:#}").contains("after 3 tries"), "{e:#}");
+        let (write, read) = ((Kind::Feature, 0x36, 0x00), (Kind::Feature, 0xB6, 0x00));
+        assert_eq!(
+            ops(&fake),
+            [write, read, write, read, write, read, write, read]
+        );
+        assert_eq!(fake.held_layer(Layer::Normal).unwrap(), normal, "whole");
+    }
+
+    #[test]
+    fn a_layer_left_in_part_that_cant_be_written_back_is_called_a_mix() {
+        let fake = holding_stock();
+        let plan = [
+            (1, Write::Half),
+            (2, Write::Half),
+            (3, Write::Half),
+            (4, Write::Drop),
+        ];
+        let kb = PartWay::keyboard(&fake, &plan);
+        let normal = stock(Layer::Normal);
+        let e = kb
+            .write_bindings(Layer::Normal, &all_unbound(), &normal)
+            .unwrap_err();
+        assert!(!not_kept(&e).put_back);
+        let message = format!("{e:#}");
+        assert!(
+            message.contains("may be a mix of old and new bindings")
+                && message.contains("unplug the keyboard and plug it back in"),
+            "{message}"
+        );
+        let held = fake.held_layer(Layer::Normal).unwrap();
+        assert!(held != normal && held != all_unbound(), "a mix");
+    }
+
+    #[test]
+    fn a_send_that_fails_part_way_is_read_back_and_the_layer_written_back_once() {
+        let fake = holding_stock();
+        let kb = PartWay::keyboard(&fake, &[(1, Write::HalfThenFail)]);
+        let normal = stock(Layer::Normal);
+        let e = kb
+            .write_bindings(Layer::Normal, &all_unbound(), &normal)
+            .unwrap_err();
+        let message = format!("{e:#}");
+        assert!(
+            message.contains("the keyboard didn't take the normal bindings")
+                && message.contains("failed part-way through write 1"),
+            "{message}"
+        );
+        assert!(not_kept(&e).put_back);
+        // No more tries after a failed send: read back, what it held, read back.
+        let (write, read) = ((Kind::Feature, 0x36, 0x00), (Kind::Feature, 0xB6, 0x00));
+        assert_eq!(ops(&fake), [write, read, write, read]);
+        assert_eq!(fake.held_layer(Layer::Normal).unwrap(), normal);
+
+        // A send that never reached it is read back too, and what it held written once.
+        let fake = holding_stock();
+        fake.fail_send(1);
+        let kb = PartWay::keyboard(&fake, &[]);
+        let e = kb
+            .write_bindings(Layer::Normal, &changed(Layer::Normal), &normal)
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("0x36"), "{e:#}");
+        assert!(not_kept(&e).put_back);
+        assert_eq!(
+            ops(&fake),
+            [read, write, read],
+            "the failed send isn't kept"
+        );
+    }
+
+    #[test]
+    fn a_send_error_after_the_keyboard_took_the_layer_counts_as_kept() {
+        let fake = holding_stock();
+        let kb = PartWay::keyboard(&fake, &[(1, Write::WholeThenFail)]);
+        kb.write_bindings(
+            Layer::Normal,
+            &changed(Layer::Normal),
+            &stock(Layer::Normal),
+        )
+        .unwrap();
+        let (write, read) = ((Kind::Feature, 0x36, 0x00), (Kind::Feature, 0xB6, 0x00));
+        assert_eq!(ops(&fake), [write, read]);
+        assert_eq!(
+            fake.held_layer(Layer::Normal).unwrap(),
+            changed(Layer::Normal)
+        );
     }
 
     #[test]
@@ -1371,8 +1693,12 @@ mod tests {
         kb.set_second_actuation(|c| (c == 0x1A).then_some(30), |_| false)
             .unwrap();
         kb.show(|_| crate::Rgb::default()).unwrap();
-        kb.write_bindings(Layer::Second, &changed(Layer::Second))
-            .unwrap();
+        kb.write_bindings(
+            Layer::Second,
+            &changed(Layer::Second),
+            &stock(Layer::Second),
+        )
+        .unwrap();
         assert_eq!(
             ops(&fake)[1..],
             [
@@ -1390,7 +1716,8 @@ mod tests {
         let kb = fake.keyboard();
         let refusals = [
             kb.read_bindings(Layer::Normal).unwrap_err(),
-            kb.write_bindings(Layer::Fn, &stock(Layer::Fn)).unwrap_err(),
+            kb.write_bindings(Layer::Fn, &stock(Layer::Fn), &stock(Layer::Fn))
+                .unwrap_err(),
             kb.set_fn_key(0xF0).unwrap_err(),
             kb.set_fn_mask(&[0; 32]).unwrap_err(),
             kb.set_second_actuation(|_| Some(30), |_| false)
