@@ -6,7 +6,8 @@
 //! allowlist, and checked against [`allow`] once more at the write, with the gated
 //! command families the daemon has turned on ([`Families`], all off by default). With
 //! them off nothing here writes the keyboard's flash: the screen and switch settings last
-//! until it loses power.
+//! until it loses power. Every report keeps [`REPORT_GAP`] from the one before, since the
+//! keyboard drops one that comes too soon.
 //!
 //! The bytes reach the keyboard through a [`Transport`]: the hidapi device, or in tests a
 //! fake ([`testing::FakeTransport`], also built for other crates with the `testing`
