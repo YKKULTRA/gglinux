@@ -39,7 +39,8 @@ ggctl mouse                             # battery + settings we have applied
 ggctl mouse dpi 800,1600 [--select N] [--save]   # N counts from 0
 ggctl mouse dpi 400:800,1600:1600       # per-axis X:Y
 ggctl mouse polling 1000 [--save]
-ggctl mouse buttons button1,button2,button3,button4,button5,dpi [--save]
+ggctl mouse buttons button1,button2,button3,button4,button5,dpi[,up,down] [--save]
+ggctl mouse wheel button4 scrolldown [--save]   # wheel up, down: scrollup, scrolldown or button4 (needs mouse_wheel)
 ggctl mouse save                        # commit whatever is applied to onboard memory
 ggctl mouse sleep 20                    # sleep timer, 1 to 20 min; saved (needs mouse_power)
 ggctl mouse radio normal|stable|efficient [--save]   # Wireless Stability, High-Efficiency Mode
