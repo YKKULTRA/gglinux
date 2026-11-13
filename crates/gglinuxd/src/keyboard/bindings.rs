@@ -334,10 +334,7 @@ fn left_as(e: &anyhow::Error, before: &[&str], after: &[&str]) -> String {
     };
     if !before.is_empty() {
         let has = if before.len() == 1 { "has" } else { "have" };
-        message.push_str(&format!(
-            " The {} {has} the new bindings.",
-            layers(before)
-        ));
+        message.push_str(&format!(" The {} {has} the new bindings.", layers(before)));
     }
     if !after.is_empty() {
         let were = if after.len() == 1 {

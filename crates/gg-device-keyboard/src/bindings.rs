@@ -681,7 +681,12 @@ impl Keyboard {
             (sent, back) => {
                 let sent = sent.err().map(|e| format!("{e:#}"));
                 let back = back.map_err(|e| format!("{e:#}")).err();
-                warn!(layer = name, ?sent, ?back, "writing back the bindings layer the keyboard had didn't check out");
+                warn!(
+                    layer = name,
+                    ?sent,
+                    ?back,
+                    "writing back the bindings layer the keyboard had didn't check out"
+                );
                 false
             }
         };
@@ -695,7 +700,11 @@ impl Keyboard {
 
     /// Send `reports`, stopping at the first that fails, wait [`READ_SETTLE`] and read
     /// `layer` back, whatever the send gave.
-    fn write_and_read(&self, layer: Layer, reports: &[Vec<u8>]) -> (Result<()>, Result<Vec<Block>>) {
+    fn write_and_read(
+        &self,
+        layer: Layer,
+        reports: &[Vec<u8>],
+    ) -> (Result<()>, Result<Vec<Block>>) {
         let sent = reports.iter().try_for_each(|r| self.feature(r));
         std::thread::sleep(READ_SETTLE);
         let back = self
@@ -1447,7 +1456,11 @@ mod tests {
         let (fake, kb) = holding();
         fake.drop_layer_writes(3);
         let e = kb
-            .write_bindings(Layer::Second, &changed(Layer::Second), &stock(Layer::Second))
+            .write_bindings(
+                Layer::Second,
+                &changed(Layer::Second),
+                &stock(Layer::Second),
+            )
             .unwrap_err();
         let message = format!("{e:#}");
         assert!(
@@ -1647,15 +1660,23 @@ mod tests {
             .unwrap_err();
         assert!(format!("{e:#}").contains("0x36"), "{e:#}");
         assert!(not_kept(&e).put_back);
-        assert_eq!(ops(&fake), [read, write, read], "the failed send isn't kept");
+        assert_eq!(
+            ops(&fake),
+            [read, write, read],
+            "the failed send isn't kept"
+        );
     }
 
     #[test]
     fn a_send_error_after_the_keyboard_took_the_layer_counts_as_kept() {
         let fake = holding_stock();
         let kb = PartWay::keyboard(&fake, &[(1, Write::WholeThenFail)]);
-        kb.write_bindings(Layer::Normal, &changed(Layer::Normal), &stock(Layer::Normal))
-            .unwrap();
+        kb.write_bindings(
+            Layer::Normal,
+            &changed(Layer::Normal),
+            &stock(Layer::Normal),
+        )
+        .unwrap();
         let (write, read) = ((Kind::Feature, 0x36, 0x00), (Kind::Feature, 0xB6, 0x00));
         assert_eq!(ops(&fake), [write, read]);
         assert_eq!(
@@ -1672,8 +1693,12 @@ mod tests {
         kb.set_second_actuation(|c| (c == 0x1A).then_some(30), |_| false)
             .unwrap();
         kb.show(|_| crate::Rgb::default()).unwrap();
-        kb.write_bindings(Layer::Second, &changed(Layer::Second), &stock(Layer::Second))
-            .unwrap();
+        kb.write_bindings(
+            Layer::Second,
+            &changed(Layer::Second),
+            &stock(Layer::Second),
+        )
+        .unwrap();
         assert_eq!(
             ops(&fake)[1..],
             [
