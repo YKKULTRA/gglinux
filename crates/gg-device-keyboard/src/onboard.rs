@@ -1257,8 +1257,12 @@ pub mod fake {
         }
 
         /// A keyboard on these slots, every gated family off.
+        /// A keyboard on these slots, every gated family off, with no pace between reports:
+        /// the slot tests send thousands, and this fake drops none.
         pub fn keyboard(&self) -> Keyboard {
-            Keyboard::with_transport(Box::new(self.clone()))
+            let kb = Keyboard::with_transport(Box::new(self.clone()));
+            kb.set_report_gap(Duration::ZERO);
+            kb
         }
 
         /// The fake every report passes through.

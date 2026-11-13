@@ -85,7 +85,8 @@ impl SwitchesState {
     }
 
     /// [`SwitchesState::sync_board`] on the US board, as for a keyboard whose region
-    /// isn't known.
+    /// isn't known. The worker passes the board; tests use this.
+    #[cfg(test)]
     pub fn sync(&mut self, device: Option<&Keyboard>) {
         self.sync_board(device, layout::for_region(None));
     }

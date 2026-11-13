@@ -447,7 +447,9 @@ fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Ev
         // Before anything below sends: lighting, switches, bindings, the screen.
         read_region(&mut state, event_tx);
         render(&mut state);
-        state.switches.sync(state.device.as_ref());
+        state
+            .switches
+            .sync_board(state.device.as_ref(), board(state.region));
         // A deep-press binding sticks only on a key with a point: the points go first.
         state.bindings.set_deep_keys(state.switches.points());
         let points_sent = state.switches.take_points_sent();
