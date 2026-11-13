@@ -58,7 +58,17 @@ ggctl clip save                         # save the instant replay (bind this to 
 ggctl profile list                      # saved lighting profiles
 ggctl profile apply <name>
 ggctl gamesense test|on|off
-ggctl keyboard                          # switch settings and screen, as the daemon has them
+ggctl keyboard                          # lighting, switch settings and screen, as the daemon has them
+ggctl lighting on|off                   # gglinux draws the lighting, or the keyboard's own profile does
+ggctl lighting zones add NAME KEYS EFFECT   # a zone on top (later zones paint over earlier ones); KEYS:
+                                        #   wasd, arrows, f-row, numbers, all, or keys like a,s,d
+ggctl lighting zones set NAME EFFECT    # EFFECT: static ff0000, per-key, breathing ff0000 [4], wave [4],
+                                        #   gradient ff0000 0000ff, spectrum [6], audio [1],
+                                        #   reactive fade|ripple ffffff [0.6], reflect (needs lighting_reflect)
+ggctl lighting zones keys NAME KEYS     # also: zones rm NAME, zones up|down NAME
+ggctl lighting idle on [MINUTES]|off    # an idle scene, 0 to 120 min after the desktop says you're away
+ggctl lighting idle scene off|EFFECT    # the idle scene: every key dark, or one effect on every key
+ggctl lighting reflect on|off           # the screen's colours on every key (needs lighting_reflect)
 ggctl switches on|off                   # gglinux's switch settings, or leave them alone
 ggctl switches actuation 1.5            # every key's actuation point, 0.1 to 4.0 mm
 ggctl switches rapid-trigger on [0.2]|off   # optional re-trigger distance, 0.1 to 2.0 mm
@@ -123,6 +133,18 @@ fn main() -> Result<()> {
             let mut switches = state.switches;
             edit.apply(&mut switches);
             Request::SetSwitches { switches }
+        }
+        Action::EditLighting(edit) => {
+            // Read twice: a daemon may still answer the first read after a change with what
+            // it had before, and an edit made to that would undo the change.
+            let read = || match send(connect()?, Request::GetKeyboardState)? {
+                ResponseData::Keyboard { state } => Ok(state.lighting),
+                _ => bail!("the daemon did not send the keyboard state"),
+            };
+            read()?;
+            let mut lighting = read()?;
+            edit.apply(&mut lighting)?;
+            Request::SetLighting { lighting }
         }
         Action::EditCare(edit) => {
             let ResponseData::Keyboard { state } = send(connect()?, Request::GetKeyboardState)?
@@ -215,6 +237,8 @@ enum Action {
     Help,
     /// Read the switch settings, change them, and send them back.
     EditSwitches(keyboard::SwitchEdit),
+    /// Read the lighting, change it, and send it back.
+    EditLighting(keyboard::LightingEdit),
     /// Read the screen care, change one setting, and send it back.
     EditCare(care::CareEdit),
     /// Read the parts, turn one on or off, and send them back.
@@ -248,6 +272,7 @@ fn parse(args: &[String]) -> Result<Action> {
         Some((&"macro", rest)) => macros::request(rest)?,
         Some((&"keyboard", [])) => Request::GetKeyboardState,
         Some((&"switches", rest)) => return keyboard::switches_action(rest),
+        Some((&"lighting", rest)) => return keyboard::lighting_action(rest),
         Some((&"screen", ["care", rest @ ..])) => return care::action(rest),
         Some((&"screen", rest)) => screen::request(rest)?,
         Some((&"parts", rest)) => return parts::action(rest),
@@ -389,6 +414,7 @@ fn sends(line: &str) -> Request {
         Action::Watch => panic!("{line} parsed as watch"),
         Action::Help => panic!("{line} parsed as help"),
         Action::EditSwitches(e) => panic!("{line} parsed as a switch edit {e:?}"),
+        Action::EditLighting(e) => panic!("{line} parsed as a lighting edit {e:?}"),
         Action::EditCare(e) => panic!("{line} parsed as a care edit {e:?}"),
         Action::SetPart(p, on) => panic!("{line} parsed as part {p:?} {on}"),
         Action::SetFeature(f, on) => panic!("{line} parsed as experimental {f:?} {on}"),

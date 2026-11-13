@@ -3,17 +3,25 @@
 //! share. The switches are in [`crate::switches`], the screen in
 //! [`crate::screen`], key bindings in [`crate::bindings`] and the onboard
 //! slots in [`crate::onboard`].
+//!
+//! The lighting is a stack of zones, each a set of keys with its own effect;
+//! later zones paint over earlier ones. One zone is edited at a time; picking it
+//! picks its keys on the keyboard picture, where keys are painted too. The idle
+//! scene and Reflect have their own sections; Reflect's switch is greyed while
+//! its experimental gate is off.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gg_ipc::{
-    Effect, KeyColor, KeyInfo, KeyboardState, Lighting, ReactiveMode, ReactiveStatus, Request, Rgb,
+    Effect, Experimental, Feature, IdleLighting, KeyColor, KeyInfo, KeyboardState, Lighting,
+    ReactiveMode, ReactiveStatus, ReflectStatus, Request, Rgb, Zone, ZoneEffect, ZoneKeys,
+    ZonePreset,
 };
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::client::{Client, State, TIMEOUT};
-use crate::{act, act_then, sync_rows, AppWindow, Forms, Key, KeyboardUi};
+use crate::{act, act_then, sync_rows, AppWindow, Forms, Key, KeyboardUi, LightZone};
 
 /// A change to the lighting, from a control's value or colour.
 type LightPatch = Rc<dyn Fn(&mut Lighting, &KeyboardForm, f32, Color)>;
@@ -26,6 +34,11 @@ pub struct KeyboardForm {
     pub painted: BTreeMap<u8, Rgb>,
     pub dirty: bool,
     pub light_selected: BTreeSet<u8>,
+    /// The zone being edited, by its place in the stack (bottom first).
+    pub zone: usize,
+    /// The keys of the zone the next "Add zone" adds: a preset's place in
+    /// [`ZonePreset::ALL`], past them the picked keys.
+    pub zone_to_add: usize,
 }
 
 impl KeyboardForm {
@@ -50,10 +63,11 @@ impl KeyboardForm {
         self.dirty = true;
     }
 
-    /// `l` as a static effect with the paint.
+    /// `l` with the paint, shown: lighting from before zones becomes static, as it
+    /// always did; a stack with no zone showing painted keys gets its bottom every-key
+    /// zone turned into one, or a new one at the bottom.
     pub fn painted_lighting(&self, l: &Lighting) -> Lighting {
-        Lighting {
-            effect: Effect::Static,
+        let mut l = Lighting {
             keys: self
                 .painted
                 .iter()
@@ -63,7 +77,207 @@ impl KeyboardForm {
                 })
                 .collect(),
             ..l.clone()
+        };
+        if l.zones.is_none() {
+            l.effect = Effect::Static;
+        } else if !l.stack().iter().any(|z| z.effect == ZoneEffect::PerKey) {
+            let zones = l.zones_mut();
+            match zones.iter().position(|z| z.keys == ZoneKeys::All) {
+                Some(i) => zones[i].effect = ZoneEffect::PerKey,
+                None => zones.insert(0, Zone::new("Painted", ZoneKeys::All, ZoneEffect::PerKey)),
+            }
         }
+        l
+    }
+
+    /// Pick the zone at `i` for editing, and its keys on the picture.
+    pub fn select_zone(&mut self, i: usize, kb: &KeyboardState) {
+        let Some(z) = kb.lighting.stack().get(i).cloned() else {
+            return;
+        };
+        self.zone = i;
+        self.light_selected = match &z.keys {
+            ZoneKeys::All => kb.layout.iter().map(|k| k.code).collect(),
+            ZoneKeys::Keys { codes } => codes.iter().copied().collect(),
+        };
+    }
+
+    /// The picked keys as a zone's: every key when every key of the board is picked.
+    pub fn picked_keys(&self, kb: &KeyboardState) -> Option<ZoneKeys> {
+        if self.light_selected.is_empty() {
+            return None;
+        }
+        let all = kb.layout.iter().all(|k| self.light_selected.contains(&k.code));
+        Some(if all {
+            ZoneKeys::All
+        } else {
+            ZoneKeys::Keys {
+                codes: self.light_selected.iter().copied().collect(),
+            }
+        })
+    }
+}
+
+/// The zone effects, in the order the panel lists them.
+pub const EFFECTS: [&str; 9] = [
+    "Painted keys",
+    "One colour",
+    "Breathing",
+    "Wave",
+    "Gradient",
+    "Spectrum",
+    "Audio",
+    "Reactive",
+    "Reflect",
+];
+
+/// A zone effect's place in [`EFFECTS`].
+pub fn effect_index(e: &ZoneEffect) -> i32 {
+    match e {
+        ZoneEffect::PerKey => 0,
+        ZoneEffect::Static { .. } => 1,
+        ZoneEffect::Breathing { .. } => 2,
+        ZoneEffect::Wave { .. } => 3,
+        ZoneEffect::Gradient { .. } => 4,
+        ZoneEffect::Spectrum { .. } => 5,
+        ZoneEffect::Visualizer { .. } => 6,
+        ZoneEffect::Reactive { .. } => 7,
+        ZoneEffect::Reflect => 8,
+    }
+}
+
+fn period(e: &ZoneEffect) -> Option<f32> {
+    match e {
+        ZoneEffect::Breathing { period_s, .. }
+        | ZoneEffect::Wave { period_s }
+        | ZoneEffect::Spectrum { period_s } => Some(*period_s),
+        _ => None,
+    }
+}
+
+/// An effect's own colour (a gradient's first).
+fn first_color(e: &ZoneEffect) -> Option<Rgb> {
+    match *e {
+        ZoneEffect::Static { color }
+        | ZoneEffect::Breathing { color, .. }
+        | ZoneEffect::Reactive { color, .. } => Some(color),
+        ZoneEffect::Gradient { from, .. } => Some(from),
+        _ => None,
+    }
+}
+
+fn set_first_color(e: &mut ZoneEffect, c: Rgb) {
+    match e {
+        ZoneEffect::Static { color }
+        | ZoneEffect::Breathing { color, .. }
+        | ZoneEffect::Reactive { color, .. } => *color = c,
+        ZoneEffect::Gradient { from, .. } => *from = c,
+        _ => {}
+    }
+}
+
+fn invert(c: Rgb) -> Rgb {
+    Rgb {
+        r: 255 - c.r,
+        g: 255 - c.g,
+        b: 255 - c.b,
+    }
+}
+
+/// Effect `i` of [`EFFECTS`] for a zone showing `now`: its colour and speed carry over
+/// where both effects have one; a zone without a colour takes the brush's.
+pub fn effect_for(i: i32, now: &ZoneEffect, brush: Rgb) -> ZoneEffect {
+    let color = first_color(now).unwrap_or(brush);
+    let period_s = period(now).unwrap_or(4.0);
+    match i {
+        0 => ZoneEffect::PerKey,
+        1 => ZoneEffect::Static { color },
+        2 => ZoneEffect::Breathing { color, period_s },
+        3 => ZoneEffect::Wave { period_s },
+        4 => ZoneEffect::Gradient {
+            from: color,
+            to: invert(color),
+        },
+        5 => ZoneEffect::Spectrum { period_s },
+        6 => ZoneEffect::Visualizer { sensitivity: 1.0 },
+        7 => ZoneEffect::Reactive {
+            mode: ReactiveMode::Fade,
+            color,
+            duration_s: 0.6,
+        },
+        _ => ZoneEffect::Reflect,
+    }
+}
+
+/// A zone's keys and effect in a few words, for the list.
+pub fn zone_summary(z: &Zone, layout: &[KeyInfo]) -> String {
+    let keys = match &z.keys {
+        ZoneKeys::All => "every key".to_owned(),
+        ZoneKeys::Keys { codes } => {
+            let named: Vec<String> = codes
+                .iter()
+                .take(4)
+                .map(|c| {
+                    layout
+                        .iter()
+                        .find(|k| k.code == *c)
+                        .map_or_else(|| format!("{c:#04x}"), label)
+                })
+                .collect();
+            let more = codes.len().saturating_sub(4);
+            if more > 0 {
+                format!("{} and {more} more", named.join(", "))
+            } else {
+                named.join(", ")
+            }
+        }
+    };
+    let effect = EFFECTS[effect_index(&z.effect) as usize].to_lowercase();
+    match period(&z.effect) {
+        Some(p) => format!("{keys} · {effect}, {p} s"),
+        None => format!("{keys} · {effect}"),
+    }
+}
+
+/// The new zone's name: `base`, or `base 2`, `base 3`… if that's taken.
+fn unique_name(zones: &[Zone], base: &str) -> String {
+    let mut name = base.to_owned();
+    let mut n = 2;
+    while zones.iter().any(|z| z.name == name) {
+        name = format!("{base} {n}");
+        n += 1;
+    }
+    name
+}
+
+/// The idle scenes the panel offers: 0 off, 1 one colour, 2 breathing, 3 wave,
+/// 4 spectrum. Their slow speeds are gglinux's own choice.
+pub fn idle_scene(i: i32, color: Rgb) -> Vec<Zone> {
+    let effect = match i {
+        1 => ZoneEffect::Static { color },
+        2 => ZoneEffect::Breathing {
+            color,
+            period_s: 6.0,
+        },
+        3 => ZoneEffect::Wave { period_s: 8.0 },
+        4 => ZoneEffect::Spectrum { period_s: 12.0 },
+        _ => return Vec::new(),
+    };
+    vec![Zone::new("idle", ZoneKeys::All, effect)]
+}
+
+/// Which of the offered idle scenes `idle` is; -1 for one set up some other way.
+pub fn idle_scene_index(idle: &IdleLighting) -> i32 {
+    match idle.zones.as_slice() {
+        [] => 0,
+        [z] if z.keys == ZoneKeys::All => match z.effect {
+            ZoneEffect::Static { .. } => 1,
+            ZoneEffect::Breathing { .. } => 2,
+            ZoneEffect::Wave { .. } => 3,
+            ZoneEffect::Spectrum { .. } => 4,
+            _ => -1,
+        },
+        _ => -1,
     }
 }
 
@@ -103,28 +317,16 @@ pub(crate) fn label(k: &KeyInfo) -> String {
     }
 }
 
-fn effect_index(e: &Effect) -> i32 {
-    match e {
-        Effect::Static => 0,
-        Effect::Breathing { .. } => 1,
-        Effect::Wave { .. } => 2,
-        Effect::Spectrum { .. } => 3,
-        Effect::Visualizer { .. } => 4,
-    }
-}
-
-fn period(e: &Effect) -> Option<f32> {
-    match e {
-        Effect::Breathing { period_s, .. }
-        | Effect::Wave { period_s }
-        | Effect::Spectrum { period_s } => Some(*period_s),
-        _ => None,
-    }
-}
-
 /// Keys that can carry a mute light: the labelled ones.
 fn mute_keys(kb: &KeyboardState) -> Vec<&KeyInfo> {
     kb.layout.iter().filter(|k| !k.label.is_empty()).collect()
+}
+
+/// `want` as a list's model, or `None` while `now` already has it (see [`names`]).
+fn strings(now: ModelRc<SharedString>, want: &[&str]) -> Option<ModelRc<SharedString>> {
+    now.iter()
+        .ne(want.iter().map(|&w| SharedString::from(w)))
+        .then(|| ModelRc::new(VecModel::from_iter(want.iter().map(|&w| w.into()))))
 }
 
 /// The keys' names for a list, or `None` while `now` already has them. A new
@@ -161,15 +363,8 @@ pub fn show(ui: &AppWindow, s: &State, forms: &Forms) {
     g.set_cols(cols.max(1.0));
     g.set_rows(rows.max(1.0));
     g.set_enabled(l.enabled);
-    g.set_effect(effect_index(&l.effect));
-    if let Effect::Breathing { color: c, .. } = l.effect {
-        g.set_breathing_color(color(c));
-    }
-    g.set_has_period(period(&l.effect).is_some());
-    g.set_period(period(&l.effect).unwrap_or(4.0));
-    if let Effect::Visualizer { sensitivity } = l.effect {
-        g.set_sensitivity(sensitivity);
-    }
+    show_zones(&g, kb, &mut f);
+    show_idle_and_reflect(&g, s, kb);
     g.set_brightness(l.brightness as i32);
     g.set_reactive(l.reactive.enabled);
     g.set_reactive_mode(match l.reactive.mode {
@@ -199,6 +394,94 @@ pub fn show(ui: &AppWindow, s: &State, forms: &Forms) {
     );
     g.set_mute_color(color(l.mic_mute.color));
     show_light_keys(ui, kb, &f);
+}
+
+/// The zone list and the zone being edited.
+fn show_zones(g: &KeyboardUi, kb: &KeyboardState, f: &mut KeyboardForm) {
+    if let Some(m) = strings(g.get_effect_names(), &EFFECTS) {
+        g.set_effect_names(m);
+    }
+    let presets: Vec<&str> = ZonePreset::ALL
+        .iter()
+        .map(|p| p.label())
+        .chain(["Picked keys"])
+        .collect();
+    if let Some(m) = strings(g.get_preset_names(), &presets) {
+        g.set_preset_names(m);
+    }
+    let stack = kb.lighting.stack();
+    f.zone = f.zone.min(stack.len().saturating_sub(1));
+    let rows: Vec<LightZone> = stack
+        .iter()
+        .enumerate()
+        .map(|(i, z)| LightZone {
+            name: z.name.clone().into(),
+            summary: zone_summary(z, &kb.layout).into(),
+            selected: i == f.zone,
+        })
+        .collect();
+    sync_rows(g.get_zones(), rows, |m| g.set_zones(m));
+    let Some(z) = stack.get(f.zone) else {
+        g.set_zone(-1);
+        g.set_zone_name(SharedString::new());
+        return;
+    };
+    g.set_zone(f.zone as i32);
+    g.set_zone_name(z.name.clone().into());
+    g.set_effect(effect_index(&z.effect));
+    if let Some(c) = first_color(&z.effect) {
+        g.set_zone_color(color(c));
+    }
+    if let ZoneEffect::Gradient { to, .. } = z.effect {
+        g.set_zone_color_2(color(to));
+    }
+    g.set_has_period(period(&z.effect).is_some());
+    g.set_period(period(&z.effect).unwrap_or(4.0));
+    match z.effect {
+        ZoneEffect::Visualizer { sensitivity } => g.set_sensitivity(sensitivity),
+        ZoneEffect::Reactive {
+            mode, duration_s, ..
+        } => {
+            g.set_zone_mode(i32::from(mode == ReactiveMode::Ripple));
+            g.set_zone_duration(duration_s);
+        }
+        _ => {}
+    }
+}
+
+/// The idle scene's section and Reflect's, greyed with its gate's sentence while the
+/// gate is off.
+fn show_idle_and_reflect(g: &KeyboardUi, s: &State, kb: &KeyboardState) {
+    let idle = &kb.lighting.idle;
+    g.set_idle(idle.enabled);
+    g.set_idle_minutes(i32::from(idle.after_minutes));
+    g.set_idle_scene(idle_scene_index(idle));
+    if let Some(c) = idle.zones.first().and_then(|z| first_color(&z.effect)) {
+        g.set_idle_color(color(c));
+    }
+    g.set_idle_now(kb.lighting_idle);
+    let reflect = kb
+        .lighting
+        .stack()
+        .iter()
+        .any(|z| z.effect == ZoneEffect::Reflect);
+    g.set_reflect(reflect);
+    let allowed = s.experimental.is_some_and(|e| e.on(Feature::LightingReflect));
+    g.set_reflect_allowed(allowed);
+    g.set_reflect_refusal(
+        Experimental::default()
+            .refusal(Feature::LightingReflect)
+            .unwrap_or_default()
+            .into(),
+    );
+    g.set_reflect_status(
+        match &kb.reflect {
+            ReflectStatus::Off => String::new(),
+            ReflectStatus::Running => "Looking at the screen.".into(),
+            ReflectStatus::Stopped { why } => why.clone(),
+        }
+        .into(),
+    );
 }
 
 fn show_light_keys(ui: &AppWindow, kb: &KeyboardState, f: &KeyboardForm) {
@@ -289,20 +572,15 @@ pub fn bind(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     let none = Color::default();
     let f = light(Rc::new(|l, _, v, _| l.enabled = v != 0.0));
     g.on_set_enabled(move |on| f(on as i32 as f32, none));
-    // A breathing effect starts in the brush's colour.
-    let f = light(Rc::new(|l, _, v, brush| {
-        let p = period(&l.effect).unwrap_or(4.0);
-        l.effect = match v as i32 {
-            0 => Effect::Static,
-            1 => Effect::Breathing {
-                color: rgb(brush),
-                period_s: p,
-            },
-            2 => Effect::Wave { period_s: p },
-            3 => Effect::Spectrum { period_s: p },
-            _ => Effect::Visualizer { sensitivity: 1.0 },
-        };
-    }));
+    // The zone being edited: its effect starts in its own colour, or the brush's.
+    let zone = |patch: fn(&mut ZoneEffect, f32, Rgb)| {
+        light(Rc::new(move |l, form, v, c| {
+            if let Some(z) = l.zones_mut().get_mut(form.zone) {
+                patch(&mut z.effect, v, rgb(c));
+            }
+        }))
+    };
+    let f = zone(|e, v, brush| *e = effect_for(v as i32, e, brush));
     let weak = ui.as_weak();
     g.on_set_effect(move |i| {
         let brush = weak
@@ -310,25 +588,78 @@ pub fn bind(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
             .map_or(none, |ui| ui.global::<KeyboardUi>().get_brush());
         f(i as f32, brush)
     });
-    let f = light(Rc::new(|l, _, _, c| {
-        let p = period(&l.effect).unwrap_or(4.0);
-        l.effect = Effect::Breathing {
-            color: rgb(c),
-            period_s: p,
-        };
-    }));
-    g.on_set_breathing_color(move |c| f(0.0, c));
-    let f = light(Rc::new(|l, _, v, _| match &mut l.effect {
-        Effect::Breathing { period_s, .. }
-        | Effect::Wave { period_s }
-        | Effect::Spectrum { period_s } => *period_s = v,
+    let f = zone(|e, _, c| set_first_color(e, c));
+    g.on_set_zone_color(move |c| f(0.0, c));
+    let f = zone(|e, _, c| {
+        if let ZoneEffect::Gradient { to, .. } = e {
+            *to = c;
+        }
+    });
+    g.on_set_zone_color_2(move |c| f(0.0, c));
+    let f = zone(|e, v, _| match e {
+        ZoneEffect::Breathing { period_s, .. }
+        | ZoneEffect::Wave { period_s }
+        | ZoneEffect::Spectrum { period_s } => *period_s = v,
         _ => {}
-    }));
+    });
     g.on_set_period(move |v| f(v, none));
-    let f = light(Rc::new(|l, _, v, _| {
-        l.effect = Effect::Visualizer { sensitivity: v }
-    }));
+    let f = zone(|e, v, _| {
+        if let ZoneEffect::Visualizer { sensitivity } = e {
+            *sensitivity = v;
+        }
+    });
     g.on_set_sensitivity(move |v| f(v, none));
+    let f = zone(|e, v, _| {
+        if let ZoneEffect::Reactive { mode, .. } = e {
+            *mode = if v as i32 == 0 {
+                ReactiveMode::Fade
+            } else {
+                ReactiveMode::Ripple
+            };
+        }
+    });
+    g.on_set_zone_mode(move |i| f(i as f32, none));
+    let f = zone(|e, v, _| {
+        if let ZoneEffect::Reactive { duration_s, .. } = e {
+            *duration_s = (v * 10.0).round() / 10.0;
+        }
+    });
+    g.on_set_zone_duration(move |v| f(v, none));
+    bind_zone_list(ui, client, forms);
+
+    // The idle scene and Reflect.
+    let f = light(Rc::new(|l, _, v, _| l.idle.enabled = v != 0.0));
+    g.on_set_idle(move |on| f(on as i32 as f32, none));
+    let f = light(Rc::new(|l, _, v, _| {
+        l.idle.after_minutes = v.clamp(0.0, 120.0) as u16
+    }));
+    g.on_set_idle_minutes(move |m| f(m as f32, none));
+    let f = light(Rc::new(|l, _, v, c| {
+        let keep = l.idle.zones.first().and_then(|z| first_color(&z.effect));
+        l.idle.zones = idle_scene(v as i32, keep.unwrap_or(rgb(c)));
+    }));
+    let weak = ui.as_weak();
+    g.on_set_idle_scene(move |i| {
+        let brush = weak
+            .upgrade()
+            .map_or(none, |ui| ui.global::<KeyboardUi>().get_brush());
+        f(i as f32, brush)
+    });
+    let f = light(Rc::new(|l, _, _, c| {
+        if let Some(z) = l.idle.zones.first_mut() {
+            set_first_color(&mut z.effect, rgb(c));
+        }
+    }));
+    g.on_set_idle_color(move |c| f(0.0, c));
+    let f = light(Rc::new(|l, _, v, _| {
+        if v != 0.0 {
+            l.reflect_on();
+            l.enabled = true;
+        } else {
+            l.reflect_off();
+        }
+    }));
+    g.on_set_reflect(move |on| f(on as i32 as f32, none));
     let f = light(Rc::new(|l, _, v, _| {
         l.brightness = v.clamp(0.0, 100.0) as u8
     }));
@@ -420,6 +751,122 @@ pub fn bind(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     });
 }
 
+/// Picking, adding, moving and removing zones, and giving one the picked keys.
+fn bind_zone_list(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
+    let g = ui.global::<KeyboardUi>();
+    let weak = ui.as_weak();
+    let client2 = client.clone();
+    let forms2 = forms.clone();
+    g.on_select_zone(move |i| {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(kb) = keyboard(&client2) else { return };
+        forms2.keyboard.borrow_mut().select_zone(i as usize, &kb);
+        redraw(&ui, &client2, &forms2);
+    });
+
+    // A change to the stack, then what the panel edits once the daemon has it.
+    type Change = fn(&mut Lighting, &KeyboardForm, &KeyboardState, Rgb) -> Result<(), String>;
+    let stack = |change: Change, then: fn(&AppWindow, &Forms)| {
+        let weak = ui.as_weak();
+        let client = client.clone();
+        let forms = forms.clone();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(kb) = keyboard(&client) else { return };
+            let brush = rgb(ui.global::<KeyboardUi>().get_brush());
+            let mut lighting = kb.lighting.clone();
+            if let Err(e) = change(&mut lighting, &forms.keyboard.borrow(), &kb, brush) {
+                mark_light(&ui, false, e.into());
+                return;
+            }
+            act_then(
+                &ui,
+                &client,
+                Request::SetLighting { lighting },
+                TIMEOUT,
+                marker(&client, mark_light, show),
+                then,
+            );
+        }
+    };
+    let add = stack(
+        |l, f, kb, brush| {
+            let (name, keys) = match ZonePreset::ALL.get(f.zone_to_add) {
+                Some(p) => (p.label(), p.keys()),
+                None => (
+                    "Picked keys",
+                    f.picked_keys(kb)
+                        .ok_or("Pick keys on the keyboard picture first.")?,
+                ),
+            };
+            let zones = l.zones_mut();
+            let name = unique_name(zones, name);
+            zones.push(Zone::new(name, keys, ZoneEffect::Static { color: brush }));
+            l.enabled = true;
+            Ok(())
+        },
+        |_, forms| forms.keyboard.borrow_mut().zone = usize::MAX, // the new one, on top
+    );
+    let forms2 = forms.clone();
+    g.on_add_zone(move |i| {
+        forms2.keyboard.borrow_mut().zone_to_add = i.max(0) as usize;
+        add();
+    });
+    let f = stack(
+        |l, f, _, _| {
+            let zones = l.zones_mut();
+            if f.zone >= zones.len() {
+                return Err("No zone is picked.".into());
+            }
+            zones.remove(f.zone);
+            Ok(())
+        },
+        |_, _| {},
+    );
+    g.on_remove_zone(f);
+    let up = stack(
+        |l, f, _, _| {
+            let zones = l.zones_mut();
+            if f.zone + 1 >= zones.len() {
+                return Err("It's the top zone already.".into());
+            }
+            zones.swap(f.zone, f.zone + 1);
+            Ok(())
+        },
+        |_, forms| forms.keyboard.borrow_mut().zone += 1,
+    );
+    let down = stack(
+        |l, f, _, _| {
+            let zones = l.zones_mut();
+            if f.zone == 0 || f.zone >= zones.len() {
+                return Err("It's the bottom zone already.".into());
+            }
+            zones.swap(f.zone, f.zone - 1);
+            Ok(())
+        },
+        |_, forms| {
+            let mut f = forms.keyboard.borrow_mut();
+            f.zone = f.zone.saturating_sub(1);
+        },
+    );
+    g.on_move_zone(move |is_up| if is_up { up() } else { down() });
+    let f = stack(
+        |l, f, kb, _| {
+            let keys = f
+                .picked_keys(kb)
+                .ok_or("Pick keys on the keyboard picture first.")?;
+            let z = l
+                .zones_mut()
+                .get_mut(f.zone)
+                .ok_or("No zone is picked.")?;
+            z.keys = keys;
+            Ok(())
+        },
+        |_, _| {},
+    );
+    g.on_use_picked_keys(f);
+}
+
 /// Start the panel's working copy afresh (see [`Forms::reset`]).
 pub fn reset(forms: &Forms) {
     *forms.keyboard.borrow_mut() = KeyboardForm::default();
@@ -436,6 +883,14 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
     match name {
         "keyboard.set-enabled" => light.invoke_set_enabled(n != 0),
         "keyboard.set-effect" => light.invoke_set_effect(n),
+        "keyboard.select-zone" => light.invoke_select_zone(n),
+        "keyboard.add-zone" => light.invoke_add_zone(n),
+        "keyboard.remove-zone" => light.invoke_remove_zone(),
+        "keyboard.move-zone" => light.invoke_move_zone(n != 0),
+        "keyboard.use-picked-keys" => light.invoke_use_picked_keys(),
+        "keyboard.set-idle" => light.invoke_set_idle(n != 0),
+        "keyboard.set-idle-scene" => light.invoke_set_idle_scene(n),
+        "keyboard.set-reflect" => light.invoke_set_reflect(n != 0),
         "keyboard.set-reactive" => light.invoke_set_reactive(n != 0),
         "keyboard.set-mute" => light.invoke_set_mute(n != 0),
         "keyboard.key" => light.invoke_key_clicked(n),
@@ -577,5 +1032,136 @@ pub(crate) mod tests {
         f.toggle_light(0x04);
         f.toggle_light(0x29);
         assert_eq!(f.light_selected, [0x04].into());
+    }
+    #[test]
+    fn every_effect_in_the_list_comes_back_to_its_place_keeping_the_zone_s_colour_and_speed() {
+        let breathing = ZoneEffect::Breathing {
+            color: RED,
+            period_s: 3.0,
+        };
+        for i in 0..EFFECTS.len() as i32 {
+            assert_eq!(effect_index(&effect_for(i, &breathing, BLUE)), i);
+        }
+        assert_eq!(
+            effect_for(1, &breathing, BLUE),
+            ZoneEffect::Static { color: RED }
+        );
+        assert_eq!(
+            effect_for(3, &breathing, BLUE),
+            ZoneEffect::Wave { period_s: 3.0 }
+        );
+        assert_eq!(
+            effect_for(1, &ZoneEffect::PerKey, BLUE),
+            ZoneEffect::Static { color: BLUE },
+            "no colour of its own: the brush's"
+        );
+    }
+
+    #[test]
+    fn applying_paint_to_zones_makes_a_zone_show_it() {
+        let kb = board(&[], Screen::Keyboard);
+        let mut f = KeyboardForm::default();
+        f.paint([0x04], GREEN);
+        let w = Zone::new(
+            "w",
+            ZoneKeys::Keys { codes: vec![0x1A] },
+            ZoneEffect::Static { color: RED },
+        );
+        let mut l = kb.lighting.clone();
+        *l.zones_mut() = vec![
+            Zone::new("all", ZoneKeys::All, ZoneEffect::Wave { period_s: 4.0 }),
+            w.clone(),
+        ];
+        let applied = f.painted_lighting(&l);
+        assert_eq!(applied.stack()[0].effect, ZoneEffect::PerKey, "the every-key zone");
+        assert_eq!(applied.stack()[1], w, "the others as they were");
+        *l.zones_mut() = vec![w];
+        let applied = f.painted_lighting(&l);
+        assert_eq!(
+            applied.stack()[0],
+            Zone::new("Painted", ZoneKeys::All, ZoneEffect::PerKey),
+            "none covers every key: a new one at the bottom"
+        );
+        assert_eq!(f.painted_lighting(&applied).stack().len(), 2, "only once");
+    }
+
+    #[test]
+    fn picking_a_zone_picks_its_keys_and_every_key_picked_is_every_key() {
+        let mut kb = board(&[], Screen::Keyboard);
+        *kb.lighting.zones_mut() = vec![
+            Zone::new("all", ZoneKeys::All, ZoneEffect::PerKey),
+            Zone::new(
+                "a",
+                ZoneKeys::Keys { codes: vec![0x04] },
+                ZoneEffect::Static { color: RED },
+            ),
+        ];
+        let mut f = KeyboardForm::default();
+        f.select_zone(1, &kb);
+        assert_eq!(f.zone, 1);
+        assert_eq!(f.light_selected, [0x04].into());
+        f.select_zone(0, &kb);
+        assert_eq!(f.light_selected, [0x29, 0x04, 0x07].into());
+        assert_eq!(f.picked_keys(&kb), Some(ZoneKeys::All));
+        f.toggle_light(0x29);
+        assert_eq!(
+            f.picked_keys(&kb),
+            Some(ZoneKeys::Keys {
+                codes: vec![0x04, 0x07]
+            })
+        );
+        f.select_zone(9, &kb);
+        assert_eq!(f.zone, 0, "no such zone: nothing changes");
+        f.light_selected.clear();
+        assert_eq!(f.picked_keys(&kb), None);
+    }
+
+    #[test]
+    fn the_list_says_each_zone_s_keys_and_effect_in_words() {
+        let layout = board(&[], Screen::Keyboard).layout;
+        let z = Zone::new(
+            "a",
+            ZoneKeys::Keys {
+                codes: vec![0x04, 0x07],
+            },
+            ZoneEffect::Wave { period_s: 4.0 },
+        );
+        assert_eq!(zone_summary(&z, &layout), "A, D · wave, 4 s");
+        let many = Zone::new(
+            "m",
+            ZoneKeys::Keys {
+                codes: (0x04..0x0A).collect(),
+            },
+            ZoneEffect::Static { color: RED },
+        );
+        assert_eq!(
+            zone_summary(&many, &layout),
+            "A, 0x05, 0x06, D and 2 more · one colour"
+        );
+        let screen = Zone::new("x", ZoneKeys::All, ZoneEffect::Reflect);
+        assert_eq!(zone_summary(&screen, &layout), "every key · reflect");
+        let zones = vec![Zone::new("WASD", ZoneKeys::All, ZoneEffect::PerKey)];
+        assert_eq!(unique_name(&zones, "WASD"), "WASD 2");
+        assert_eq!(unique_name(&zones, "Arrows"), "Arrows");
+    }
+
+    #[test]
+    fn the_idle_scenes_offered_come_back_as_themselves() {
+        for i in 0..5 {
+            let idle = IdleLighting {
+                zones: idle_scene(i, RED),
+                ..IdleLighting::default()
+            };
+            assert_eq!(idle_scene_index(&idle), i);
+        }
+        let custom = IdleLighting {
+            zones: vec![Zone::new(
+                "w",
+                ZonePreset::Wasd.keys(),
+                ZoneEffect::Static { color: RED },
+            )],
+            ..IdleLighting::default()
+        };
+        assert_eq!(idle_scene_index(&custom), -1, "set up with ggctl");
     }
 }
