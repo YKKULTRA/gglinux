@@ -748,7 +748,10 @@ mod tests {
             0x06, 0xb0, 0x00, 0x00, 0x01, 0x00, 0x08, 0x08, 0x08, 0x00, 0x02, 0x0a, 0x05, 0x00,
             0x08, 0x08,
         ];
-        assert_eq!(Status::decode(&docked).unwrap().pairing, Some(Pairing::Connected));
+        assert_eq!(
+            Status::decode(&docked).unwrap().pairing,
+            Some(Pairing::Connected)
+        );
     }
 
     #[test]

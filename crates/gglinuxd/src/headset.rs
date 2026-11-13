@@ -466,4 +466,3 @@ fn publish(state: &mut State, event_tx: &broadcast::Sender<Event>) {
         let _ = event_tx.send(Event::HeadsetChanged { state: now });
     }
 }
-
