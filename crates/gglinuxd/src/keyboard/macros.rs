@@ -255,7 +255,11 @@ fn flash(store: &mut Store, kb: &Keyboard, slot: u8, active: Option<u8>) -> Resu
             return Err(message);
         }
     };
-    info!(slot = n, keys = macros.len(), "macros written into a keyboard slot");
+    info!(
+        slot = n,
+        keys = macros.len(),
+        "macros written into a keyboard slot"
+    );
     store.state.written_slot = Some(slot);
     store.save();
     let mut notes: Vec<String> = answer.warning().into_iter().collect();
@@ -471,11 +475,7 @@ mod tests {
         no_place.macros[0].events.push(MacroEvent::Delay { ms: 0 });
         let e = ask(&rig, set(no_place)).await.unwrap_err();
         assert!(e.contains("1 to 65535"), "{e}");
-        assert_eq!(
-            Store::load(&rig.dir.0).state.library,
-            lib,
-            "kept as it was"
-        );
+        assert_eq!(Store::load(&rig.dir.0).state.library, lib, "kept as it was");
         assert!(slot_ops(&rig.slots).is_empty());
     }
 
@@ -523,8 +523,7 @@ mod tests {
         // forgets which slot runs); then slot 5 is loaded.
         let both = library(&[(O, MacroMode::Once), (P, MacroMode::WhileHeld)]);
         ask(&rig, set(both)).await.unwrap();
-        let loaded =
-            super::super::onboard::serve(Request::LoadOnboard { slot: 4 }, &rig.kb).await;
+        let loaded = super::super::onboard::serve(Request::LoadOnboard { slot: 4 }, &rig.kb).await;
         assert!(
             matches!(
                 loaded,

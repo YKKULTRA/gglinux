@@ -298,7 +298,9 @@ fn connect() -> Result<UnixStream> {
 /// slot read or write can take most of a minute when the keyboard is slow to answer.
 fn answer_wait(req: &Request) -> (Duration, &'static str) {
     match req {
-        Request::ReadOnboard { .. } | Request::WriteOnboard { .. } | Request::WriteMacros { .. } => (
+        Request::ReadOnboard { .. }
+        | Request::WriteOnboard { .. }
+        | Request::WriteMacros { .. } => (
             Duration::from_secs(60),
             "no answer from the daemon within a minute: it may still be reading or writing the \
              keyboard's slot. Leave the keyboard plugged in and the daemon running; wait, then run \

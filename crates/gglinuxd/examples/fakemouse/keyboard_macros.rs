@@ -85,7 +85,11 @@ fn keyboard() -> Keyboard {
 /// The daemon's checks: the library's own, and a place for each key.
 fn check(library: &MacroLibrary) -> Result<(), String> {
     library.validate()?;
-    match library.bindings.iter().find(|b| slot::place(b.code).is_none()) {
+    match library
+        .bindings
+        .iter()
+        .find(|b| slot::place(b.code).is_none())
+    {
         Some(b) => Err(format!(
             "key {} can't play a macro",
             MacroBinding::key_name(b.code)

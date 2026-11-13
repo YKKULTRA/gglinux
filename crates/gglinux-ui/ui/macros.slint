@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Keyboard macros for the Apex Pro TKL Gen 3: a panel at the end of the keyboard
+// card (placed in app.slint). The macros, one macro's steps as words, the keys
+// that play it, and the slot to write them into. Greyed, with the reason, while
+// Settings → Experimental has keyboard macros off; the write needs the onboard
+// slots on too.
+
+import { LineEdit, TextEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Hint, ErrorLine, Toggle, Button, Row, Head, Board, Key } from "widgets.slint";
+import { KeyboardUi, Opt, SubTitle } from "keyboard.slint";
+import { Pick } from "devices.slint";
+
+/// One macro in the list.
+export struct MacroRow {
+    name: string,
+    /// Its steps, as words.
+    steps: string,
+    /// The keys that play it, in words.
+    keys: string,
+}
+
+export global MacrosUi {
+    /// Show the panel: at the end of the keyboard card, with a divider above it.
+    /// Off, it takes no room.
+    in property <bool> shown: false;
+    /// keyboard_macros is on: the macros can be changed.
+    in property <bool> gated;
+    /// Why they can't while it's off: the contract's sentence.
+    in property <string> refusal;
+    /// keyboard_onboard is on too: a write can go.
+    in property <bool> can-write;
+    /// Why it can't while that's off.
+    in property <string> write-refusal;
+    in property <[MacroRow]> rows;
+    /// The macro being edited: its row, -1 for a new one, -2 for none.
+    in property <int> picked: -2;
+    /// The editor's name and steps. Two-way: typing lands here, a pick sets them.
+    in-out property <string> name;
+    in-out property <string> steps;
+    /// The keys, for picking the ones that play the macro being edited.
+    in property <[Key]> keys;
+    /// Its keys play it again and again while held.
+    in property <bool> hold;
+    /// The five slots by name, the running one marked.
+    in property <[string]> slots;
+    in property <int> slot;
+    /// Where the macros were last written, in words.
+    in property <string> written;
+    in property <bool> busy;
+    /// What the last write noticed though it went through.
+    in property <string> note;
+    in property <string> error;
+    callback pick(int);
+    callback save();
+    callback remove();
+    callback key-clicked(int);
+    callback set-hold(bool);
+    callback pick-slot(int);
+    callback write();
+}
+
+/// A macro in the list: its name and keys, and under them its steps. A click
+/// picks it for the editor.
+component MacroLine inherits Rectangle {
+    in property <MacroRow> item;
+    in property <bool> selected;
+    in property <bool> enabled;
+    callback clicked();
+    background: root.selected ? Theme.surface-2 : transparent;
+    border-radius: 6px;
+    border-width: root.selected ? 1px : 0px;
+    border-color: Theme.line;
+    VerticalLayout {
+        padding: 6px;
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: 10px;
+            Text { text: root.item.name; color: root.enabled ? Theme.text : Theme.text-dim; font-weight: 600; horizontal-stretch: 0; overflow: elide; }
+            Text { text: root.item.keys; color: Theme.text-dim; font-size: Theme.small; min-width: 0; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+        }
+        Text { text: root.item.steps; color: Theme.text-dim; font-size: Theme.tiny; font-family: Theme.mono; min-width: 0; overflow: elide; }
+    }
+    TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { if root.enabled { root.clicked(); } }
+    }
+}
+
+export component MacrosPanel {
+    property <bool> can: MacrosUi.gated && !MacrosUi.busy;
+    property <bool> editing: MacrosUi.picked >= -1;
+    VerticalLayout {
+        spacing: 0;
+        Head { text: "MACROS"; state: "experimental"; }
+        Opt { Hint { text: "The keyboard plays a macro itself, from the profile slot it runs. gglinux keeps your macros here and writes them into a slot when you ask; they work once the keyboard runs that slot."; } }
+        Opt { shown: !MacrosUi.gated; Hint { text: MacrosUi.refusal; color: Theme.accent; } }
+        Opt { shown: MacrosUi.rows.length == 0; Hint { text: "No macros yet."; } }
+        Opt { shown: MacrosUi.rows.length > 0; gap: 12px; VerticalLayout {
+            spacing: 4px;
+            for m[i] in MacrosUi.rows : MacroLine {
+                item: m;
+                selected: MacrosUi.picked == i;
+                enabled: root.can;
+                clicked => { MacrosUi.pick(i); }
+            }
+        } }
+        Opt { gap: 10px; HorizontalLayout {
+            alignment: start;
+            Button { text: "New macro"; small: true; enabled: root.can; clicked => { MacrosUi.pick(-1); } }
+        } }
+        Opt { shown: root.editing; gap: 14px; VerticalLayout {
+            spacing: 0;
+            SubTitle { text: MacrosUi.picked == -1 ? "New macro" : MacrosUi.name; }
+            Opt { Row {
+                label: "Name";
+                LineEdit { text <=> MacrosUi.name; enabled: root.can; placeholder-text: "copy and paste"; }
+            } }
+            Opt { Row {
+                label: "Steps";
+                TextEdit {
+                    height: 72px;
+                    font-family: Theme.mono;
+                    font-size: Theme.small;
+                    wrap: word-wrap;
+                    text <=> MacrosUi.steps;
+                    enabled: root.can;
+                }
+            } }
+            Opt { Hint { text: "Steps as words, one after another: a key (a, f1, enter), keys together (ctrl+c), down:shift and up:shift, wait:100 (milliseconds), click:1 (the left mouse button), text:\"Hello\" (typed with the US layout)."; } }
+            Opt { HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Button { text: "Save"; primary: true; enabled: root.can; clicked => { MacrosUi.save(); } }
+                if MacrosUi.picked >= 0 : Button { text: "Remove"; enabled: root.can; clicked => { MacrosUi.remove(); } }
+                Button { text: "Close"; enabled: !MacrosUi.busy; clicked => { MacrosUi.pick(-2); } }
+            } }
+            Opt { shown: MacrosUi.picked >= 0; gap: 14px; VerticalLayout {
+                spacing: 0;
+                Hint { text: "Click a key to have it play this macro, or click it again to have it type itself. Two keys can have a macro for now; grey keys can't have one."; }
+                Opt { gap: 10px; Board { keys: MacrosUi.keys; cols: KeyboardUi.cols; rows: KeyboardUi.rows; clicked(i) => { if root.can { MacrosUi.key-clicked(i); } } } }
+                Opt { gap: 10px; Toggle { text: "Its keys play it again and again while held (off: once per press)"; checked: MacrosUi.hold; enabled: root.can; toggled(v) => { MacrosUi.set-hold(v); } } }
+            } }
+        } }
+        Opt { gap: 16px; SubTitle { text: "Write into a slot"; } }
+        Opt { shown: MacrosUi.gated && !MacrosUi.can-write; Hint { text: MacrosUi.write-refusal; color: Theme.accent; } }
+        Opt { gap: 10px; Row {
+            label: "Slot";
+            Pick { model: MacrosUi.slots; index: MacrosUi.slot; enabled: root.can && MacrosUi.can-write; busy: MacrosUi.busy; picked(i) => { MacrosUi.pick-slot(i); } }
+            Rectangle { horizontal-stretch: 1; }
+        } }
+        Opt { Hint { text: "This rewrites slot " + (MacrosUi.slot + 1) + "'s macros and the keys that play them, and nothing else in it. A backup of the slot is saved first, and written back if anything goes wrong. A slot with macros gglinux can't read yet is left as it is."; } }
+        Opt { gap: 10px; HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Button { text: "Write to slot " + (MacrosUi.slot + 1); primary: true; enabled: root.can && MacrosUi.can-write; clicked => { MacrosUi.write(); } }
+            Hint { text: MacrosUi.busy ? "Writing the keyboard's memory…" : MacrosUi.written; vertical-alignment: center; }
+        } }
+        Opt { shown: MacrosUi.note != ""; Hint { text: MacrosUi.note; } }
+        Opt { shown: MacrosUi.error != ""; ErrorLine { text: MacrosUi.error; } }
+    }
+}

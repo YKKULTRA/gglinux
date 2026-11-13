@@ -124,9 +124,9 @@ fn decode_area(area: &[u8]) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut at = 0;
     while at < area.len() && area[at] == TAG {
-        let header = area
-            .get(at..at + HEADER)
-            .ok_or_else(|| cant_read(format!("a macro's header runs past the area at byte {at}")))?;
+        let header = area.get(at..at + HEADER).ok_or_else(|| {
+            cant_read(format!("a macro's header runs past the area at byte {at}"))
+        })?;
         let mode = match header[1] {
             ONCE => Mode::Once,
             WHILE_HELD => Mode::WhileHeld,
@@ -139,9 +139,9 @@ fn decode_area(area: &[u8]) -> Result<Vec<Entry>> {
             )));
         }
         let count = usize::from(u16::from_le_bytes([header[2], header[3]]));
-        let steps = area.get(at + HEADER..at + HEADER + count * STEP).ok_or_else(|| {
-            cant_read(format!("a macro of {count} steps runs past the area"))
-        })?;
+        let steps = area
+            .get(at + HEADER..at + HEADER + count * STEP)
+            .ok_or_else(|| cant_read(format!("a macro of {count} steps runs past the area")))?;
         let events = steps
             .chunks_exact(STEP)
             .map(decode_step)
@@ -166,7 +166,9 @@ fn decode_step(s: &[u8]) -> Result<Event> {
     let down = |b: u8| match b {
         0x01 => Ok(true),
         0x00 => Ok(false),
-        other => Err(cant_read(format!("a step says {other:#04x} for down or up"))),
+        other => Err(cant_read(format!(
+            "a step says {other:#04x} for down or up"
+        ))),
     };
     Ok(match (s[0], s[2]) {
         (KEY_STEP, KEY_PAGE) => Event::Key {
@@ -208,7 +210,9 @@ pub fn read(image: &Image) -> Result<Vec<SlotMacro>> {
             )));
         }
         if b[1..3] != [0, 0] {
-            return Err(cant_read(format!("key {key:#04x}'s macro binding is {b:02x?}")));
+            return Err(cant_read(format!(
+                "key {key:#04x}'s macro binding is {b:02x?}"
+            )));
         }
         let start = u16::from_le_bytes([b[3], b[4]]);
         let entry = entries.iter().find(|e| e.start == start).ok_or_else(|| {
@@ -294,8 +298,7 @@ pub fn write(image: &Image, macros: &[SlotMacro]) -> Result<Image> {
     );
     let mut placed = Vec::new();
     for m in macros {
-        let p = place(m.key)
-            .ok_or_else(|| anyhow!("key {:#04x} can't play a macro", m.key))?;
+        let p = place(m.key).ok_or_else(|| anyhow!("key {:#04x} can't play a macro", m.key))?;
         if placed.iter().any(|&(q, _)| q == p) {
             bail!("key {:#04x} has a macro twice", m.key);
         }
@@ -361,7 +364,8 @@ mod tests {
     const P: u8 = 0x13;
 
     /// What GG wrote into the macro area, up to the zeros after it (apex-20 to apex-22).
-    const GG_ONE: &str = "7701090001010f000204010104000f00020401000400390102050101020501000400730c0001000100010000";
+    const GG_ONE: &str =
+        "7701090001010f000204010104000f00020401000400390102050101020501000400730c0001000100010000";
     const GG_TWO: &str = "7701120001010f00021b0101021b01000400db00021c0101021c01000400db00021d0101021d01000400a60102e001010206010104000f00020601000400100002e001000400c80b00010001000100007701090001010f000204010104000f00020401000400390102050101020501000400730c0001000100010000";
     const GG_REPEAT: &str = "7701120001010f00021b0101021b01000400db00021c0101021c01000400db00021d0101021d01000400a60102e001010206010104000f00020601000400100002e001000400c80b00010001000100007703090001010f000204010104000f00020401000400390102050101020501000400730c0001000100010000";
 
@@ -412,7 +416,15 @@ mod tests {
         e.extend(tap(0x1D));
         e.push(wait(422));
         let ([ctrl_down, ctrl_up], [c_down, c_up]) = (tap(0xE0), tap(0x06));
-        e.extend([ctrl_down, c_down, wait(15), c_up, wait(16), ctrl_up, wait(3016)]);
+        e.extend([
+            ctrl_down,
+            c_down,
+            wait(15),
+            c_up,
+            wait(16),
+            ctrl_up,
+            wait(3016),
+        ]);
         e.extend(click());
         e
     }
@@ -423,7 +435,9 @@ mod tests {
 
     fn binding(image: &Image, code: u8) -> [u8; 5] {
         let p = place(code).unwrap();
-        image.normal_bindings()[p * 5..p * 5 + 5].try_into().unwrap()
+        image.normal_bindings()[p * 5..p * 5 + 5]
+            .try_into()
+            .unwrap()
     }
 
     /// `image` with GG's area and bound places put in by hand, as GG's save has them.
@@ -529,7 +543,11 @@ mod tests {
         let new = write(&two, &[on(P, Mode::Once, first())]).unwrap();
         assert_eq!(binding(&new, O), [0x51, O, 0, 0, 0]);
         assert_eq!(binding(&new, P), [0x71, 0, 0, 0, 0]);
-        assert_eq!(new.macros(), &area(GG_ONE)[..], "the rest of the area zeroed");
+        assert_eq!(
+            new.macros(),
+            &area(GG_ONE)[..],
+            "the rest of the area zeroed"
+        );
         only_macros_and(&two, &new, &[O, P]);
         // And with none left, the slot is as it came from the factory.
         let none = write(&new, &[]).unwrap();
@@ -541,17 +559,32 @@ mod tests {
         let bound = [(P, [0x71, 0, 0, 0, 0])];
         let mut cases: Vec<(Image, &str)> = Vec::new();
         // Another play mode (GG's Toggle and Play N Times aren't decoded).
-        cases.push((as_gg_saved(&GG_ONE.replacen("7701", "7702", 1), &bound), "mode"));
+        cases.push((
+            as_gg_saved(&GG_ONE.replacen("7701", "7702", 1), &bound),
+            "mode",
+        ));
         // Other header bytes.
-        cases.push((as_gg_saved(&GG_ONE.replacen("01010f00", "01010f01", 1), &bound), "header"));
+        cases.push((
+            as_gg_saved(&GG_ONE.replacen("01010f00", "01010f01", 1), &bound),
+            "header",
+        ));
         // A kind of step not seen.
-        cases.push((as_gg_saved(&GG_ONE.replacen("0204010104", "0504010104", 1), &bound), "step"));
+        cases.push((
+            as_gg_saved(&GG_ONE.replacen("0204010104", "0504010104", 1), &bound),
+            "step",
+        ));
         // A key step whose third byte isn't 01.
-        cases.push((as_gg_saved(&GG_ONE.replacen("02040101", "02040201", 1), &bound), "step"));
+        cases.push((
+            as_gg_saved(&GG_ONE.replacen("02040101", "02040201", 1), &bound),
+            "step",
+        ));
         // A binding that points where no macro starts.
         cases.push((as_gg_saved(GG_ONE, &[(P, [0x71, 0, 0, 0x01, 0])]), "points"));
         // A binding with other bytes before its start.
-        cases.push((as_gg_saved(GG_ONE, &[(P, [0x71, 0, 0x01, 0, 0])]), "binding"));
+        cases.push((
+            as_gg_saved(GG_ONE, &[(P, [0x71, 0, 0x01, 0, 0])]),
+            "binding",
+        ));
         // Bytes after the last macro.
         cases.push((as_gg_saved(&format!("{GG_ONE}ff"), &bound), "after"));
         // A count that runs past the area.

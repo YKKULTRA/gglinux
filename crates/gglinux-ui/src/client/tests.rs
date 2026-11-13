@@ -221,6 +221,40 @@ fn answers_and_notifications_land_in_the_order_they_came() {
 }
 
 #[test]
+fn the_macros_are_read_at_connect_when_the_keyboard_runs() {
+    let fake = Fake::new();
+    let (_c, changes) = client(&fake);
+    let mut peer = fake.accept();
+    let r = peer.request();
+    assert!(matches!(r.req, Request::GetParts), "{:?}", r.req);
+    let parts = Parts {
+        keyboard: true,
+        ..clips_only()
+    };
+    peer.answer(r.id, ResponseData::Parts { parts });
+    // Every other read gets an error, as from a daemon without that state.
+    let mut asked = Vec::new();
+    while !asked.contains(&"get_macros".to_owned()) {
+        let r = peer.request();
+        asked.push(method(&r.req).to_string());
+        let answer = match r.req {
+            Request::GetMacros => ResponseData::Macros {
+                state: gg_ipc::MacrosState {
+                    written_slot: Some(4),
+                    ..gg_ipc::MacrosState::default()
+                },
+            },
+            _ => ResponseData::Error {
+                message: "not here".into(),
+            },
+        };
+        peer.answer(r.id, answer);
+    }
+    let s = until(&changes, |w, _| w == Changed::Macros);
+    assert_eq!(s.macros.unwrap().written_slot, Some(4));
+}
+
+#[test]
 fn a_request_waiting_when_the_daemon_leaves_fails_at_once() {
     let fake = Fake::new();
     let (c, changes, mut peer) = warmed(&fake);

@@ -76,7 +76,9 @@ pub fn command(words: &[&str]) -> Result<Command> {
 /// A key by name, on the normal layer only.
 fn key_of(word: &str) -> Result<u8> {
     if word.contains('+') {
-        bail!("a macro goes on a key of its own: one on the Fn or deep-press layer isn't tried yet");
+        bail!(
+            "a macro goes on a key of its own: one on the Fn or deep-press layer isn't tried yet"
+        );
     }
     MacroBinding::key_by_name(word)
         .with_context(|| format!("'{word}' is not a key name (try: p, f1, capslock, 0x13)"))
@@ -316,7 +318,10 @@ mod tests {
                 "note: load it",
             ]
         );
-        assert_eq!(lines(&MacrosState::default())[0], "macros: none yet (ggctl macro set NAME <steps>)");
+        assert_eq!(
+            lines(&MacrosState::default())[0],
+            "macros: none yet (ggctl macro set NAME <steps>)"
+        );
     }
 
     /// The names macros take are `ggctl bind`'s, for every usage either knows.
@@ -341,8 +346,8 @@ mod tests {
             );
         }
         for alias in [
-            "caps", "escape", "return", "del", "ins", "pgup", "pgdn", "prtsc", "control",
-            "lctrl", "lshift", "lalt", "win", "lsuper", "altgr", "backtick", "menu", "fn",
+            "caps", "escape", "return", "del", "ins", "pgup", "pgdn", "prtsc", "control", "lctrl",
+            "lshift", "lalt", "win", "lsuper", "altgr", "backtick", "menu", "fn",
         ] {
             let Bind::Edit(BindEdit::Key { code, .. }) = bind::parse(&[alias, "default"]).unwrap()
             else {

@@ -411,7 +411,11 @@ fn step(word: &str, events: &mut Vec<MacroEvent>) -> Result<(), String> {
             return Err(format!("'{word}' has {} twice", usage_name(*c)));
         }
     }
-    events.extend(codes.iter().map(|&code| MacroEvent::Key { code, down: true }));
+    events.extend(
+        codes
+            .iter()
+            .map(|&code| MacroEvent::Key { code, down: true }),
+    );
     events.extend(
         codes
             .iter()
@@ -445,7 +449,11 @@ fn type_text(text: &str, events: &mut Vec<MacroEvent>) -> Result<(), String> {
         if shift {
             codes.insert(0, SHIFT);
         }
-        events.extend(codes.iter().map(|&code| MacroEvent::Key { code, down: true }));
+        events.extend(
+            codes
+                .iter()
+                .map(|&code| MacroEvent::Key { code, down: true }),
+        );
         events.extend(
             codes
                 .iter()
@@ -512,11 +520,12 @@ fn combination(events: &[MacroEvent]) -> Option<(String, usize)> {
             return None;
         }
         let ups = events.get(n..2 * n)?;
-        let reversed = keys
-            .iter()
-            .rev()
-            .zip(ups)
-            .all(|(&k, e)| *e == MacroEvent::Key { code: k, down: false });
+        let reversed = keys.iter().rev().zip(ups).all(|(&k, e)| {
+            *e == MacroEvent::Key {
+                code: k,
+                down: false,
+            }
+        });
         reversed.then(|| {
             let names: Vec<String> = keys.iter().map(|&k| usage_name(k)).collect();
             (names.join("+"), 2 * n)
@@ -918,7 +927,11 @@ mod tests {
         assert_eq!(MacroEvent::usage_by_name("A"), Some(0x04));
         assert_eq!(MacroEvent::usage_by_name("pgdn"), Some(0x4E));
         assert_eq!(MacroEvent::usage_by_name("0x39"), Some(0x39));
-        assert_eq!(MacroEvent::usage_by_name("menu"), None, "a key, not a usage");
+        assert_eq!(
+            MacroEvent::usage_by_name("menu"),
+            None,
+            "a key, not a usage"
+        );
         assert_eq!(MacroBinding::key_by_name("menu"), Some(0xE7));
         assert_eq!(MacroBinding::key_by_name("fn"), Some(0xF0));
         assert_eq!(MacroEvent::usage_name(0x2D), "minus");

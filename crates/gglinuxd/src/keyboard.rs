@@ -880,7 +880,11 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             let (tx, mut rx) = oneshot::channel();
             let get = onboard::Cmd::Get(tx);
             onboard::on_command(get, &mut state.onboard, None, &state.experimental, event_tx);
-            let active = rx.try_recv().ok().and_then(Result::ok).and_then(|s| s.active);
+            let active = rx
+                .try_recv()
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|s| s.active);
             let device = state.device.as_ref();
             let exp = &state.experimental;
             if macros::on_command(cmd, &mut state.macros, device, exp, event_tx, active) {

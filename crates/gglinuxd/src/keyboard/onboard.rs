@@ -519,7 +519,11 @@ fn save_new(dir: &Path, slot: u8, tail: &str, bytes: &[u8]) -> anyhow::Result<Pa
 
 /// Save `image` as a new backup of `slot` in `dir`, and read the file back: its path and
 /// what it holds.
-pub(super) fn save_backup(dir: &Path, slot: u8, image: &Image) -> anyhow::Result<(PathBuf, Vec<u8>)> {
+pub(super) fn save_backup(
+    dir: &Path,
+    slot: u8,
+    image: &Image,
+) -> anyhow::Result<(PathBuf, Vec<u8>)> {
     let path = save_new(dir, slot, "", image.bytes())?;
     let back = fs::read(&path).with_context(|| format!("reading {} back", path.display()))?;
     Ok((path, back))
