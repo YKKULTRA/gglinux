@@ -46,9 +46,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             dpi: (
-                [400, 800, 1600, 2400, 3200]
-                    .map(DpiStage::uniform)
-                    .to_vec(),
+                [400, 800, 1600, 2400, 3200].map(DpiStage::uniform).to_vec(),
                 0,
             ),
             polling: PollingRate::Hz1000,
@@ -332,7 +330,10 @@ mod tests {
         // Each command after the first keeps GG's distance.
         let waits = fake.waits();
         assert_eq!(waits.len(), 3);
-        assert!(waits[1..].iter().all(|&w| about(w, COMMAND_PACE)), "{waits:?}");
+        assert!(
+            waits[1..].iter().all(|&w| about(w, COMMAND_PACE)),
+            "{waits:?}"
+        );
         // An action no capture shows sends nothing at all.
         fake.clear_sent();
         assert!(mouse
@@ -356,7 +357,10 @@ mod tests {
         // 17, then AC 97 (old), a pause, AC 97 (new).
         assert_eq!(fake.commands(), [0x17, 0xAC, 0x97, 0xAC, 0x97]);
         let waits = fake.waits();
-        assert!(about(waits[1], LINK_PACE), "the first read waits for the link: {waits:?}");
+        assert!(
+            about(waits[1], LINK_PACE),
+            "the first read waits for the link: {waits:?}"
+        );
         assert!(waits.contains(&READ_AGAIN), "{waits:?}");
     }
 
@@ -389,7 +393,9 @@ mod tests {
         assert_eq!(fake.settings(), Settings::default());
         // Zeros would read as High-Efficiency Mode: the checked read sees no answer.
         assert_eq!(
-            mouse.read_back(&Radio::Stable, Mouse::checked_radio).unwrap(),
+            mouse
+                .read_back(&Radio::Stable, Mouse::checked_radio)
+                .unwrap(),
             ReadBack::Silent
         );
         fake.set_asleep(false);

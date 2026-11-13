@@ -91,7 +91,11 @@ fn buttons_refusal(actions: &[String], experimental: &Experimental) -> Option<St
     let wheel = match actions.len() {
         BUTTON_COUNT => return None,
         n if n == BUTTON_COUNT + 2 => &actions[BUTTON_COUNT..],
-        n => return Some(format!("expected 6 button actions, or 8 with the wheel's two, got {n}")),
+        n => {
+            return Some(format!(
+                "expected 6 button actions, or 8 with the wheel's two, got {n}"
+            ))
+        }
     };
     let mut picked = Vec::new();
     for name in wheel {
@@ -175,7 +179,10 @@ mod tests {
             n
         };
         assert_eq!(buttons_refusal(&names(&SIX), &off), None);
-        assert_eq!(buttons_refusal(&eight("scrollup", "scrolldown"), &off), None);
+        assert_eq!(
+            buttons_refusal(&eight("scrollup", "scrolldown"), &off),
+            None
+        );
         let gated = buttons_refusal(&eight("button4", "scrolldown"), &off).unwrap();
         assert!(gated.contains("scroll wheel"), "{gated}");
         assert_eq!(buttons_refusal(&eight("button4", "scrolldown"), &on), None);
@@ -188,6 +195,9 @@ mod tests {
         assert_eq!(first[6..], ["button4", "scrolldown"]);
         let again = recorded(Some(first.as_slice()), &names(&SIX), true);
         assert_eq!(again, first, "six buttons keep the wheel's record");
-        assert_eq!(recorded(None, &eight("scrollup", "scrolldown"), false).len(), 6);
+        assert_eq!(
+            recorded(None, &eight("scrollup", "scrolldown"), false).len(),
+            6
+        );
     }
 }

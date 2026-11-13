@@ -40,6 +40,14 @@ export global MouseUi {
     /// Per button, the line under it: the key it's bound to ("Key: F13"), a
     /// name set elsewhere, or "".
     in property <[string]> button-keys: ["", "", "", "", "", ""];
+    /// `mouse_wheel` is on in Settings → Experimental.
+    in property <bool> wheel-gated;
+    /// The sentence shown while it's off.
+    in property <string> wheel-refusal;
+    /// The wheel's menu: only the actions a capture of GG shows on it (mouse_keys::WHEEL).
+    in property <[string]> wheel-actions: ["Scroll up", "Scroll down", "Back (button 4)"];
+    /// Per direction (up, then down), its place in `wheel-actions`, or -1.
+    in property <[int]> wheel: [0, 1];
     /// The button whose key list is open, or -1.
     in property <int> key-button: -1;
     /// The open list is the media keys, not the keyboard's.
@@ -55,6 +63,7 @@ export global MouseUi {
     in property <string> error;
     out property <[int]> rates: [125, 250, 500, 1000];
     out property <[string]> button-names: ["Left", "Right", "Middle", "Back", "Forward", "DPI"];
+    out property <[string]> wheel-names: ["Scroll up", "Scroll down"];
     /// The last two open a list to pick from (mouse.rs: KEY_ITEM, MEDIA_ITEM).
     out property <[string]> actions: [
         "Left click", "Right click", "Middle click", "Back", "Forward", "Cycle DPI",
@@ -82,6 +91,8 @@ export global MouseUi {
     callback pick-radio(int);
     callback apply-radio();
     callback pick-button(int, int);
+    /// Wheel direction (0 up, 1 down), and its place in `wheel-actions`.
+    callback pick-wheel(int, int);
     callback factory-buttons();
     callback apply-dpi();
     callback apply-polling();
@@ -392,6 +403,19 @@ export component MousePanel inherits Card {
             }
         }
     }
+    // The wheel: greyed, with the reason, while its gate is off.
+    Shown { shown: !MouseUi.wheel-gated; gap: 0; Hint { text: MouseUi.wheel-refusal; color: Theme.accent; } }
+    for name[i] in MouseUi.wheel-names : Row {
+        label: name;
+        Pick {
+            width: 220px;
+            model: MouseUi.wheel-actions;
+            index: MouseUi.wheel[i];
+            enabled: MouseUi.wheel-gated;
+            picked(a) => { MouseUi.pick-wheel(i, a); }
+        }
+    }
+    Hint { text: "The wheel offers only what GG has been seen sending for it. The mouse can't report its buttons or its wheel back."; }
     HorizontalLayout {
         alignment: start;
         Button { text: MouseUi.busy == "buttons" ? "Applying…" : "Apply buttons"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-buttons(); } }

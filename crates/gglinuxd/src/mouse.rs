@@ -617,10 +617,7 @@ struct ButtonPlan {
 fn button_plan(gates: &Experimental, actions: &[String]) -> Result<ButtonPlan, String> {
     let (buttons, wheel) = match actions.len() {
         BUTTON_COUNT => (actions, None),
-        n if n == BUTTON_COUNT + 2 => (
-            &actions[..BUTTON_COUNT],
-            Some(&actions[BUTTON_COUNT..]),
-        ),
+        n if n == BUTTON_COUNT + 2 => (&actions[..BUTTON_COUNT], Some(&actions[BUTTON_COUNT..])),
         n => {
             return Err(format!(
                 "expected {BUTTON_COUNT} button actions, or {} with the wheel's two, got {n}",
@@ -662,7 +659,11 @@ fn wheel_action(name: &str) -> Result<ButtonAction, String> {
 
 /// The buttons as recorded after a write: the names sent, and the wheel's two from the
 /// record before when the wheel was left alone.
-fn recorded_buttons(before: Option<&[String]>, actions: &[String], wheel_sent: bool) -> Vec<String> {
+fn recorded_buttons(
+    before: Option<&[String]>,
+    actions: &[String],
+    wheel_sent: bool,
+) -> Vec<String> {
     let mut names = actions[..BUTTON_COUNT].to_vec();
     if wheel_sent {
         names.extend_from_slice(&actions[BUTTON_COUNT..]);
@@ -854,7 +855,10 @@ mod tests {
         .unwrap();
         // The status read, the rate, the save; then the read-back, asked twice because the
         // first answer after a change can still be the old one.
-        assert_eq!(b.fake.commands(), [0xAA, 0x17, 0x09, 0xAC, 0x97, 0xAC, 0x97]);
+        assert_eq!(
+            b.fake.commands(),
+            [0xAA, 0x17, 0x09, 0xAC, 0x97, 0xAC, 0x97]
+        );
         assert_eq!(b.fake.settings().polling, PollingRate::Hz500);
         assert_eq!(b.state.reported.polling_hz, Some(500));
         assert_eq!(b.state.applied.as_ref().unwrap().polling_hz, Some(500));
@@ -869,7 +873,10 @@ mod tests {
         .unwrap();
         assert_eq!(b.fake.commands(), [0xAA, 0x2C, 0xAC, 0xAC]);
         let dpi = b.state.reported.dpi.clone().unwrap();
-        assert_eq!((dpi.stages[1], dpi.active), (DpiStage { x: 1600, y: 1600 }, 1));
+        assert_eq!(
+            (dpi.stages[1], dpi.active),
+            (DpiStage { x: 1600, y: 1600 }, 1)
+        );
 
         // With the reads gated off, the write goes out as it always did, unread.
         let mut off = Bench::new(&[]);
@@ -933,7 +940,10 @@ mod tests {
         assert_eq!(six.fake.commands(), [0xAA, 0x19, 0x09]);
         assert_eq!(eight.fake.settings().wheel, None, "no 1A");
         let applied = eight.state.applied.unwrap().buttons.unwrap();
-        assert_eq!(applied, SIX, "the wheel wasn't written, so it isn't recorded");
+        assert_eq!(
+            applied, SIX,
+            "the wheel wasn't written, so it isn't recorded"
+        );
     }
 
     #[test]
@@ -942,9 +952,18 @@ mod tests {
         b.buttons(&with_wheel("button4", "scrolldown"), true)
             .unwrap();
         assert_eq!(b.fake.commands(), [0xAA, 0x19, 0x1A, 0x09]);
-        assert_eq!(b.fake.sent()[2][..11], [0x1A, 0x04, 0, 0, 0, 0, 0x32, 0, 0, 0, 0]);
         assert_eq!(
-            b.state.applied.as_ref().unwrap().buttons.as_deref().unwrap(),
+            b.fake.sent()[2][..11],
+            [0x1A, 0x04, 0, 0, 0, 0, 0x32, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            b.state
+                .applied
+                .as_ref()
+                .unwrap()
+                .buttons
+                .as_deref()
+                .unwrap(),
             with_wheel("button4", "scrolldown")
         );
         // Six buttons leave the wheel alone, and its record with it.
@@ -1010,7 +1029,10 @@ mod tests {
             (asleep.battery, asleep.sleep_secs, asleep.radio),
             (None, None, None)
         );
-        assert_eq!((asleep.reported_dpi, asleep.reported_polling_hz), (None, None));
+        assert_eq!(
+            (asleep.reported_dpi, asleep.reported_polling_hz),
+            (None, None)
+        );
         let told = std::iter::from_fn(|| events.try_recv().ok()).last();
         assert!(matches!(told, Some(Event::MouseBattery { battery: None })));
 

@@ -46,7 +46,10 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
             wheel_request(applied_buttons()?.as_deref(), wheel, save)
         }
         Some((&"wheel", _)) => {
-            bail!("usage: ggctl mouse wheel <up> <down> [--save]   (each one of: {})", wheel_names())
+            bail!(
+                "usage: ggctl mouse wheel <up> <down> [--save]   (each one of: {})",
+                wheel_names()
+            )
         }
         Some((&"save", [])) => Request::SaveMouse,
         Some((&"save", _)) => bail!("usage: ggctl mouse save"),
@@ -373,18 +376,35 @@ mod tests {
     #[test]
     fn the_wheel_keeps_the_applied_buttons_or_the_factory_six() {
         let wheel = || ["button4".to_string(), "scrolldown".to_string()];
-        let Request::SetMouseButtons { actions, save } = wheel_request(None, wheel(), true)
-        else {
+        let Request::SetMouseButtons { actions, save } = wheel_request(None, wheel(), true) else {
             panic!("not a buttons request");
         };
         assert_eq!(
             actions,
-            ["button1", "button2", "button3", "button4", "button5", "dpi", "button4", "scrolldown"]
+            [
+                "button1",
+                "button2",
+                "button3",
+                "button4",
+                "button5",
+                "dpi",
+                "button4",
+                "scrolldown"
+            ]
         );
         assert!(save);
-        let applied: Vec<String> = ["f13", "button2", "button3", "button4", "button5", "dpi", "scrollup", "scrolldown"]
-            .map(String::from)
-            .to_vec();
+        let applied: Vec<String> = [
+            "f13",
+            "button2",
+            "button3",
+            "button4",
+            "button5",
+            "dpi",
+            "scrollup",
+            "scrolldown",
+        ]
+        .map(String::from)
+        .to_vec();
         let Request::SetMouseButtons { actions, .. } =
             wheel_request(Some(applied.as_slice()), wheel(), false)
         else {
@@ -399,7 +419,11 @@ mod tests {
                 "wheel:     up button4, down scrolldown"
             ]
         );
-        assert_eq!(button_lines(&applied[..6]).len(), 1, "no wheel line for six");
+        assert_eq!(
+            button_lines(&applied[..6]).len(),
+            1,
+            "no wheel line for six"
+        );
     }
 
     /// Refused before the daemon is asked anything, so no daemon is needed here.
