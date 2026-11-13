@@ -23,6 +23,8 @@ pub enum Feature {
     /// The mouse's sleep timer, battery saving, High-Efficiency Mode, Wireless Stability and
     /// Bluetooth Smoothing.
     MousePower,
+    /// What the mouse's scroll wheel does when turned up and down.
+    MouseWheel,
     /// The mouse's angle snapping, acceleration and lift-off settings.
     MouseSensor,
     /// Macros stored on the mouse.
@@ -34,12 +36,13 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 9] = [
+    pub const ALL: [Feature; 10] = [
         Feature::KeyboardBindings,
         Feature::KeyboardOnboard,
         Feature::KeyboardProtection,
         Feature::KeyboardMacros,
         Feature::MousePower,
+        Feature::MouseWheel,
         Feature::MouseSensor,
         Feature::MouseMacros,
         Feature::MousePairing,
@@ -54,6 +57,7 @@ impl Feature {
             Feature::KeyboardProtection => "keyboard_protection",
             Feature::KeyboardMacros => "keyboard_macros",
             Feature::MousePower => "mouse_power",
+            Feature::MouseWheel => "mouse_wheel",
             Feature::MouseSensor => "mouse_sensor",
             Feature::MouseMacros => "mouse_macros",
             Feature::MousePairing => "mouse_pairing",
@@ -69,6 +73,7 @@ impl Feature {
             Feature::KeyboardProtection => "Keyboard: Protection Mode",
             Feature::KeyboardMacros => "Keyboard: macros",
             Feature::MousePower => "Mouse: sleep timer and power settings",
+            Feature::MouseWheel => "Mouse: scroll wheel actions",
             Feature::MouseSensor => "Mouse: angle snapping and sensor settings",
             Feature::MouseMacros => "Mouse: macros",
             Feature::MousePairing => "Mouse: pairing",
@@ -90,6 +95,7 @@ pub struct Experimental {
     pub keyboard_protection: bool,
     pub keyboard_macros: bool,
     pub mouse_power: bool,
+    pub mouse_wheel: bool,
     pub mouse_sensor: bool,
     pub mouse_macros: bool,
     pub mouse_pairing: bool,
@@ -104,6 +110,7 @@ impl Experimental {
             Feature::KeyboardProtection => self.keyboard_protection,
             Feature::KeyboardMacros => self.keyboard_macros,
             Feature::MousePower => self.mouse_power,
+            Feature::MouseWheel => self.mouse_wheel,
             Feature::MouseSensor => self.mouse_sensor,
             Feature::MouseMacros => self.mouse_macros,
             Feature::MousePairing => self.mouse_pairing,
@@ -118,6 +125,7 @@ impl Experimental {
             Feature::KeyboardProtection => &mut self.keyboard_protection,
             Feature::KeyboardMacros => &mut self.keyboard_macros,
             Feature::MousePower => &mut self.mouse_power,
+            Feature::MouseWheel => &mut self.mouse_wheel,
             Feature::MouseSensor => &mut self.mouse_sensor,
             Feature::MouseMacros => &mut self.mouse_macros,
             Feature::MousePairing => &mut self.mouse_pairing,
@@ -170,6 +178,17 @@ mod tests {
             let json = serde_json::to_value(e).unwrap();
             assert_eq!(json[f.key()], true, "{f:?}");
         }
+    }
+
+    /// The wheel's gate: its own name and label, off unless the file says otherwise.
+    #[test]
+    fn the_wheel_has_its_own_gate_off_by_default() {
+        assert_eq!(Feature::from_key("mouse_wheel"), Some(Feature::MouseWheel));
+        assert_eq!(Feature::MouseWheel.label(), "Mouse: scroll wheel actions");
+        let old: Experimental = serde_json::from_str(r#"{"mouse_power":true}"#).unwrap();
+        assert!(!old.on(Feature::MouseWheel), "a file from before it");
+        let why = old.refusal(Feature::MouseWheel).unwrap();
+        assert!(why.contains("scroll wheel") && why.contains("Settings → Experimental"));
     }
 
     #[test]

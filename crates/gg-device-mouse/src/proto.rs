@@ -33,6 +33,11 @@ pub const CMD_READ_RADIO: u8 = 0xAE;
 pub const CMD_READ_SENSITIVITY: u8 = 0xAC;
 /// Read the polling rate back: the answer is [`CMD_POLLING_RATE`]'s code.
 pub const CMD_READ_POLLING_RATE: u8 = 0x97;
+/// Set what the scroll wheel does: `1A <up entry> <down entry>`, each entry five bytes like
+/// a field of the buttons table [`CMD_BUTTONS`]. Not in rivalcfg: from our own GG 123
+/// capture rival-5 (2026-11-13, `docs/PROTOCOLS.md` §1 "Rival: more from GG 123"), where GG
+/// sends it on Save, followed by [`CMD_SAVE`]. Nothing reads it back.
+pub const CMD_WHEEL: u8 = 0x1A;
 
 /// The firmware always parses five DPI slots, whatever `count` says.
 pub const MAX_PRESETS: usize = 5;
@@ -236,7 +241,7 @@ pub enum Radio {
 impl Radio {
     const ALL: [Radio; 3] = [Radio::HighEfficiency, Radio::Normal, Radio::Stable];
 
-    fn bytes(self) -> [u8; 2] {
+    pub(crate) fn bytes(self) -> [u8; 2] {
         match self {
             Radio::HighEfficiency => [0x00, 0x00],
             Radio::Normal => [0x02, 0x00],
@@ -349,6 +354,62 @@ pub fn buttons_packet(actions: &[ButtonAction; BUTTON_COUNT]) -> Vec<u8> {
         }
     }
     packet
+}
+
+/// One wheel action a capture proves: the action, the byte GG sent for it, and where it
+/// was seen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WheelAction {
+    pub action: ButtonAction,
+    pub code: u8,
+    pub seen: &'static str,
+}
+
+/// The only actions sent for the wheel: those a capture shows. The buttons table's other
+/// actions (other buttons, keys, media keys, DPI, disabled) look alike but were never seen
+/// on the wheel, so they aren't sent. Add a row only with the capture that proves it.
+pub const WHEEL_ACTIONS: [WheelAction; 3] = [
+    WheelAction {
+        action: ButtonAction::ScrollUp,
+        code: 0x31,
+        seen: "rival-5.pcap: GG's default wheel, 1a 31 00 00 00 00 32",
+    },
+    WheelAction {
+        action: ButtonAction::ScrollDown,
+        code: 0x32,
+        seen: "rival-5.pcap: GG's default wheel, 1a 31 00 00 00 00 32",
+    },
+    WheelAction {
+        action: ButtonAction::Button(4),
+        code: 0x04,
+        seen: "rival-5.pcap: Scroll Up = Button 4, 1a 04 00 00 00 00 32",
+    },
+];
+
+/// The wheel as it comes from the factory, and as GG sends it by default: up scrolls up,
+/// down scrolls down.
+pub const DEFAULT_WHEEL: [ButtonAction; 2] = [ButtonAction::ScrollUp, ButtonAction::ScrollDown];
+
+/// The byte the wheel takes for `action`, or `None` for an action no capture shows on it.
+pub fn wheel_code(action: ButtonAction) -> Option<u8> {
+    WHEEL_ACTIONS
+        .iter()
+        .find(|w| w.action == action)
+        .map(|w| w.code)
+}
+
+/// Build the wheel packet: `1A <up> 00 00 00 00 <down> 00 00 00 00`, as GG sends it.
+/// Refuses an action [`WHEEL_ACTIONS`] doesn't have.
+pub fn wheel_packet(up: ButtonAction, down: ButtonAction) -> Result<Vec<u8>> {
+    let mut packet = vec![0u8; 1 + 2 * BUTTON_FIELD_LEN];
+    packet[0] = CMD_WHEEL;
+    for (i, action) in [up, down].into_iter().enumerate() {
+        let Some(code) = wheel_code(action) else {
+            bail!("{action:?} is not known for the wheel yet: no capture shows its bytes");
+        };
+        packet[1 + i * BUTTON_FIELD_LEN] = code;
+    }
+    Ok(packet)
 }
 
 pub fn save_packet() -> Vec<u8> {
@@ -570,6 +631,58 @@ mod tests {
         ));
         assert!(ButtonAction::parse("button9").is_err());
         assert!(ButtonAction::parse("nonsense").is_err());
+    }
+
+    /// Byte for byte as GG 123 sent them on Save (rival-5 capture): Scroll Up as Button 4,
+    /// then back to GG's default. The whole report is these eleven bytes and zeros.
+    #[test]
+    fn the_wheel_goes_out_as_gg_sends_it() {
+        use ButtonAction::*;
+        assert_eq!(
+            wheel_packet(Button(4), ScrollDown).unwrap(),
+            [0x1A, 0x04, 0, 0, 0, 0, 0x32, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            wheel_packet(ScrollUp, ScrollDown).unwrap(),
+            [0x1A, 0x31, 0, 0, 0, 0, 0x32, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            wheel_packet(DEFAULT_WHEEL[0], DEFAULT_WHEEL[1]).unwrap(),
+            wheel_packet(ScrollUp, ScrollDown).unwrap()
+        );
+        // Each entry has the buttons table's layout: the same byte the button field takes.
+        for w in WHEEL_ACTIONS {
+            let mut buttons = default_buttons();
+            buttons[0] = w.action;
+            assert_eq!(buttons_packet(&buttons)[1], w.code, "{:?}", w.action);
+            assert!(w.seen.contains(".pcap"), "{:?} has its capture", w.action);
+        }
+    }
+
+    /// Only what a capture shows goes to the wheel: everything else in the buttons table is
+    /// refused there, however alike it looks.
+    #[test]
+    fn an_action_no_capture_shows_on_the_wheel_is_refused() {
+        use ButtonAction::*;
+        for action in [
+            Button(1),
+            Button(2),
+            Button(3),
+            Button(5),
+            Disable,
+            DpiCycle,
+            Key(0x3E),
+            Multimedia(0xCD),
+        ] {
+            assert_eq!(wheel_code(action), None, "{action:?}");
+            let up = wheel_packet(action, ScrollDown).unwrap_err().to_string();
+            assert!(up.contains("not known for the wheel yet"), "{up}");
+            assert!(wheel_packet(ScrollUp, action).is_err(), "{action:?} down");
+        }
+        assert_eq!(
+            WHEEL_ACTIONS.map(|w| (w.action, w.code)),
+            [(ScrollUp, 0x31), (ScrollDown, 0x32), (Button(4), 0x04)]
+        );
     }
 
     #[test]

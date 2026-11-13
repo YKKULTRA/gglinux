@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The key and media names a mouse button can be bound to, for pickers in the app.
+//! The key and media names a mouse button can be bound to, and the actions the scroll wheel
+//! takes, for pickers in the app and for ggctl.
 //!
 //! Each name is one `gg-device-mouse` accepts (`ButtonAction::parse`, from rivalcfg's tables),
-//! one per key: the tables' aliases are left out. A test in `gglinuxd` checks the two agree.
+//! one per key: the tables' aliases are left out. Tests in `gglinuxd` check the two agree.
 
 /// `(name the daemon takes, label to show)`, one per keyboard key, in picker order.
 pub const KEYS: &[(&str, &str)] = &[
@@ -137,6 +138,19 @@ pub const MEDIA: &[(&str, &str)] = &[
     ("volumedown", "Volume down"),
 ];
 
+/// `(name the daemon takes, label to show)` for the scroll wheel: only the actions a capture
+/// of GG shows on it (`gg_device_mouse::proto::WHEEL_ACTIONS`), in picker order.
+pub const WHEEL: &[(&str, &str)] = &[
+    ("scrollup", "Scroll up"),
+    ("scrolldown", "Scroll down"),
+    ("button4", "Back (button 4)"),
+];
+
+/// The wheel as it comes from the factory: turned up it scrolls up, turned down it scrolls
+/// down. `SetMouseButtons` with these two last behaves as with six actions while the
+/// `mouse_wheel` gate is off.
+pub const WHEEL_FACTORY: [&str; 2] = ["scrollup", "scrolldown"];
+
 /// The label for a key or media name (any case), if it's one of these.
 pub fn label(name: &str) -> Option<&'static str> {
     let name = name.trim().to_ascii_lowercase();
@@ -161,5 +175,12 @@ mod tests {
         assert_eq!(label("F13"), Some("F13"));
         assert_eq!(label("playpause"), Some("Play / pause"));
         assert_eq!(label("nope"), None);
+    }
+
+    #[test]
+    fn the_wheel_offers_its_factory_pair_first() {
+        let names: Vec<&str> = WHEEL.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names[..2], WHEEL_FACTORY);
+        assert!(names.iter().all(|n| *n == n.to_ascii_lowercase()));
     }
 }

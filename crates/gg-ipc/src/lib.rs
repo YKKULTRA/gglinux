@@ -81,12 +81,15 @@ pub struct MouseDpi {
 ///
 /// Each part is `None` until it has been written. A part never written is unknown, not its
 /// factory default; what the mouse itself reports is in [`MouseState`] (`sleep_secs`,
-/// `radio`, `reported_dpi`, `reported_polling_hz`). The buttons aren't read back.
+/// `radio`, `reported_dpi`, `reported_polling_hz`). The buttons and the wheel aren't read
+/// back: the mouse has no query for them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseSettings {
     pub dpi: Option<MouseDpi>,
     pub polling_hz: Option<u16>,
-    /// One action name per physical button, in button order.
+    /// One action name per physical button, in button order, then the wheel's two (up,
+    /// down) once they've been written: 6 names, or 8. A write of six buttons keeps the
+    /// wheel's two as they were.
     pub buttons: Option<Vec<String>>,
     /// The sleep timer, in minutes ([`MOUSE_SLEEP_MINUTES`]).
     #[serde(default)]
@@ -137,6 +140,10 @@ impl MouseRadio {
 /// on the wire.
 pub const MOUSE_SLEEP_MINUTES: std::ops::RangeInclusive<u8> = 1..=20;
 
+/// The answer to a mouse write while the mouse is asleep. An asleep mouse drops what it's
+/// sent, so nothing is sent; the daemon decides from a status read made for that request.
+pub const MOUSE_ASLEEP: &str = "the mouse is asleep: move it, then try again";
+
 /// What the daemon knows about the mouse.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseState {
@@ -150,7 +157,8 @@ pub struct MouseState {
     /// so this deliberately does not pretend to reflect the hardware's actual state.
     pub applied: Option<MouseSettings>,
     /// The sleep timer as the mouse reports it, in seconds. Read only while
-    /// [`Feature::MousePower`] is on; `None` while it's off, or the mouse is asleep.
+    /// [`Feature::MousePower`] is on; `None` while it's off, or the mouse is asleep (what
+    /// it reported before it fell asleep isn't kept: it can't be checked until it wakes).
     #[serde(default)]
     pub sleep_secs: Option<u16>,
     /// The radio mode as the mouse reports it; read and `None` as [`MouseState::sleep_secs`].
@@ -1262,7 +1270,11 @@ pub enum Request {
         #[serde(default)]
         save: bool,
     },
-    /// One action name per button, e.g. `["button1", ..., "dpi"]`.
+    /// One action name per button, e.g. `["button1", ..., "dpi"]`: six, or eight with the
+    /// wheel's two after them (`[..., "dpi", "button4", "scrolldown"]`). With six the wheel
+    /// is left alone. The wheel takes only the actions a capture shows
+    /// ([`mouse_keys::WHEEL`]) and anything but its factory pair needs
+    /// [`Feature::MouseWheel`]. Neither buttons nor wheel can be read back.
     SetMouseButtons {
         actions: Vec<String>,
         #[serde(default)]
@@ -1950,6 +1962,22 @@ mod tests {
             (state.sleep_secs, state.applied.unwrap().sleep_minutes),
             (None, None)
         );
+    }
+
+    /// Eight button actions, the wheel's two last, as the app and ggctl send them.
+    #[test]
+    fn the_buttons_request_takes_the_wheel_after_the_six_buttons() {
+        let line = r#"{"id":6,"req":{"method":"set_mouse_buttons","params":{"actions":
+            ["button1","button2","button3","button4","button5","dpi","button4","scrolldown"],
+            "save":false}}}"#;
+        match serde_json::from_str::<RequestFrame>(line).unwrap().req {
+            Request::SetMouseButtons { actions, save } => {
+                assert_eq!((actions.len(), save), (8, false));
+                assert_eq!(actions[6..], ["button4", "scrolldown"]);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        assert!(MOUSE_ASLEEP.contains("asleep") && MOUSE_ASLEEP.contains("move it"));
     }
 
     #[test]
