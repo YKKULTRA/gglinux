@@ -53,12 +53,7 @@ pub fn colours(v: &Value) -> Option<Vec<Option<Rgb>>> {
         (0..CELLS)
             .map(|i| {
                 let c = list.get(i)?.as_array()?;
-                let channel = |n: usize| {
-                    c.get(n)?
-                        .as_u64()
-                        .filter(|&v| v <= 255)
-                        .map(|v| v as u8)
-                };
+                let channel = |n: usize| c.get(n)?.as_u64().filter(|&v| v <= 255).map(|v| v as u8);
                 (c.len() == 3).then_some(())?;
                 Some(Rgb {
                     r: channel(0)?,
@@ -100,7 +95,11 @@ mod tests {
         assert_eq!(cell(0x35), 22, "` starts the number row");
         assert_eq!(cell(0x2B), 44, "Tab");
         assert_eq!(cell(0x39), 66, "Caps Lock");
-        assert_eq!(cell(0xE1), 89, "left Shift, 2.25 keys wide: its middle is in column 1");
+        assert_eq!(
+            cell(0xE1),
+            89,
+            "left Shift, 2.25 keys wide: its middle is in column 1"
+        );
         assert_eq!(cell(0xE0), 110, "left Ctrl starts the bottom row");
     }
 
@@ -116,7 +115,11 @@ mod tests {
         assert_eq!(cell(0x2C), 116, "the space bar's middle, column 6");
         assert_eq!(cell(0x49), 37, "Insert, the first navigation column (15)");
         assert_eq!(cell(0x4F), 127, "right arrow, column 17");
-        assert_eq!(cell(0xFB), 17, "the button beside the screen, where Pause would be");
+        assert_eq!(
+            cell(0xFB),
+            17,
+            "the button beside the screen, where Pause would be"
+        );
     }
 
     #[test]

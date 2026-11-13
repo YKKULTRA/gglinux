@@ -57,6 +57,7 @@ use tracing::{debug, error, info, warn};
 use crate::clock::is_older_than;
 use audio::{Capture, Levels};
 use reader::{OpenError, Reader};
+pub use screen::Overlaid;
 use screen::ScreenState;
 use spectrum::BANDS;
 use switches::SwitchesState;
@@ -77,6 +78,12 @@ pub type Layer = HashMap<u8, Rgb>;
 pub trait Overlay: Send + Sync {
     /// The keys it paints at `now`, or `None` while inactive.
     fn paint(&self, now: Instant) -> Option<Layer>;
+
+    /// What it shows on the keyboard's screen at `now`, over the screen setting, or `None`
+    /// while it shows nothing there.
+    fn screen(&self, _now: Instant) -> Option<Overlaid> {
+        None
+    }
 }
 
 type Reply<T> = oneshot::Sender<Result<T, String>>;
@@ -428,6 +435,10 @@ fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Ev
         }
         let now = Instant::now();
         state.layers = state.overlays.iter().filter_map(|o| o.paint(now)).collect();
+        // A game's screen frame goes over the screen setting while it's due.
+        state
+            .screen
+            .set_overlay(state.overlays.iter().find_map(|o| o.screen(now)));
         let overlay_active = !state.layers.is_empty();
         if overlay_ended(state.overlay_was_active, overlay_active) {
             state.last_frame = None;
@@ -610,7 +621,7 @@ fn on_board(mut lighting: Lighting, region: Option<Option<u8>>) -> Lighting {
 fn takes_keyboard(state: &mut State, event_tx: &broadcast::Sender<Event>) -> bool {
     drawing(state.lighting.enabled, !state.layers.is_empty())
         || state.switches.settings().enabled
-        || !matches!(state.screen.setting(), Screen::Keyboard)
+        || state.screen.draws()
         || (state.experimental.keyboard_bindings && bindings_on(state, event_tx))
 }
 

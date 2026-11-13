@@ -681,6 +681,12 @@ async fn dispatch(
                 .await,
         ),
         Request::GamesenseTest => outcome(workers.gamesense.send(GamesenseCommand::RunTest).await),
+        Request::GamesenseTestScreen => outcome(
+            workers
+                .gamesense
+                .send(GamesenseCommand::RunTestScreen)
+                .await,
+        ),
         Request::GetProfiles => match workers.profiles.send(ProfilesCommand::GetState).await {
             Ok(state) => ResponseData::Profiles { state },
             Err(message) => ResponseData::Error { message },

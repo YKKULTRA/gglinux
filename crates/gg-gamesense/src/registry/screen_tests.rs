@@ -13,7 +13,10 @@ const BLUE: Rgb = Rgb { r: 0, g: 0, b: 255 };
 const BLACK: Rgb = Rgb { r: 0, g: 0, b: 0 };
 
 fn bind(r: &mut Registry, game: &str, event: &str, handlers: Value) {
-    bind_with(r, json!({ "game": game, "event": event, "handlers": handlers }));
+    bind_with(
+        r,
+        json!({ "game": game, "event": event, "handlers": handlers }),
+    );
 }
 
 fn bind_with(r: &mut Registry, v: Value) {
@@ -96,7 +99,12 @@ fn a_held_frame_stays_while_the_game_is_up_and_goes_with_it() {
 #[test]
 fn a_new_event_writes_over_the_frames_playing_and_the_same_value_does_not() {
     let mut r = Registry::default();
-    bind(&mut r, "G", "A", screened(json!([{ "has-text": true, "prefix": "A" }])));
+    bind(
+        &mut r,
+        "G",
+        "A",
+        screened(json!([{ "has-text": true, "prefix": "A" }])),
+    );
     bind(
         &mut r,
         "G",
@@ -132,11 +140,29 @@ fn custom_text_with_value_optional_shows_each_time_and_keeps_only_what_it_reads(
     assert_eq!(shown(&r, 0.1), Some(text_at(4, 8, "hello", 3)));
     let kept = r.games["G"].events["TEXT"].frame.clone().map(Value::Object);
     assert_eq!(kept, Some(json!({ "custom-text": "hello" })));
-    send(&mut r, "G", "TEXT", json!({ "frame": { "custom-text": "hello" } }), 1.0);
-    send(&mut r, "G", "TEXT", json!({ "frame": { "custom-text": "again" } }), 2.0);
+    send(
+        &mut r,
+        "G",
+        "TEXT",
+        json!({ "frame": { "custom-text": "hello" } }),
+        1.0,
+    );
+    send(
+        &mut r,
+        "G",
+        "TEXT",
+        json!({ "frame": { "custom-text": "again" } }),
+        2.0,
+    );
     assert_eq!(shown(&r, 2.1), Some(text_at(4, 8, "again", 3)));
     let long = "x".repeat(1000);
-    send(&mut r, "G", "TEXT", json!({ "frame": { "custom-text": long } }), 3.0);
+    send(
+        &mut r,
+        "G",
+        "TEXT",
+        json!({ "frame": { "custom-text": long } }),
+        3.0,
+    );
     let kept = &r.games["G"].events["TEXT"].frame.as_ref().unwrap()["custom-text"];
     assert_eq!(kept.as_str().unwrap().len(), screen::MAX_TEXT);
 }
@@ -152,12 +178,27 @@ fn an_events_own_picture_shows_in_a_picture_frame() {
     );
     let mut rows = vec![0u8; 640];
     rows[0] = 0x80;
-    send(&mut r, "G", "OLED", json!({ "frame": { "image-data-128x40": rows } }), 0.0);
+    send(
+        &mut r,
+        "G",
+        "OLED",
+        json!({ "frame": { "image-data-128x40": rows } }),
+        0.0,
+    );
     let mut want = Bitmap::default();
     want.set(0, 0, true);
     assert_eq!(shown(&r, 0.1), Some(want));
-    send(&mut r, "G", "OLED", json!({ "frame": { "image-data-128x40": [1, 2, 3] } }), 1.0);
-    assert!(shown(&r, 1.1).unwrap().is_dark(), "a picture of the wrong size isn't drawn");
+    send(
+        &mut r,
+        "G",
+        "OLED",
+        json!({ "frame": { "image-data-128x40": [1, 2, 3] } }),
+        1.0,
+    );
+    assert!(
+        shown(&r, 1.1).unwrap().is_dark(),
+        "a picture of the wrong size isn't drawn"
+    );
 }
 
 #[test]
@@ -188,12 +229,21 @@ fn only_the_active_game_shows_and_a_game_turned_off_shows_nothing() {
     let mut r = Registry::default();
     let held = screened(json!([{ "has-text": true }]));
     bind(&mut r, "G", "E", held.clone());
-    bind(&mut r, "H", "E", json!([{ "device-type": "keyboard", "zone": "w",
-        "color": { "red": 0, "green": 0, "blue": 255 } }]));
+    bind(
+        &mut r,
+        "H",
+        "E",
+        json!([{ "device-type": "keyboard", "zone": "w",
+        "color": { "red": 0, "green": 0, "blue": 255 } }]),
+    );
     send(&mut r, "G", "E", json!({ "value": 7 }), 0.0);
     assert!(r.screen(0.5).is_some());
     send(&mut r, "H", "E", json!({ "value": 1 }), 1.0);
-    assert_eq!(r.screen(1.5), None, "H is the game in front now, and shows nothing there");
+    assert_eq!(
+        r.screen(1.5),
+        None,
+        "H is the game in front now, and shows nothing there"
+    );
     r.remove_game("H").unwrap();
     assert!(r.screen(1.5).is_some(), "G again");
     r.set_enabled("G", false).unwrap();
@@ -242,10 +292,20 @@ fn a_bitmap_paints_every_key_from_its_grid() {
 /// The doc's example: a background over every key but AMMO's and HEALTH's.
 fn background_with_ammo_and_health() -> Registry {
     let mut r = Registry::default();
-    bind(&mut r, "G", "AMMO", json!([{ "device-type": "keyboard", "zone": "q-row",
-        "color": { "red": 0, "green": 0, "blue": 255 } }]));
-    bind(&mut r, "G", "HEALTH", json!([{ "device-type": "keyboard", "zone": "function-keys",
-        "color": { "red": 0, "green": 255, "blue": 0 } }]));
+    bind(
+        &mut r,
+        "G",
+        "AMMO",
+        json!([{ "device-type": "keyboard", "zone": "q-row",
+        "color": { "red": 0, "green": 0, "blue": 255 } }]),
+    );
+    bind(
+        &mut r,
+        "G",
+        "HEALTH",
+        json!([{ "device-type": "keyboard", "zone": "function-keys",
+        "color": { "red": 0, "green": 255, "blue": 0 } }]),
+    );
     bitmap_event(&mut r, "partial-bitmap", Some(json!(["AMMO", "HEALTH"])));
     send(&mut r, "G", "AMMO", json!({ "value": 30 }), 0.0);
     send(&mut r, "G", "HEALTH", json!({ "value": 90 }), 0.0);
@@ -256,9 +316,18 @@ fn background_with_ammo_and_health() -> Registry {
 fn a_partial_bitmap_leaves_the_excluded_events_keys_alone() {
     let mut r = background_with_ammo_and_health();
     let all_red = json!({ "bitmap": vec![json!([255, 0, 0]); bitmap::CELLS] });
-    send(&mut r, "G", "BITMAP_EVENT", json!({ "frame": all_red }), 1.0);
+    send(
+        &mut r,
+        "G",
+        "BITMAP_EVENT",
+        json!({ "frame": all_red }),
+        1.0,
+    );
     let layer = r.paint(1.1).unwrap();
-    assert_eq!(layer[&0x3A], GREEN, "F1 stays HEALTH's though the background came later");
+    assert_eq!(
+        layer[&0x3A], GREEN,
+        "F1 stays HEALTH's though the background came later"
+    );
     assert_eq!(layer[&0x14], BLUE, "Q stays AMMO's");
     assert_eq!(layer[&0x04], RED, "A is the background's");
     assert_eq!(layer[&0x29], RED, "so is Esc");
@@ -266,7 +335,13 @@ fn a_partial_bitmap_leaves_the_excluded_events_keys_alone() {
     // visible": the frame's excluded-events overrides the handler's.
     let health_only = json!({ "bitmap": vec![json!([255, 0, 0]); bitmap::CELLS],
         "excluded-events": ["HEALTH"] });
-    send(&mut r, "G", "BITMAP_EVENT", json!({ "frame": health_only }), 2.0);
+    send(
+        &mut r,
+        "G",
+        "BITMAP_EVENT",
+        json!({ "frame": health_only }),
+        2.0,
+    );
     let layer = r.paint(2.1).unwrap();
     assert_eq!((layer[&0x3A], layer[&0x14]), (GREEN, RED));
 }
@@ -275,15 +350,35 @@ fn a_partial_bitmap_leaves_the_excluded_events_keys_alone() {
 fn a_bitmap_composes_with_a_colour_handler_on_another_zone() {
     let mut r = Registry::default();
     bitmap_event(&mut r, "bitmap", None);
-    bind(&mut r, "G", "W", json!([{ "device-type": "keyboard", "zone": "w",
-        "color": { "red": 0, "green": 0, "blue": 255 } }]));
+    bind(
+        &mut r,
+        "G",
+        "W",
+        json!([{ "device-type": "keyboard", "zone": "w",
+        "color": { "red": 0, "green": 0, "blue": 255 } }]),
+    );
     let all_red = json!({ "bitmap": vec![json!([255, 0, 0]); bitmap::CELLS] });
-    send(&mut r, "G", "BITMAP_EVENT", json!({ "frame": all_red.clone() }), 0.0);
+    send(
+        &mut r,
+        "G",
+        "BITMAP_EVENT",
+        json!({ "frame": all_red.clone() }),
+        0.0,
+    );
     send(&mut r, "G", "W", json!({ "value": 1 }), 1.0);
     let layer = r.paint(1.1).unwrap();
-    assert_eq!(layer[&0x1A], BLUE, "W changed after the bitmap: it paints over it");
+    assert_eq!(
+        layer[&0x1A], BLUE,
+        "W changed after the bitmap: it paints over it"
+    );
     assert_eq!(layer[&0x16], RED, "S is the bitmap's");
-    send(&mut r, "G", "BITMAP_EVENT", json!({ "frame": all_red }), 2.0);
+    send(
+        &mut r,
+        "G",
+        "BITMAP_EVENT",
+        json!({ "frame": all_red }),
+        2.0,
+    );
     assert_eq!(
         r.paint(2.1).unwrap()[&0x1A],
         RED,
@@ -300,7 +395,12 @@ fn summaries_say_what_each_handler_draws_and_whether_the_game_is_on_the_screen()
         "KILLS",
         screened(json!([{ "has-text": true, "icon-id": 7, "length-millis": 500 }])),
     );
-    bind(&mut r, "G", "RUMBLE", json!([{ "device-type": "tactile", "zone": "one", "mode": "vibrate" }]));
+    bind(
+        &mut r,
+        "G",
+        "RUMBLE",
+        json!([{ "device-type": "tactile", "zone": "one", "mode": "vibrate" }]),
+    );
     let s = &r.summaries(0.5)[0];
     assert!(!s.on_screen);
     let draws: Vec<(&str, &Draws)> = s.handlers.iter().map(|(e, d)| (e.as_str(), d)).collect();
@@ -322,11 +422,19 @@ fn summaries_say_what_each_handler_draws_and_whether_the_game_is_on_the_screen()
     assert!(notes[0].contains("icon 7"));
     assert_eq!(
         draws[4],
-        ("RUMBLE", &Draws::Elsewhere { device: "tactile".into() })
+        (
+            "RUMBLE",
+            &Draws::Elsewhere {
+                device: "tactile".into()
+            }
+        )
     );
     send(&mut r, "G", "KILLS", json!({ "value": 3 }), 1.0);
     assert!(r.summaries(1.2)[0].on_screen);
     assert!(!r.summaries(1.6)[0].on_screen, "its frame is over");
     let back = Registry::restore(r.saved());
-    assert_eq!(back.summaries(0.0)[0].handlers, r.summaries(0.0)[0].handlers);
+    assert_eq!(
+        back.summaries(0.0)[0].handlers,
+        r.summaries(0.0)[0].handlers
+    );
 }

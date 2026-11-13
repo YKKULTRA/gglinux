@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 
 use gg_gamesense::prefixes::{self, Written};
 use gg_gamesense::{proto, Registry, SavedGame};
-use gg_ipc::{Event, GameInfo, GameSenseState};
+use gg_ipc::{Draws, Event, GameInfo, GameSenseState, HandlerInfo};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::keyboard::{self, Layer, Overlay};
+use crate::keyboard::{self, Layer, Overlaid, Overlay};
 
 const SCAN_EVERY: Duration = Duration::from_secs(1);
 /// Scans between re-reads of `libraryfolders.vdf` (30 s at one scan a second).
@@ -46,6 +46,8 @@ pub enum Command {
         reply: Reply<()>,
     },
     RunTest(Reply<()>),
+    /// The test game's short sequence on the keyboard's screen.
+    RunTestScreen(Reply<()>),
 }
 
 #[derive(Clone)]
@@ -171,7 +173,25 @@ impl Overlay for GameOverlay {
             .unwrap_or_else(|e| e.into_inner())
             .paint(self.clock.at(now))
     }
+
+    fn screen(&self, now: Instant) -> Option<Overlaid> {
+        let shown = self
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen(self.clock.at(now))?;
+        Some(Overlaid {
+            picture: shown.picture,
+            // A little after the change, so the loop that wakes finds it made.
+            until: shown
+                .next_change
+                .map(|s| now + Duration::from_secs_f64(s.clamp(0.0, 3600.0)) + CHANGE_SLACK),
+        })
+    }
 }
+
+/// How long after a screen frame's change the keyboard's loop wakes for it.
+const CHANGE_SLACK: Duration = Duration::from_millis(2);
 
 /// Bind on loopback: the saved port if it's free, else any free one.
 pub async fn bind_loopback(port: Option<u16>) -> std::io::Result<TcpListener> {
@@ -208,12 +228,7 @@ pub fn test_values() -> Vec<i64> {
 }
 
 fn define_test_game(r: &mut Registry) -> Result<(), String> {
-    r.game_metadata(proto::GameMetadata {
-        game: TEST_GAME.into(),
-        game_display_name: Some("gglinux test".into()),
-        developer: Some("gglinux".into()),
-        deinitialize_timer_length_ms: None,
-    })?;
+    test_game_metadata(r)?;
     r.bind_event(
         serde_json::from_value(serde_json::json!({
             "game": TEST_GAME, "event": "HEALTH", "min_value": 0, "max_value": 100,
@@ -222,9 +237,67 @@ fn define_test_game(r: &mut Registry) -> Result<(), String> {
                 "color": { "gradient": { "zero": { "red": 255, "green": 0, "blue": 0 },
                                          "hundred": { "red": 0, "green": 255, "blue": 0 } } },
                 "rate": { "frequency": [{ "low": 0, "high": 20, "frequency": 4 }] }
+            }, {
+                // The same health on the screen: a label with the value, and a bar.
+                "device-type": "screened", "zone": "one", "mode": "screen",
+                "datas": [{ "lines": [
+                    { "has-text": true, "prefix": "Health ", "bold": true },
+                    { "has-progress-bar": true }
+                ] }]
             }]
         }))
         .map_err(|e| e.to_string())?,
+    )
+}
+
+fn test_game_metadata(r: &mut Registry) -> Result<(), String> {
+    r.game_metadata(proto::GameMetadata {
+        game: TEST_GAME.into(),
+        game_display_name: Some("gglinux test".into()),
+        developer: Some("gglinux".into()),
+        deinitialize_timer_length_ms: None,
+    })
+}
+
+/// The test game's screen sequence: two lines of text, a bar at 60 %, then "60 %" big,
+/// 1.2 s each, after which the screen goes back to what it showed.
+fn define_test_screen(r: &mut Registry) -> Result<(), String> {
+    test_game_metadata(r)?;
+    r.bind_event(
+        serde_json::from_value(serde_json::json!({
+            "game": TEST_GAME, "event": "SCREEN", "value_optional": true,
+            "handlers": [{
+                "device-type": "screened", "zone": "one", "mode": "screen",
+                "datas": [
+                    { "lines": [
+                        { "arg": "", "prefix": "GameSense", "bold": true },
+                        { "arg": "", "prefix": "on the screen" }
+                    ], "length-millis": TEST_SCREEN_FRAME_MS },
+                    { "lines": [
+                        { "arg": "", "prefix": "Progress" },
+                        { "has-progress-bar": true }
+                    ], "length-millis": TEST_SCREEN_FRAME_MS },
+                    { "has-text": true, "suffix": " %", "length-millis": TEST_SCREEN_FRAME_MS }
+                ]
+            }]
+        }))
+        .map_err(|e| e.to_string())?,
+    )
+}
+
+const TEST_SCREEN_FRAME_MS: u64 = 1200;
+
+fn send_test_screen(r: &mut Registry, now: f64) -> Result<(), String> {
+    r.game_event(
+        proto::GameEvent {
+            game: TEST_GAME.into(),
+            event: "SCREEN".into(),
+            data: proto::EventData {
+                value: Some(60.0),
+                frame: None,
+            },
+        },
+        now,
     )
 }
 
@@ -252,8 +325,28 @@ fn game_infos(r: &Registry, now: f64) -> Vec<GameInfo> {
             enabled: s.enabled,
             active: s.active,
             events: s.events,
+            handlers: s
+                .handlers
+                .into_iter()
+                .map(|(event, d)| HandlerInfo {
+                    event,
+                    draws: draws(d),
+                })
+                .collect(),
+            on_screen: s.on_screen,
         })
         .collect()
+}
+
+fn draws(d: gg_gamesense::Draws) -> Draws {
+    use gg_gamesense::Draws as D;
+    match d {
+        D::Keys => Draws::Keys,
+        D::Screen { notes } => Draws::Screen { notes },
+        D::Bitmap => Draws::Bitmap,
+        D::PartialBitmap { excluded } => Draws::PartialBitmap { excluded },
+        D::Elsewhere { device } => Draws::Elsewhere { device },
+    }
 }
 
 struct Running {
@@ -369,6 +462,14 @@ impl Controller {
                 if result.is_ok() {
                     self.run_test();
                 }
+                self.after_edit(result, reply);
+            }
+            Command::RunTestScreen(reply) => {
+                let now = self.engine.clock.now();
+                let result = {
+                    let mut r = self.registry();
+                    define_test_screen(&mut r).and_then(|()| send_test_screen(&mut r, now))
+                };
                 self.after_edit(result, reply);
             }
         }
@@ -588,6 +689,7 @@ pub enum Change {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gg_device_keyboard::Bitmap;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gglinux-gs-{}-{name}", std::process::id()));
@@ -721,5 +823,130 @@ mod tests {
         assert_eq!(infos[0].name, "GGLINUX_TEST");
         assert_eq!(infos[0].display_name.as_deref(), Some("gglinux test"));
         assert_eq!(infos[0].events, vec!["HEALTH".to_string()]);
+    }
+
+    /// An overlay on a registry whose clock started at `start`: a made-up time line.
+    fn overlay_from(start: Instant) -> (Arc<Mutex<Registry>>, GameOverlay) {
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        let overlay = GameOverlay {
+            registry: Arc::clone(&registry),
+            clock: Clock(start),
+        };
+        (registry, overlay)
+    }
+
+    fn text(x: usize, y: usize, s: &str, scale: usize, bold: bool) -> Bitmap {
+        let mut b = Bitmap::default();
+        b.draw_text(x, y, s, scale);
+        if bold {
+            b.draw_text(x + 1, y, s, scale);
+        }
+        b
+    }
+
+    /// Whether rows `top..bottom` of two pictures are the same.
+    fn same_rows(a: &Bitmap, b: &Bitmap, top: usize, bottom: usize) -> bool {
+        (top..bottom).all(|y| (0..128).all(|x| a.get(x, y) == b.get(x, y)))
+    }
+
+    #[test]
+    fn the_test_game_shows_its_health_on_the_screen_while_the_keys_show_the_bar() {
+        let start = Instant::now();
+        let at = |s: f64| start + Duration::from_secs_f64(s);
+        let (registry, overlay) = overlay_from(start);
+        {
+            let mut r = registry.lock().unwrap();
+            define_test_game(&mut r).unwrap();
+            send_test_value(&mut r, 73, 0.0).unwrap();
+        }
+        let shown = overlay.screen(at(0.5)).unwrap();
+        // "Health 73" in bold over a bar: two rows from y 11, each 8 high, 2 apart.
+        let label = text(28, 11, "Health 73", 1, true);
+        assert!(
+            same_rows(&shown.picture, &label, 0, 20),
+            "{:?}",
+            shown.picture
+        );
+        // Inside the bar's outline 122 columns; 73 % fills 89 of them, from x 3.
+        assert!(shown.picture.get(91, 24) && !shown.picture.get(92, 24));
+        assert!(overlay.paint(at(0.5)).is_some(), "the keys too");
+        let until = shown.until.unwrap();
+        assert!(
+            until > at(14.9) && until < at(15.1),
+            "next change: the game going quiet"
+        );
+        registry.lock().unwrap().stop_game(TEST_GAME).unwrap();
+        assert_eq!(
+            overlay.screen(at(0.6)),
+            None,
+            "the test's end hands the screen back"
+        );
+    }
+
+    #[test]
+    fn the_screen_test_plays_three_frames_then_hands_the_screen_back() {
+        let start = Instant::now();
+        let at = |s: f64| start + Duration::from_secs_f64(s);
+        let (registry, overlay) = overlay_from(start);
+        {
+            let mut r = registry.lock().unwrap();
+            define_test_screen(&mut r).unwrap();
+            send_test_screen(&mut r, 1.0).unwrap();
+        }
+        let first = overlay.screen(at(1.5)).unwrap();
+        let mut want = text(28, 11, "GameSense", 1, true);
+        for y in 0..40 {
+            for x in 0..128 {
+                if text(12, 21, "on the screen", 1, false).get(x, y) {
+                    want.set(x, y, true);
+                }
+            }
+        }
+        assert_eq!(first.picture, want);
+        let until = first.until.unwrap();
+        assert!(
+            until > at(2.19) && until < at(2.21),
+            "the second frame at 2.2 s"
+        );
+        let bar = overlay.screen(at(2.7)).unwrap().picture;
+        assert!(same_rows(&bar, &text(32, 11, "Progress", 1, false), 0, 20));
+        assert!(
+            bar.get(75, 24) && !bar.get(76, 24),
+            "60 %: 73 columns filled"
+        );
+        assert_eq!(
+            overlay.screen(at(3.9)).unwrap().picture,
+            text(16, 8, "60 %", 3, false)
+        );
+        assert_eq!(
+            overlay.screen(at(4.7)),
+            None,
+            "3.6 s on: back to the user's screen"
+        );
+        assert!(overlay.paint(at(1.5)).is_none(), "and no key taken for it");
+    }
+
+    #[test]
+    fn game_infos_say_what_each_event_draws_and_whether_it_is_on_the_screen() {
+        let mut r = Registry::default();
+        define_test_game(&mut r).unwrap();
+        define_test_screen(&mut r).unwrap();
+        send_test_screen(&mut r, 0.0).unwrap();
+        let info = &game_infos(&r, 0.5)[0];
+        assert!(info.on_screen);
+        let screen = || Draws::Screen { notes: Vec::new() };
+        let handler = |event: &str, draws: Draws| HandlerInfo {
+            event: event.into(),
+            draws,
+        };
+        assert_eq!(
+            info.handlers,
+            vec![
+                handler("HEALTH", Draws::Keys),
+                handler("HEALTH", screen()),
+                handler("SCREEN", screen())
+            ]
+        );
+        assert!(!game_infos(&r, 4.0)[0].on_screen, "its frames are over");
     }
 }

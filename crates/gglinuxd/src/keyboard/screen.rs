@@ -25,11 +25,13 @@
 //! - [`sysmon::Monitor`], the System Monitor's readings, read and drawn once a second
 //!   (the graphics card's under the rule in [`gpu`]: a sleeping card is never woken).
 //!
-//! A new kind of screen is a new source. One fed from outside the worker (M12's
-//! GameSense screen handlers) needs a command that hands it in, and implements the same
-//! trait: `frame` gives the picture for a moment (cheaply: it's asked every loop, and an
-//! unchanged picture isn't sent again until the refresh), `next_due` says when it next
-//! changes by itself.
+//! A new kind of screen is a new source. Pictures fed from outside the worker go over the
+//! source instead: an overlay (a game's GameSense screen handler, [`Overlaid`]) hands the
+//! worker a picture each time its loop comes round ([`ScreenState::set_overlay`]), with
+//! when it next changes. While there is one it's what the screen shows, over any setting,
+//! the keyboard's own included; when it goes, the setting's picture comes back (or the
+//! screen is handed back to the keyboard). Screen care treats it as a picture of
+//! gglinux's: it moves, and it rests dark while nobody is there.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +45,8 @@ use crate::clock::is_older_than;
 
 mod anim;
 mod gpu;
+#[cfg(test)]
+mod overlay_tests;
 mod sysmon;
 
 /// How often an unchanged screen picture is sent again, in case the keyboard's own menus
@@ -50,6 +54,14 @@ mod sysmon;
 pub const SCREEN_REFRESH: Duration = Duration::from_secs(10);
 /// How long the picture stays put before it moves a pixel, with screen care's shift on.
 pub const SHIFT_EVERY: u64 = 120;
+
+/// A picture an overlay shows over the screen setting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Overlaid {
+    pub picture: Bitmap,
+    /// When it next changes by itself; `None` if only something from outside changes it.
+    pub until: Option<Instant>,
+}
 
 /// What one screen setting draws, picture by picture.
 pub trait ScreenSource: Send {
@@ -182,6 +194,8 @@ pub struct ScreenState {
     path: PathBuf,
     /// What draws the setting; `None` for the keyboard's own screen.
     source: Option<Box<dyn ScreenSource>>,
+    /// What an overlay shows over the setting this loop.
+    overlay: Option<Overlaid>,
     /// Whether gglinux has drawn on this keyboard's screen since it connected.
     taken: bool,
     /// The picture last sent, and when, so an unchanged one isn't sent every loop.
@@ -204,6 +218,7 @@ impl ScreenState {
         let setting: Screen = super::load(&path, "screen");
         ScreenState {
             source: source_for(&setting),
+            overlay: None,
             setting,
             path,
             taken: false,
@@ -242,18 +257,37 @@ impl ScreenState {
         changed
     }
 
-    /// How long the loop may sleep before the picture changes by itself. Resting, it
-    /// doesn't: the dark screen changes only with a command (somebody's back).
+    /// What an overlay shows over the setting now (a game's screen frame), or `None`.
+    pub fn set_overlay(&mut self, overlay: Option<Overlaid>) {
+        self.overlay = overlay;
+    }
+
+    /// Whether gglinux draws on the screen now: a picture of its own, or an overlay's.
+    pub fn draws(&self) -> bool {
+        self.overlay.is_some() || !matches!(self.setting, Screen::Keyboard)
+    }
+
+    /// Whether the keyboard's own screen shows now: no picture of gglinux's, no overlay.
+    fn own_screen(&self) -> bool {
+        !self.draws()
+    }
+
+    /// How long the loop may sleep before the picture changes by itself: an overlay's next
+    /// change while there is one (the setting's picture is hidden), else the source's.
+    /// Resting, it doesn't: the dark screen changes only with a command (somebody's back).
     pub fn wait(&self, connected: bool) -> Option<Duration> {
-        if !connected || resting(&self.setting, &self.care, self.away) {
+        if !connected || resting(self.own_screen(), &self.care, self.away) {
             return None;
         }
-        self.source.as_ref()?.next_due(&Now::current())
+        match &self.overlay {
+            Some(o) => o.until.map(|t| t.saturating_duration_since(Instant::now())),
+            None => self.source.as_ref()?.next_due(&Now::current()),
+        }
     }
 
     /// Draw the screen if its picture changed (or is due a refresh), or hand it back.
     pub fn render(&mut self, device: Option<&Keyboard>) {
-        self.resting = device.is_some() && resting(&self.setting, &self.care, self.away);
+        self.resting = device.is_some() && resting(self.own_screen(), &self.care, self.away);
         let Some(device) = device else {
             return;
         };
@@ -324,12 +358,16 @@ impl ScreenState {
     }
 
     /// What the screen should show at `now`, `None` for the keyboard's own: dark while
-    /// resting, otherwise the source's picture, moved as screen care says.
+    /// resting, otherwise an overlay's picture or else the source's, moved as screen care
+    /// says.
     fn frame(&mut self, now: &Now) -> Option<Bitmap> {
-        if resting(&self.setting, &self.care, self.away) {
+        if resting(self.own_screen(), &self.care, self.away) {
             return Some(Bitmap::default());
         }
-        let picture = self.source.as_mut()?.frame(now)?;
+        let picture = match &self.overlay {
+            Some(o) => o.picture.clone(),
+            None => self.source.as_mut()?.frame(now)?,
+        };
         Some(if self.care.shift {
             let (dx, dy) = shift_at(now.since_epoch.as_secs());
             picture.shifted(dx, dy)
@@ -372,10 +410,10 @@ fn clock_text(t: LocalTime, seconds: bool, h24: bool, date: bool) -> (String, Op
     (time, (!under.is_empty()).then(|| under.join(" ")))
 }
 
-/// Whether the screen rests dark now: nobody is there, and it's a picture of gglinux's,
-/// or the keyboard's own and care covers that too.
-fn resting(screen: &Screen, care: &ScreenCare, away: bool) -> bool {
-    away && care.dark_when_away && (care.own_screen_too || !matches!(screen, Screen::Keyboard))
+/// Whether the screen rests dark now: nobody is there, and it shows a picture of gglinux's
+/// (its own or a game's), or the keyboard's own screen and care covers that too.
+fn resting(own_screen: bool, care: &ScreenCare, away: bool) -> bool {
+    away && care.dark_when_away && (care.own_screen_too || !own_screen)
 }
 
 /// Where the picture sits at `unix_secs`, as an offset from where it's drawn: a 5 × 5
@@ -427,6 +465,7 @@ mod tests {
     fn bare(setting: Screen) -> ScreenState {
         ScreenState {
             source: source_for(&setting),
+            overlay: None,
             setting,
             path: PathBuf::new(),
             taken: false,
@@ -685,29 +724,26 @@ mod tests {
 
     #[test]
     fn the_screen_rests_only_while_away_and_the_keyboards_own_only_when_asked() {
-        let clock = Screen::Clock {
-            seconds: false,
-            h24: true,
-            date: false,
-        };
+        // `false`: a picture of gglinux's (a clock); `true`: the keyboard's own screen.
+        let (clock, keyboards) = (false, true);
         let care = ScreenCare::default();
-        assert!(resting(&clock, &care, true));
-        assert!(!resting(&clock, &care, false), "somebody's there");
+        assert!(resting(clock, &care, true));
+        assert!(!resting(clock, &care, false), "somebody's there");
         assert!(
-            !resting(&Screen::Keyboard, &care, true),
+            !resting(keyboards, &care, true),
             "the keyboard's own screen is left alone by default"
         );
         let own = ScreenCare {
             own_screen_too: true,
             ..care
         };
-        assert!(resting(&Screen::Keyboard, &own, true));
+        assert!(resting(keyboards, &own, true));
         let never = ScreenCare {
             dark_when_away: false,
             own_screen_too: true,
             ..care
         };
-        assert!(!resting(&clock, &never, true) && !resting(&Screen::Keyboard, &never, true));
+        assert!(!resting(clock, &never, true) && !resting(keyboards, &never, true));
     }
 
     #[test]

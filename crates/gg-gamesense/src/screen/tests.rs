@@ -72,7 +72,10 @@ fn prefix_and_suffix_go_round_the_value() {
     // "With an event data value of 15, the text "Got 15 kills" will be displayed"
     let s = screened(json!([{ "has-text": true, "prefix": "Got ", "suffix": " kills" }]));
     // Twelve characters: too wide at twice the size (192 px), so the font's own size.
-    assert_eq!(first_picture(&s, &valued(15)), text_at(16, 16, "Got 15 kills", 1));
+    assert_eq!(
+        first_picture(&s, &valued(15)),
+        text_at(16, 16, "Got 15 kills", 1)
+    );
 }
 
 #[test]
@@ -106,9 +109,15 @@ fn the_progress_bar_example_draws_a_label_over_a_bar() {
     }
     assert_eq!(first_picture(&s, &valued(60)), want);
     let empty = first_picture(&s, &valued(0));
-    assert!(!empty.get(3, 24) && empty.get(1, 24), "0 %: only the outline");
+    assert!(
+        !empty.get(3, 24) && empty.get(1, 24),
+        "0 %: only the outline"
+    );
     let full = first_picture(&s, &valued(100));
-    assert!(full.get(3, 24) && full.get(124, 24) && !full.get(125, 24), "100 %: all 122");
+    assert!(
+        full.get(3, 24) && full.get(124, 24) && !full.get(125, 24),
+        "100 %: all 122"
+    );
 }
 
 #[test]
@@ -162,7 +171,10 @@ fn an_icon_takes_the_left_32_columns_and_is_noted() {
     let s = screened(json!([{ "has-text": true, "suffix": "stuff", "icon-id": 16 }]));
     // "15stuff": 7 characters in the 96 columns right of the icon; twice the size is 112, too
     // wide, so the font's size, centred in those columns.
-    assert_eq!(first_picture(&s, &valued(15)), text_at(52, 16, "15stuff", 1));
+    assert_eq!(
+        first_picture(&s, &valued(15)),
+        text_at(52, 16, "15stuff", 1)
+    );
     assert_eq!(s.notes.len(), 1);
     assert!(s.notes[0].contains("icon 16"), "{:?}", s.notes);
 }
@@ -173,8 +185,10 @@ fn a_raw_picture_is_drawn_most_significant_bit_first() {
     rows[0] = 240; // "0b11110000, or 240, is four white pixels followed by four black pixels"
     rows[16] = 0x01; // row 1, column 7
     rows[IMAGE_BYTES - 1] = 0x01; // the bottom-right pixel
-    let s = spec(json!({ "device-type": "screened-128x40", "zone": "one", "mode": "screen",
-        "datas": [{ "has-text": false, "image-data": rows }] }));
+    let s = spec(
+        json!({ "device-type": "screened-128x40", "zone": "one", "mode": "screen",
+        "datas": [{ "has-text": false, "image-data": rows }] }),
+    );
     assert!(s.exact && s.has_image());
     let mut want = Bitmap::default();
     for x in 0..4 {
@@ -187,8 +201,10 @@ fn a_raw_picture_is_drawn_most_significant_bit_first() {
 
 #[test]
 fn an_events_own_picture_replaces_the_handlers() {
-    let s = spec(json!({ "device-type": "screened-128x40", "zone": "one", "mode": "screen",
-        "datas": [{ "has-text": false, "image-data": vec![0xFFu8; IMAGE_BYTES] }] }));
+    let s = spec(
+        json!({ "device-type": "screened-128x40", "zone": "one", "mode": "screen",
+        "datas": [{ "has-text": false, "image-data": vec![0xFFu8; IMAGE_BYTES] }] }),
+    );
     let mut own = vec![0u8; IMAGE_BYTES];
     own[0] = 0x80;
     let data = Data {
@@ -210,7 +226,10 @@ fn the_docs_128x36_picture_is_for_another_screen() {
     // The doc's own example targets `screened-128x36`, 576 bytes.
     let other = json!({ "device-type": "screened-128x36", "mode": "screen",
         "datas": [{ "has-text": false, "image-data": vec![0u8; 576] }] });
-    assert_eq!(ScreenSpec::parse("screened-128x36", other.as_object().unwrap()), Ok(None));
+    assert_eq!(
+        ScreenSpec::parse("screened-128x36", other.as_object().unwrap()),
+        Ok(None)
+    );
     // Sent to any screen, it can't be drawn here: dark, with a note.
     let any = screened(json!([{ "has-text": false, "image-data": vec![0u8; 576] }]));
     assert!(first_picture(&any, &valued(1)).is_dark());
@@ -244,7 +263,11 @@ fn a_timed_frame_shows_for_its_length_then_the_screen_goes_back() {
     assert_eq!(frame, 0);
     assert!((left.unwrap() - 0.05).abs() < 0.002, "{left:?}");
     assert_eq!(sh.at(10.25), None);
-    assert_eq!(sh.at(9.0), Some((0, Some(0.25))), "a clock read just before the start");
+    assert_eq!(
+        sh.at(9.0),
+        Some((0, Some(0.25))),
+        "a clock read just before the start"
+    );
 }
 
 #[test]
@@ -277,7 +300,10 @@ fn repeats_on_the_last_frame_loops_the_frames() {
         [Some(0), Some(1), Some(0), Some(1)]
     );
     assert_eq!(frame(1000.05), Some(0));
-    assert_eq!(sh.at(10.5).unwrap().1.map(|s| (s * 1000.0).round()), Some(100.0));
+    assert_eq!(
+        sh.at(10.5).unwrap().1.map(|s| (s * 1000.0).round()),
+        Some(100.0)
+    );
 }
 
 #[test]
@@ -292,7 +318,11 @@ fn repeats_counts_plays_ignores_other_frames_and_0_means_forever() {
     assert_eq!(twice.at(10.7).map(|a| a.0), Some(1), "second play");
     assert_eq!(twice.at(10.8), None, "played twice");
     let once = show(&frames(json!(false)), 1);
-    assert_eq!(once.at(10.45), None, "the first frame's repeats doesn't count");
+    assert_eq!(
+        once.at(10.45),
+        None,
+        "the first frame's repeats doesn't count"
+    );
     let forever = show(&frames(json!(0)), 1);
     assert_eq!(forever.at(99.9).map(|a| a.0), Some(1));
 }
@@ -331,7 +361,9 @@ fn an_arg_beyond_the_docs_forms_shows_no_value_and_is_noted() {
 #[test]
 fn five_rows_fill_the_screen_with_no_gaps_and_more_are_cut() {
     let line = |t: &str| json!({ "has-text": true, "arg": "", "prefix": t });
-    let s = screened(json!([{ "lines": [line("1"), line("2"), line("3"), line("4"), line("5"), line("6")] }]));
+    let s = screened(
+        json!([{ "lines": [line("1"), line("2"), line("3"), line("4"), line("5"), line("6")] }]),
+    );
     let mut want = Bitmap::default();
     for (i, t) in ["1", "2", "3", "4", "5"].iter().enumerate() {
         want = both(&want, &text_at(60, i * 8, t, 1));

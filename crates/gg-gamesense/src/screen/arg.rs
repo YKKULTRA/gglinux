@@ -65,9 +65,7 @@ pub fn eval(e: &Expr, this: &Value) -> Option<Value> {
                 }
             }
         }
-        Expr::Upcase(of) => Some(Value::String(
-            eval(of, this)?.as_str()?.to_uppercase(),
-        )),
+        Expr::Upcase(of) => Some(Value::String(eval(of, this)?.as_str()?.to_uppercase())),
         Expr::Int(n) => Some(json!(n)),
         Expr::Float(f) => Some(json!(f)),
         Expr::Str(s) => Some(Value::String(s.clone())),
@@ -158,11 +156,12 @@ fn expr(tokens: &[Token], at: &mut usize) -> Option<Expr> {
     match token {
         Token::Str(s) => Some(Expr::Str(s.clone())),
         Token::Atom(a) if a == "self" => Some(Expr::This),
-        Token::Atom(a) => a
-            .parse::<i64>()
-            .map(Expr::Int)
-            .ok()
-            .or_else(|| a.parse::<f64>().ok().filter(|f| f.is_finite()).map(Expr::Float)),
+        Token::Atom(a) => a.parse::<i64>().map(Expr::Int).ok().or_else(|| {
+            a.parse::<f64>()
+                .ok()
+                .filter(|f| f.is_finite())
+                .map(Expr::Float)
+        }),
         Token::Close => None,
         Token::Open => {
             let Token::Atom(head) = tokens.get(*at)? else {
@@ -178,10 +177,9 @@ fn expr(tokens: &[Token], at: &mut usize) -> Option<Expr> {
             let e = match (head.as_str(), args.len()) {
                 ("/", 2) => Expr::Div(Box::new(args.next()?), Box::new(args.next()?)),
                 ("string-upcase", 1) => Expr::Upcase(Box::new(args.next()?)),
-                (key, 1) if key.len() > 1 && key.ends_with(':') => Expr::Get(
-                    key.trim_end_matches(':').to_owned(),
-                    Box::new(args.next()?),
-                ),
+                (key, 1) if key.len() > 1 && key.ends_with(':') => {
+                    Expr::Get(key.trim_end_matches(':').to_owned(), Box::new(args.next()?))
+                }
                 _ => return None,
             };
             Some(e)
@@ -205,9 +203,18 @@ mod tests {
 
     #[test]
     fn the_docs_accessor_examples_give_the_docs_values() {
-        assert_eq!(run("(textvalue: (context-frame: self))"), Some(json!("this is some text")));
-        assert_eq!(run("(numericalvalue: (context-frame: self))"), Some(json!(88)));
-        assert_eq!(run("(/ (numericalvalue: (context-frame: self)) 44)"), Some(json!(2)));
+        assert_eq!(
+            run("(textvalue: (context-frame: self))"),
+            Some(json!("this is some text"))
+        );
+        assert_eq!(
+            run("(numericalvalue: (context-frame: self))"),
+            Some(json!(88))
+        );
+        assert_eq!(
+            run("(/ (numericalvalue: (context-frame: self)) 44)"),
+            Some(json!(2))
+        );
         assert_eq!(
             run("(string-upcase (textvalue: (context-frame: self)))"),
             Some(json!("THIS IS SOME TEXT"))

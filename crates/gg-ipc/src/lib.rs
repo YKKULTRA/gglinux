@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 mod actions;
 mod bindings;
 mod experimental;
+mod gamesense;
 mod macros;
 pub mod mouse_keys;
 mod onboard;
@@ -17,6 +18,7 @@ mod onboard;
 pub use actions::{validate as validate_actions, Action, ActionBinding, ActionsState};
 pub use bindings::{Bindings, BindingsState, KeyAction, KeyBinding, Layer};
 pub use experimental::{Experimental, Feature};
+pub use gamesense::{Draws, HandlerInfo};
 pub use macros::{Macro, MacroBinding, MacroEvent, MacroLibrary, MacroMode, MacrosState};
 pub use onboard::{check_slot, OnboardSlot, OnboardSource, OnboardState, SLOTS as ONBOARD_SLOTS};
 
@@ -1239,6 +1241,13 @@ pub struct GameInfo {
     /// Heard from within its timeout, so drawing now.
     pub active: bool,
     pub events: Vec<String>,
+    /// What each event's handlers draw on, a handler each, in event order.
+    #[serde(default)]
+    pub handlers: Vec<HandlerInfo>,
+    /// Showing on the keyboard's screen right now, over the screen gglinux or the
+    /// keyboard shows otherwise.
+    #[serde(default)]
+    pub on_screen: bool,
 }
 
 /// The GameSense server as the daemon runs it.
@@ -1537,6 +1546,8 @@ pub enum Request {
     },
     /// Play the built-in test game: an F-key health bar.
     GamesenseTest,
+    /// Show the built-in test game's short sequence on the keyboard's screen.
+    GamesenseTestScreen,
     GetProfiles,
     /// Save the current lighting under this name.
     SaveProfile {
@@ -1674,7 +1685,8 @@ impl Request {
             | R::SetGamesenseEnabled { .. }
             | R::SetGameEnabled { .. }
             | R::RemoveGame { .. }
-            | R::GamesenseTest => Part::Gamesense,
+            | R::GamesenseTest
+            | R::GamesenseTestScreen => Part::Gamesense,
             R::GetProfiles
             | R::SaveProfile { .. }
             | R::ApplyProfile { .. }
@@ -2585,6 +2597,10 @@ mod tests {
                 r#"{"id":5,"req":{"method":"gamesense_test"}}"#,
                 "GamesenseTest",
             ),
+            (
+                r#"{"id":6,"req":{"method":"gamesense_test_screen"}}"#,
+                "GamesenseTestScreen",
+            ),
         ] {
             let req = serde_json::from_str::<RequestFrame>(line).unwrap().req;
             assert!(
@@ -2592,6 +2608,7 @@ mod tests {
                 "{line} parsed as {req:?}"
             );
         }
+        assert_eq!(Request::GamesenseTestScreen.part(), Some(Part::Gamesense));
         let state = GameSenseState {
             enabled: true,
             address: Some("127.0.0.1:5000".into()),
@@ -2603,6 +2620,13 @@ mod tests {
                 enabled: true,
                 active: false,
                 events: vec!["E".into()],
+                handlers: vec![HandlerInfo {
+                    event: "E".into(),
+                    draws: Draws::PartialBitmap {
+                        excluded: vec!["AMMO".into()],
+                    },
+                }],
+                on_screen: true,
             }],
         };
         let v = serde_json::to_value(Event::GamesenseChanged {
@@ -2611,6 +2635,17 @@ mod tests {
         .unwrap();
         assert_eq!(v["event"], "gamesense_changed");
         assert_eq!(v["data"]["state"]["prefixes"], 17);
+        assert_eq!(
+            v["data"]["state"]["games"][0]["handlers"][0],
+            serde_json::json!({ "event": "E", "draws": { "on": "partial_bitmap", "excluded": ["AMMO"] } })
+        );
+        assert_eq!(v["data"]["state"]["games"][0]["on_screen"], true);
+        // A daemon from before screens and bitmaps sends neither field.
+        let old: GameInfo = serde_json::from_str(
+            r#"{"name":"G","display_name":null,"developer":null,"enabled":true,"active":false,"events":[]}"#,
+        )
+        .unwrap();
+        assert!(old.handlers.is_empty() && !old.on_screen);
         let r = serde_json::to_value(ResponseData::Gamesense { state }).unwrap();
         assert_eq!(r["type"], "gamesense");
         assert_eq!(

@@ -406,16 +406,22 @@ mod tests {
     #[test]
     fn screen_handlers_for_this_screen_are_parsed() {
         for device in ["screened", "screened-128x40"] {
-            let h = Handler::parse(&json!({ "device-type": device, "zone": "one", "mode": "screen",
-                "datas": [{ "has-text": true }] }))
+            let h = Handler::parse(
+                &json!({ "device-type": device, "zone": "one", "mode": "screen",
+                "datas": [{ "has-text": true }] }),
+            )
             .unwrap();
             let Target::Screen(spec) = h.target else {
                 panic!("{device}: {:?}", h.target)
             };
             assert_eq!(spec.exact, device == "screened-128x40");
         }
-        let empty = json!({ "device-type": "screened", "zone": "one", "mode": "screen", "datas": [] });
-        assert!(Handler::parse(&empty).is_err(), "a screen handler with no frames");
+        let empty =
+            json!({ "device-type": "screened", "zone": "one", "mode": "screen", "datas": [] });
+        assert!(
+            Handler::parse(&empty).is_err(),
+            "a screen handler with no frames"
+        );
     }
 
     #[test]
@@ -429,7 +435,9 @@ mod tests {
             partial.unwrap().target,
             Target::Bitmap(Some(vec!["AMMO".into(), "HEALTH".into()]))
         );
-        let none = Handler::parse(&json!({ "device-type": "rgb-per-key-zones", "mode": "partial-bitmap" }));
+        let none = Handler::parse(
+            &json!({ "device-type": "rgb-per-key-zones", "mode": "partial-bitmap" }),
+        );
         assert_eq!(none.unwrap().target, Target::Bitmap(Some(Vec::new())));
         let bad = json!({ "device-type": "rgb-per-key-zones", "mode": "partial-bitmap", "excluded-events": "AMMO" });
         assert!(Handler::parse(&bad).is_err());
