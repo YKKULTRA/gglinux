@@ -105,11 +105,10 @@ pub fn on_command(
     exp: &Experimental,
     event_tx: &broadcast::Sender<Event>,
     active: Option<u8>,
-) -> bool {
+) {
     match cmd {
         Cmd::Get(reply) => {
             let _ = reply.send(Ok(store.state.clone()));
-            false
         }
         Cmd::Set { library, reply } => {
             let answer = set(store, exp, library).map(|()| {
@@ -117,7 +116,6 @@ pub fn on_command(
                 store.state.clone()
             });
             let _ = reply.send(answer);
-            false
         }
         Cmd::Write {
             slot,
@@ -127,7 +125,6 @@ pub fn on_command(
             let answer = ready(exp, device).and_then(|kb| write(store, kb, slot, active, event_tx));
             drop(running);
             let _ = reply.send(answer);
-            false
         }
     }
 }

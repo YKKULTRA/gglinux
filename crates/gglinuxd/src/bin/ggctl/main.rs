@@ -40,7 +40,7 @@ ggctl mouse dpi 800,1600 [--select N] [--save]   # N counts from 0
 ggctl mouse dpi 400:800,1600:1600       # per-axis X:Y
 ggctl mouse polling 1000 [--save]
 ggctl mouse buttons button1,button2,button3,button4,button5,dpi[,up,down] [--save]
-ggctl mouse wheel button4 scrolldown [--save]   # wheel up, down: scrollup, scrolldown or button4 (needs mouse_wheel)
+ggctl mouse wheel a scrolldown [--save]   # wheel up: any button action; down: scrolldown or button4 (needs mouse_wheel)
 ggctl mouse save                        # commit whatever is applied to onboard memory
 ggctl mouse sleep 20                    # sleep timer, 1 to 20 min; saved (needs mouse_power)
 ggctl mouse radio normal|stable|efficient [--save]   # Wireless Stability, High-Efficiency Mode
@@ -94,7 +94,7 @@ ggctl macro                             # keyboard macros, the keys that play th
 ggctl macro set NAME a ctrl+c wait:100  # steps: keys, ctrl+c, down:shift, up:shift, wait:MS, click:1,
                                         #   'text:\"hello\"' (US layout); saved, nothing sent yet
 ggctl macro rm NAME
-ggctl macro bind KEY NAME [hold]        # KEY plays it once per press, or again and again while held
+ggctl macro bind KEY NAME [once|hold|times N|toggle] [delay MS]   # how KEY plays it; MS between plays (times, toggle)
 ggctl macro unbind KEY                  #   (two keys at most, for now)
 ggctl macro write N                     # write them into slot N; backs the slot up first (needs
                                         #   keyboard_macros and keyboard_onboard)

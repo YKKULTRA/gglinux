@@ -334,10 +334,10 @@ mod tests {
             waits[1..].iter().all(|&w| about(w, COMMAND_PACE)),
             "{waits:?}"
         );
-        // An action no capture shows sends nothing at all.
+        // An action no capture shows in its position sends nothing at all.
         fake.clear_sent();
         assert!(mouse
-            .set_wheel(ButtonAction::DpiCycle, ButtonAction::ScrollDown)
+            .set_wheel(ButtonAction::ScrollDown, ButtonAction::DpiCycle)
             .is_err());
         assert!(fake.sent().is_empty());
     }

@@ -876,9 +876,8 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             event_tx,
         ),
         Command::Macros(cmd) => {
-            // The slot the keyboard runs, as the onboard slots know it: a write into it
-            // loads it again, and then the bindings and switches hear what a load tells
-            // them.
+            // The slot the keyboard runs, as the onboard slots know it: named in a write's
+            // note. A write never loads the slot (review R2 K1).
             let (tx, mut rx) = oneshot::channel();
             let get = onboard::Cmd::Get(tx);
             onboard::on_command(get, &mut state.onboard, None, &state.experimental, event_tx);
@@ -889,10 +888,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 .and_then(|s| s.active);
             let device = state.device.as_ref();
             let exp = &state.experimental;
-            if macros::on_command(cmd, &mut state.macros, device, exp, event_tx, active) {
-                bindings::on_slot_loaded(&mut state.bindings, event_tx);
-                state.switches.forget();
-            }
+            macros::on_command(cmd, &mut state.macros, device, exp, event_tx, active);
         }
         Command::SetExperimental(experimental) => {
             state.experimental = experimental;

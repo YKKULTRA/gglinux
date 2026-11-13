@@ -138,8 +138,9 @@ pub const MEDIA: &[(&str, &str)] = &[
     ("volumedown", "Volume down"),
 ];
 
-/// `(name the daemon takes, label to show)` for the scroll wheel: only the actions a capture
-/// of GG shows on it (`gg_device_mouse::proto::WHEEL_ACTIONS`), in picker order.
+/// Unused since c1: the wheel turned up takes every button name, turned down only
+/// "scrolldown" and "button4" (`gg_device_mouse::proto::wheel_takes`).
+#[allow(dead_code)]
 pub const WHEEL: &[(&str, &str)] = &[
     ("scrollup", "Scroll up"),
     ("scrolldown", "Scroll down"),
