@@ -75,6 +75,11 @@ to queries are 64-byte input reports, first byte at index 0.
 | Read DPI stages | `AC` → `<count> <current> <X×5> <Y×5>` | the layout of `2C`. **Built (gated `mouse_power`).** |
 | Read polling rate | `97` → `<code>` | the codes of `17`. **Built (gated `mouse_power`).** |
 
+**Pacing (found on hardware, 2026-11-13):** a command sent straight after another makes the mouse drop
+the first. A setting followed at once by the save `09` was lost every time (DPI, polling rate and the sleep
+timer alike; the mouse kept reporting its old value), 5 ms apart it was kept. GG leaves 30–40 ms between
+its commands; gglinux now keeps 35 ms (`COMMAND_PACE`). `2B` on its own takes effect at once, without `09`.
+
 A mouse that isn't answering reads as all zeros, which would decode as 1000 Hz (`97` → `00`) and
 High-Efficiency Mode (`AE` → `00 00`). gglinux believes those two only next to an `AC` answer with a
 stage count of 1 to 5, which zeros can't be.

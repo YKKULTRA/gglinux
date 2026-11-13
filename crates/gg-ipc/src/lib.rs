@@ -1268,9 +1268,9 @@ pub enum Request {
     },
     /// Commit current settings to the mouse's onboard memory.
     SaveMouse,
-    /// Set the sleep timer ([`MOUSE_SLEEP_MINUTES`]) and save. The mouse takes the timer with
-    /// a save, as GG sends it, so this also commits the other settings it's running to its
-    /// onboard memory. Needs [`Feature::MousePower`].
+    /// Set the sleep timer ([`MOUSE_SLEEP_MINUTES`]) and save it, as GG does: unsaved, the
+    /// mouse would forget it when it next sleeps. The save also commits the other settings
+    /// the mouse is running to its onboard memory. Needs [`Feature::MousePower`].
     SetMouseSleep {
         minutes: u8,
     },

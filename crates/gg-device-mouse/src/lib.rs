@@ -14,6 +14,9 @@
 //! # Ok(()) }
 //! ```
 
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, Context, Result};
 use hidapi::{HidApi, HidDevice};
 use tracing::debug;
@@ -40,9 +43,24 @@ const READ_TIMEOUT_MS: i32 = 300;
 /// Upper bound on reports discarded by [`Mouse::drain`] in one go.
 const MAX_DRAIN_REPORTS: usize = 16;
 
+/// The least time between two commands. A command sent straight after another makes the
+/// mouse drop the first: on the owner's mouse (2026-11-13) a setting followed at once by
+/// the save (`09`) was lost every time, while 5 ms apart it was kept. GG 123 leaves 30 to
+/// 40 ms between its commands, and so do we.
+pub const COMMAND_PACE: Duration = Duration::from_millis(35);
+
+/// How long to wait before the next command, the last one having gone out at `last`.
+fn pace(last: Option<Instant>, now: Instant) -> Duration {
+    last.map_or(Duration::ZERO, |last| {
+        COMMAND_PACE.saturating_sub(now.saturating_duration_since(last))
+    })
+}
+
 /// An open handle to the mouse's control interface.
 pub struct Mouse {
     device: HidDevice,
+    /// When the last command went out, to keep [`COMMAND_PACE`].
+    last_command: Cell<Option<Instant>>,
 }
 
 impl Mouse {
@@ -71,7 +89,10 @@ impl Mouse {
             )
         })?;
         debug!(path = %path.to_string_lossy(), "opened mouse control interface");
-        Ok(Self { device })
+        Ok(Self {
+            device,
+            last_command: Cell::new(None),
+        })
     }
 
     /// Send one vendor command.
@@ -89,9 +110,10 @@ impl Mouse {
         );
         let mut buf = [0u8; 1 + REPORT_SIZE];
         buf[1..=payload.len()].copy_from_slice(payload);
-        self.device
-            .write(&buf)
-            .with_context(|| format!("writing command 0x{:02X}", payload[0]))?;
+        std::thread::sleep(pace(self.last_command.get(), Instant::now()));
+        let sent = self.device.write(&buf);
+        self.last_command.set(Some(Instant::now()));
+        sent.with_context(|| format!("writing command 0x{:02X}", payload[0]))?;
         Ok(())
     }
 
@@ -200,9 +222,10 @@ impl Mouse {
             .and_then(|data| proto::decode_sleep_timer(&data)))
     }
 
-    /// Set the sleep timer and save, as GG does: it sends the timer only when saving, so
-    /// whether the mouse takes it without the save is unknown. The save also commits the
-    /// other settings the mouse is running to its onboard memory.
+    /// Set the sleep timer and save, as GG does. The mouse takes the timer at once (seen on
+    /// the owner's mouse), but like every setting it would lose it when it next sleeps,
+    /// which a sleep timer mustn't; so it's saved, and the save also commits the other
+    /// settings the mouse is running to its onboard memory.
     pub fn set_sleep_timer(&self, minutes: u8) -> Result<()> {
         let packet = proto::sleep_timer_packet(minutes)?;
         debug!(minutes, "setting the sleep timer");
@@ -225,4 +248,27 @@ pub fn is_connected(api: &HidApi) -> bool {
             && d.product_id() == PRODUCT_ID
             && d.interface_number() == CONTROL_INTERFACE
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A setting and its save 0 ms apart lost the setting on the owner's mouse; 5 ms apart
+    /// kept it. Commands keep GG's distance.
+    #[test]
+    fn commands_keep_their_distance() {
+        let now = Instant::now();
+        assert_eq!(pace(None, now), Duration::ZERO, "the first goes at once");
+        assert_eq!(
+            pace(Some(now), now),
+            COMMAND_PACE,
+            "straight after: the whole pace"
+        );
+        let ten_ms_ago = now.checked_sub(Duration::from_millis(10)).unwrap();
+        assert_eq!(pace(Some(ten_ms_ago), now), Duration::from_millis(25));
+        let long_ago = now.checked_sub(Duration::from_secs(1)).unwrap();
+        assert_eq!(pace(Some(long_ago), now), Duration::ZERO);
+        assert!(COMMAND_PACE >= Duration::from_millis(30), "GG's own pacing");
+    }
 }
