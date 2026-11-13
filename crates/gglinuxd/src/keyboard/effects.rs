@@ -2,14 +2,17 @@
 //! Key colours for each lighting effect at a moment in time.
 //!
 //! Pure, so every effect is tested without the keyboard; the worker asks for
-//! one frame at a time and sends it.
+//! one frame at a time and sends it. The zone stack under the presses is drawn by
+//! [`super::zones`], with the effects here.
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 use gg_device_keyboard::layout::{Key, WIDTH};
 use gg_device_keyboard::Rgb;
-use gg_ipc::{Effect, Lighting, Reactive, ReactiveMode};
+use gg_ipc::{Lighting, Reactive, ReactiveMode};
+
+use super::zones::{Inputs, Scene};
 
 /// How fast a ripple's ring spreads, in key units per second.
 pub const RIPPLE_SPEED: f32 = 20.0;
@@ -60,26 +63,31 @@ pub fn color(
     hits: &[Hit],
     bands: &[f32],
 ) -> Rgb {
-    let base = match lighting.effect {
-        Effect::Static => lighting
-            .keys
-            .iter()
-            .find(|k| k.code == code)
-            .map(|k| rgb(k.color))
-            .unwrap_or_default(),
-        Effect::Breathing { color, period_s } => {
-            scale(rgb(color), (1.0 - (TAU * cycle(t, period_s)).cos()) / 2.0)
-        }
-        Effect::Wave { period_s } => {
-            let x = positions.get(&code).map_or(0.0, |p| p.x / WIDTH);
-            hsv(x - cycle(t, period_s))
-        }
-        Effect::Spectrum { period_s } => hsv(cycle(t, period_s)),
-        Effect::Visualizer { sensitivity } => visualizer(positions.get(&code), bands, sensitivity),
+    let stack = lighting.stack();
+    let scene = Scene::new(&stack, &lighting.keys, positions);
+    let screen = HashMap::new();
+    let inputs = Inputs {
+        t,
+        hits,
+        bands,
+        screen: &screen,
     };
+    frame_color(lighting, &scene, positions, code, &inputs)
+}
+
+/// The colour of the LED with HID code `code` in a frame: the scene's (the zone
+/// stack drawn now), the reactive presses over it, then the brightness.
+pub fn frame_color(
+    lighting: &Lighting,
+    scene: &Scene,
+    positions: &HashMap<u8, Pos>,
+    code: u8,
+    inputs: &Inputs,
+) -> Rgb {
+    let base = scene.color(code, inputs);
     let r = &lighting.reactive;
     let w = if r.enabled {
-        reactive_weight(r, positions, code, t, hits)
+        reactive_weight(r, positions, code, inputs.t, inputs.hits)
     } else {
         0.0
     };
@@ -87,6 +95,11 @@ pub fn color(
         mix(base, rgb(r.color), w),
         f32::from(lighting.brightness) / 100.0,
     )
+}
+
+/// `color` breathing: dark at the start of each period, full halfway through.
+pub(super) fn breathe(color: gg_ipc::Rgb, t: f64, period_s: f32) -> Rgb {
+    scale(rgb(color), (1.0 - (TAU * cycle(t, period_s)).cos()) / 2.0)
 }
 
 /// How strongly key `code` shows the reactive colour at `t`: the strongest
@@ -130,11 +143,6 @@ pub fn reactive_weight(
         .fold(0.0, f32::max)
 }
 
-/// Whether the effect needs a stream of frames, or one holds.
-pub fn animated(effect: &Effect) -> bool {
-    !matches!(effect, Effect::Static)
-}
-
 /// An overlay's colour at the lighting's brightness.
 pub fn dim(c: Rgb, brightness: u8) -> Rgb {
     scale(c, f32::from(brightness) / 100.0)
@@ -160,7 +168,7 @@ pub fn hsv(hue: f32) -> Rgb {
     }
 }
 
-fn rgb(c: gg_ipc::Rgb) -> Rgb {
+pub(super) fn rgb(c: gg_ipc::Rgb) -> Rgb {
     Rgb {
         r: c.r,
         g: c.g,
@@ -172,7 +180,7 @@ fn rgb(c: gg_ipc::Rgb) -> Rgb {
 const ROWS: f32 = 6.0;
 
 /// A key's colour in the visualizer: lit if its column's bar reaches its row.
-fn visualizer(pos: Option<&Pos>, bands: &[f32], sensitivity: f32) -> Rgb {
+pub(super) fn visualizer(pos: Option<&Pos>, bands: &[f32], sensitivity: f32) -> Rgb {
     let (Some(p), false) = (pos, bands.is_empty()) else {
         return Rgb::default();
     };
@@ -187,12 +195,12 @@ fn visualizer(pos: Option<&Pos>, bands: &[f32], sensitivity: f32) -> Rgb {
 }
 
 /// How far through its current period an effect is at `t`, 0..1.
-fn cycle(t: f64, period_s: f32) -> f32 {
+pub(super) fn cycle(t: f64, period_s: f32) -> f32 {
     (t / f64::from(period_s)).fract() as f32
 }
 
 /// `a` moved toward `b` by `w` (0..=1).
-fn mix(a: Rgb, b: Rgb, w: f32) -> Rgb {
+pub(super) fn mix(a: Rgb, b: Rgb, w: f32) -> Rgb {
     let w = w.clamp(0.0, 1.0);
     let f = |x: u8, y: u8| (f32::from(x) * (1.0 - w) + f32::from(y) * w).round() as u8;
     Rgb {
@@ -216,7 +224,7 @@ fn scale(c: Rgb, k: f32) -> Rgb {
 mod tests {
     use super::*;
     use gg_device_keyboard::layout::US;
-    use gg_ipc::{KeyColor, Reactive, ReactiveMode};
+    use gg_ipc::{Effect, KeyColor, Reactive, ReactiveMode};
 
     const RED: gg_ipc::Rgb = gg_ipc::Rgb { r: 255, g: 0, b: 0 };
 
@@ -228,6 +236,7 @@ mod tests {
             brightness: 100,
             reactive: gg_ipc::Reactive::default(),
             mic_mute: gg_ipc::MicMuteLight::default(),
+            ..Lighting::default()
         }
     }
 
@@ -495,6 +504,27 @@ mod tests {
             color(&wave, &p, 0x29, month, &[], &[]),
             color(&wave, &p, 0x29, month + 1.0 / 30.0, &[], &[]),
             "and the wave still moves from one frame to the next"
+        );
+    }
+
+    #[test]
+    fn zones_draw_under_the_presses_and_the_brightness() {
+        let p = positions(&US);
+        let mut l = reactive(ReactiveMode::Fade, 1.0);
+        l.reactive.color = BLUE;
+        l.brightness = 50;
+        l.zones_mut().push(gg_ipc::Zone::new(
+            "wasd",
+            gg_ipc::ZonePreset::Wasd.keys(),
+            gg_ipc::ZoneEffect::Static { color: RED },
+        ));
+        assert_eq!(color(&l, &p, 0x1A, 0.0, &[], &[]), Rgb { r: 128, g: 0, b: 0 });
+        assert_eq!(color(&l, &p, 0x29, 0.0, &[], &[]), Rgb::default(), "the old static base");
+        let hits = [Hit { code: 0x1A, t: 0.0 }];
+        assert_eq!(
+            color(&l, &p, 0x1A, 0.5, &hits, &[]),
+            Rgb { r: 64, g: 0, b: 64 },
+            "a press over the zone, then the brightness"
         );
     }
 

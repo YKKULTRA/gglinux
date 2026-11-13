@@ -33,10 +33,12 @@ pub enum Feature {
     MousePairing,
     /// The headset settings added after M10 (Bluetooth, gain, line out, base-station screen).
     HeadsetExtras,
+    /// Keyboard lighting zones that take the colours of the screen.
+    LightingReflect,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 10] = [
+    pub const ALL: [Feature; 11] = [
         Feature::KeyboardBindings,
         Feature::KeyboardOnboard,
         Feature::KeyboardProtection,
@@ -47,6 +49,7 @@ impl Feature {
         Feature::MouseMacros,
         Feature::MousePairing,
         Feature::HeadsetExtras,
+        Feature::LightingReflect,
     ];
 
     /// The name `ggctl experimental` takes, and the settings file uses.
@@ -62,6 +65,7 @@ impl Feature {
             Feature::MouseMacros => "mouse_macros",
             Feature::MousePairing => "mouse_pairing",
             Feature::HeadsetExtras => "headset_extras",
+            Feature::LightingReflect => "lighting_reflect",
         }
     }
 
@@ -78,6 +82,7 @@ impl Feature {
             Feature::MouseMacros => "Mouse: macros",
             Feature::MousePairing => "Mouse: pairing",
             Feature::HeadsetExtras => "Headset: Bluetooth, gain and line out",
+            Feature::LightingReflect => "Lighting: Reflect screen colours",
         }
     }
 
@@ -100,6 +105,7 @@ pub struct Experimental {
     pub mouse_macros: bool,
     pub mouse_pairing: bool,
     pub headset_extras: bool,
+    pub lighting_reflect: bool,
 }
 
 impl Experimental {
@@ -115,6 +121,7 @@ impl Experimental {
             Feature::MouseMacros => self.mouse_macros,
             Feature::MousePairing => self.mouse_pairing,
             Feature::HeadsetExtras => self.headset_extras,
+            Feature::LightingReflect => self.lighting_reflect,
         }
     }
 
@@ -130,6 +137,7 @@ impl Experimental {
             Feature::MouseMacros => &mut self.mouse_macros,
             Feature::MousePairing => &mut self.mouse_pairing,
             Feature::HeadsetExtras => &mut self.headset_extras,
+            Feature::LightingReflect => &mut self.lighting_reflect,
         };
         *field = on;
     }
@@ -189,6 +197,21 @@ mod tests {
         assert!(!old.on(Feature::MouseWheel), "a file from before it");
         let why = old.refusal(Feature::MouseWheel).unwrap();
         assert!(why.contains("scroll wheel") && why.contains("Settings → Experimental"));
+    }
+
+    /// Reflect's gate: its own name and label, off unless the file says otherwise.
+    #[test]
+    fn reflect_has_its_own_gate_off_by_default() {
+        let f = Feature::from_key("lighting_reflect");
+        assert_eq!(f, Some(Feature::LightingReflect));
+        assert_eq!(
+            Feature::LightingReflect.label(),
+            "Lighting: Reflect screen colours"
+        );
+        let old: Experimental = serde_json::from_str(r#"{"headset_extras":true}"#).unwrap();
+        assert!(!old.on(Feature::LightingReflect), "a file from before it");
+        let why = old.refusal(Feature::LightingReflect).unwrap();
+        assert!(why.contains("hasn't been tried on your hardware yet"));
     }
 
     #[test]

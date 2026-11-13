@@ -28,14 +28,18 @@
 mod audio;
 pub mod bindings;
 mod effects;
+mod idle;
 pub mod macros;
 mod mic;
 pub mod onboard;
 mod reader;
+mod reflect;
 mod screen;
 mod spectrum;
 mod switches;
+mod zones;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -46,8 +50,8 @@ use gg_device_keyboard::layout::{for_region, Key, REGIONS};
 use gg_device_keyboard::proto::ANALOG_KEYS;
 use gg_device_keyboard::{Families, Keyboard, Rgb};
 use gg_ipc::{
-    Effect, Event, Experimental, KeyInfo, KeyboardState, Lighting, MicMuteLight, ReactiveStatus,
-    Screen, ScreenCare, Switches,
+    Event, Experimental, Feature, KeyInfo, KeyboardState, Lighting, MicMuteLight, ReactiveStatus,
+    Screen, ScreenCare, Switches, Zone,
 };
 use hidapi::HidApi;
 use serde::{de::DeserializeOwned, Serialize};
@@ -325,6 +329,12 @@ struct State {
     listen_to: Option<String>,
     mic_watch: Option<mic::Watch>,
     mic_muted: bool,
+    /// When the desktop said nobody is there, for the idle scene.
+    idle: idle::Idle,
+    /// Whether the idle scene is drawn now.
+    idle_shown: bool,
+    /// The screen's colours for Reflect zones.
+    reflect: reflect::Reflect,
     switches: SwitchesState,
     screen: ScreenState,
     bindings: bindings::Store,
@@ -374,6 +384,9 @@ impl State {
             listen_to: None,
             mic_watch: None,
             mic_muted: false,
+            idle: idle::Idle::default(),
+            idle_shown: false,
+            reflect: reflect::Reflect::portal(),
             switches: SwitchesState::load(config_dir),
             screen: ScreenState::load(config_dir),
             bindings: bindings::Store::load(config_dir),
@@ -433,6 +446,12 @@ fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Ev
             state.last_frame = None;
         }
         state.overlay_was_active = overlay_active;
+        let idle_now = state.lighting.enabled && state.idle.showing(&state.lighting.idle, now);
+        if idle_now != state.idle_shown {
+            // The other scene, drawn at once.
+            state.idle_shown = idle_now;
+            state.last_frame = None;
+        }
         if should_look_for(
             state.device.is_some(),
             drawing(state.lighting.enabled, !state.layers.is_empty()),
@@ -442,6 +461,7 @@ fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Ev
         sync_reader(&mut state);
         sync_audio(&mut state);
         sync_mic(&mut state);
+        sync_reflect(&mut state);
         if should_hand_back(
             state.taken,
             state.lighting.enabled,
@@ -479,10 +499,10 @@ fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Ev
     }
 }
 
-/// How often frames are due: fast for animated effects, while presses show,
-/// and while an overlay draws.
-fn interval(lighting: &Lighting, live_hits: bool, overlay_active: bool) -> Duration {
-    if effects::animated(&lighting.effect) || live_hits || overlay_active {
+/// How often frames are due: fast while a zone of the stack animates, while presses
+/// show, and while an overlay draws.
+fn interval(stack: &[Zone], live_hits: bool, overlay_active: bool) -> Duration {
+    if zones::animated(stack) || live_hits || overlay_active {
         FRAME
     } else {
         STATIC_REFRESH
@@ -497,13 +517,19 @@ fn next_wait(state: &State) -> Duration {
         } else {
             state.last_frame.map_or(Duration::ZERO, |t| {
                 interval(
-                    &state.lighting,
+                    &active_stack(state),
                     !state.hits.is_empty(),
                     !state.layers.is_empty(),
                 )
                 .saturating_sub(t.elapsed())
             })
         };
+    // The idle scene starts on time.
+    let idle = state
+        .idle
+        .due_in(&state.lighting.idle, Instant::now())
+        .filter(|_| state.lighting.enabled);
+    let lighting = idle.map_or(lighting, |idle| lighting.min(idle));
     // A screen that changes by itself (a clock) wakes the loop in time.
     match state.screen.wait(state.device.is_some()) {
         Some(screen) => lighting.min(screen),
@@ -511,9 +537,21 @@ fn next_wait(state: &State) -> Duration {
     }
 }
 
-/// Whether key presses should be read right now.
+/// The zone stack drawn now: the idle scene's while it shows, else the usual one.
+fn active_stack(state: &State) -> Cow<'_, [Zone]> {
+    if state.idle_shown {
+        Cow::Borrowed(&state.lighting.idle.zones)
+    } else {
+        state.lighting.stack()
+    }
+}
+
+/// Whether key presses should be read right now: for the reactive lighting over every
+/// key, or for a reactive zone.
 fn wants_reader(lighting: &Lighting, connected: bool) -> bool {
-    lighting.enabled && lighting.reactive.enabled && connected
+    lighting.enabled
+        && (lighting.reactive.enabled || zones::reactive(&lighting.stack()))
+        && connected
 }
 
 /// Whether gglinux draws on the keyboard: its own lighting, or an overlay taking it over.
@@ -549,8 +587,8 @@ fn wake_forces_frame(last_frame: Option<Instant>) -> bool {
     is_older_than(last_frame, FRAME)
 }
 
-fn wants_audio(lighting: &Lighting, drawing: bool) -> bool {
-    drawing && matches!(lighting.effect, Effect::Visualizer { .. })
+fn wants_audio(stack: &[Zone], drawing: bool) -> bool {
+    drawing && zones::listens(stack)
 }
 
 fn wants_mic(lighting: &Lighting, connected: bool) -> bool {
@@ -663,7 +701,7 @@ fn ask_region(state: &mut State) {
 fn sync_audio(state: &mut State) {
     let on_screen =
         state.device.is_some() && drawing(state.lighting.enabled, !state.layers.is_empty());
-    if !wants_audio(&state.lighting, on_screen) {
+    if !wants_audio(&active_stack(state), on_screen) {
         if state.capture.take().is_some() {
             *state.levels.lock().unwrap_or_else(|e| e.into_inner()) = [0.0; BANDS];
         }
@@ -696,6 +734,31 @@ fn sync_mic(state: &mut State) {
     if state.mic_watch.is_none() {
         let argv = mic::WPCTL.iter().map(|s| s.to_string()).collect();
         state.mic_watch = Some(mic::Watch::start(argv, MIC_POLL, state.tx.clone()));
+    }
+}
+
+/// Look at the screen exactly while a Reflect zone is drawn, and only with its gate on.
+fn sync_reflect(state: &mut State) {
+    let drawn = state.device.is_some()
+        && state.lighting.enabled
+        && zones::reflects(&active_stack(state));
+    let wanted = match state.experimental.refusal(Feature::LightingReflect) {
+        _ if !drawn => Ok(false),
+        Some(why) => Err(why),
+        None => Ok(true),
+    };
+    let now = Instant::now();
+    state.reflect.sync(wanted, now);
+    state.reflect.sample(board(state.region), now);
+}
+
+/// A lighting that brings Reflect in is refused while its gate is off. One that already
+/// had it may still change otherwise; its Reflect zones stay see-through until the gate
+/// is on.
+fn check_reflect(new: &Lighting, now: &Lighting, gates: &Experimental) -> Result<(), String> {
+    match gates.refusal(Feature::LightingReflect) {
+        Some(why) if new.uses_reflect() && !now.uses_reflect() => Err(why),
+        _ => Ok(()),
     }
 }
 
@@ -771,6 +834,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             publish(state, event_tx);
         }
         Command::SetAway { away, reply } => {
+            state.idle.set_away(away, Instant::now());
             if state.screen.set_away(away) {
                 // Now, not at the next loop: sleep may be next.
                 read_region(state, event_tx);
@@ -781,6 +845,7 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
         }
         Command::SetLighting { lighting, reply } => {
             let checked = lighting.validate().and_then(|()| {
+                check_reflect(&lighting, &state.lighting, &state.experimental)?;
                 if lighting.enabled {
                     ask_region(state); // lighting that's on takes the keyboard
                 }
@@ -1000,13 +1065,14 @@ fn render(state: &mut State) {
     if !drawing(state.lighting.enabled, overlay_active)
         || !is_older_than(
             state.last_frame,
-            interval(&state.lighting, !state.hits.is_empty(), overlay_active),
+            interval(&active_stack(state), !state.hits.is_empty(), overlay_active),
         )
     {
         return;
     }
     let t = state.started.elapsed().as_secs_f64();
-    let duration = f64::from(state.lighting.reactive.duration_s);
+    let longest = zones::press_duration(&active_stack(state));
+    let duration = f64::from(state.lighting.reactive.duration_s.max(longest));
     state.hits.retain(|h| t - h.t < duration);
     let hits = &state.hits;
     let layers = &state.layers;
@@ -1016,14 +1082,25 @@ fn render(state: &mut State) {
     let Some(device) = state.device.as_ref() else {
         return;
     };
-    let result = if state.taken { Ok(()) } else { device.init() }.and_then(|()| {
-        device.show(
-            |code| match mic_color(mic, code).or_else(|| overlay_color(layers, code)) {
-                Some(c) => effects::dim(c, state.lighting.brightness),
-                None => effects::color(&state.lighting, &state.positions, code, t, hits, &bands),
-            },
-        )
-    });
+    let result = {
+        let stack = active_stack(state);
+        let scene = zones::Scene::new(&stack, &state.lighting.keys, &state.positions);
+        let inputs = zones::Inputs {
+            t,
+            hits,
+            bands: &bands,
+            screen: state.reflect.colors(),
+        };
+        let lit = |code| effects::frame_color(&state.lighting, &scene, &state.positions, code, &inputs);
+        if state.taken { Ok(()) } else { device.init() }.and_then(|()| {
+            device.show(
+                |code| match mic_color(mic, code).or_else(|| overlay_color(layers, code)) {
+                    Some(c) => effects::dim(c, state.lighting.brightness),
+                    None => lit(code),
+                },
+            )
+        })
+    };
     match result {
         Ok(()) => {
             state.taken = true;
@@ -1066,6 +1143,8 @@ fn snapshot(state: &State) -> KeyboardState {
             .collect(),
         lighting: state.lighting.clone(),
         reactive: state.reactive,
+        lighting_idle: state.idle_shown,
+        reflect: state.reflect.status(),
         analog_keys: ANALOG_KEYS.to_vec(),
         switches: state.switches.settings().clone(),
         switches_error: state.switches.error(),
@@ -1169,12 +1248,12 @@ mod tests {
 
     #[test]
     fn live_presses_animate_even_a_static_effect() {
-        let still = lighting(true, true, Effect::Static);
+        let still = lighting(true, true, Effect::Static).stack().into_owned();
         assert_eq!(interval(&still, false, false), STATIC_REFRESH);
         assert_eq!(interval(&still, true, false), FRAME);
         assert_eq!(
             interval(
-                &lighting(true, true, Effect::Wave { period_s: 4.0 }),
+                &lighting(true, true, Effect::Wave { period_s: 4.0 }).stack(),
                 false,
                 false
             ),
@@ -1230,7 +1309,7 @@ mod tests {
 
     #[test]
     fn an_active_overlay_animates_even_a_static_effect() {
-        let still = lighting(true, false, Effect::Static);
+        let still = lighting(true, false, Effect::Static).stack().into_owned();
         assert_eq!(interval(&still, false, true), FRAME);
         assert_eq!(interval(&still, false, false), STATIC_REFRESH);
     }
@@ -1268,10 +1347,10 @@ mod tests {
             effect: Effect::Visualizer { sensitivity: 1.0 },
             ..lighting(true, false, Effect::Static)
         };
-        assert!(wants_audio(&viz, true));
-        assert!(!wants_audio(&viz, false), "not drawing");
+        assert!(wants_audio(&viz.stack(), true));
+        assert!(!wants_audio(&viz.stack(), false), "not drawing");
         assert!(
-            !wants_audio(&lighting(true, false, Effect::Static), true),
+            !wants_audio(&lighting(true, false, Effect::Static).stack(), true),
             "another effect"
         );
         let mut m = lighting(true, false, Effect::Static);
@@ -1704,6 +1783,202 @@ mod tests {
             green(0x1E),
             green(0x64),
             green(0x14)
+        );
+    }
+
+    const RED: Rgb = Rgb { r: 255, g: 0, b: 0 };
+    const BLUE: Rgb = Rgb { r: 0, g: 0, b: 255 };
+
+    fn one(c: Rgb) -> gg_ipc::Rgb {
+        gg_ipc::Rgb {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        }
+    }
+
+    /// The colour the last lighting frame sent gave `code`.
+    fn last_color(fake: &FakeTransport, code: u8) -> Rgb {
+        let sent = fake.sent();
+        let frame = sent
+            .iter()
+            .rev()
+            .find(|s| s.report[1] == proto::OP_DIRECT)
+            .expect("a lighting frame");
+        frame_color(&frame.report, code)
+    }
+
+    #[test]
+    fn a_reactive_zone_reads_presses_too() {
+        let mut l = lighting(true, false, Effect::Static);
+        l.zones_mut().push(Zone::new(
+            "w",
+            gg_ipc::ZonePreset::Wasd.keys(),
+            gg_ipc::ZoneEffect::Reactive {
+                mode: gg_ipc::ReactiveMode::Fade,
+                color: one(RED),
+                duration_s: 2.0,
+            },
+        ));
+        assert!(wants_reader(&l, true));
+        assert!(!wants_reader(&l, false), "keyboard away");
+        l.enabled = false;
+        assert!(!wants_reader(&l, true), "lighting off");
+    }
+
+    #[test]
+    fn lighting_saved_before_zones_loads_as_it_was_and_zones_save_back() {
+        let d = Scratch::new("keyboard-zones-file");
+        // As the daemon saved it before zones existed.
+        let old = r#"{
+  "enabled": true,
+  "effect": {
+    "kind": "wave",
+    "period_s": 3.0
+  },
+  "keys": [],
+  "brightness": 60
+}"#;
+        std::fs::write(d.0.join("lighting.json"), old).unwrap();
+        let fresh = || State::new(None, &d.0, mpsc::channel().0, Vec::new(), Experimental::default());
+        let mut state = fresh();
+        assert_eq!(state.lighting.brightness, 60);
+        let wave = gg_ipc::ZoneEffect::Wave { period_s: 3.0 };
+        assert_eq!(
+            state.lighting.stack().into_owned(),
+            vec![Zone::new("all", gg_ipc::ZoneKeys::All, wave)]
+        );
+        let mut lit = state.lighting.clone();
+        lit.zones_mut().push(Zone::new(
+            "WASD",
+            gg_ipc::ZonePreset::Wasd.keys(),
+            gg_ipc::ZoneEffect::Static { color: one(RED) },
+        ));
+        let (event_tx, _) = broadcast::channel(8);
+        let (reply, mut answer) = oneshot::channel();
+        handle(
+            Command::SetLighting {
+                lighting: lit.clone(),
+                reply,
+            },
+            &mut state,
+            &event_tx,
+        );
+        answer.try_recv().unwrap().unwrap();
+        assert_eq!(fresh().lighting, lit, "saved with its zones");
+    }
+
+    #[tokio::test]
+    async fn the_idle_scene_is_drawn_while_nobody_is_there_and_the_usual_zones_after() {
+        let d = Scratch::new("keyboard-idle");
+        let fake = FakeTransport::new();
+        let (event_tx, _) = broadcast::channel(8);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), event_tx, Experimental::default());
+        let mut lit = Lighting {
+            enabled: true,
+            ..Lighting::default()
+        };
+        *lit.zones_mut() = vec![Zone::new(
+            "all",
+            gg_ipc::ZoneKeys::All,
+            gg_ipc::ZoneEffect::Static { color: one(RED) },
+        )];
+        lit.idle = gg_ipc::IdleLighting {
+            enabled: true,
+            after_minutes: 0,
+            zones: Vec::new(), // every key dark
+        };
+        kb.send(|reply| Command::SetLighting {
+            lighting: lit,
+            reply,
+        })
+        .await
+        .unwrap();
+        // Each answer to GetState comes after the loop has drawn what came before it.
+        assert!(!kb.send(Command::GetState).await.unwrap().lighting_idle);
+        assert_eq!(last_color(&fake, 0x04), RED);
+
+        kb.send(|reply| Command::SetAway { away: true, reply })
+            .await
+            .unwrap();
+        assert!(kb.send(Command::GetState).await.unwrap().lighting_idle);
+        assert_eq!(last_color(&fake, 0x04), Rgb::default(), "the idle scene: off");
+
+        kb.send(|reply| Command::SetAway { away: false, reply })
+            .await
+            .unwrap();
+        assert!(!kb.send(Command::GetState).await.unwrap().lighting_idle);
+        assert_eq!(last_color(&fake, 0x04), RED, "back: the usual zones at once");
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[test]
+    fn reflect_is_refused_while_its_gate_is_off_and_draws_the_screen_once_it_is_on() {
+        let d = Scratch::new("keyboard-reflect");
+        let (event_tx, _) = broadcast::channel(8);
+        let mut state = State::new(None, &d.0, mpsc::channel().0, Vec::new(), Experimental::default());
+        let fake = FakeTransport::new();
+        connected(&mut state, fake.keyboard());
+        state.reflect = reflect::tests::on_fake(vec![reflect::tests::solid(RED)]).0;
+        let mut lit = Lighting {
+            enabled: true,
+            ..Lighting::default()
+        };
+        *lit.zones_mut() = vec![
+            Zone::new(
+                "base",
+                gg_ipc::ZoneKeys::All,
+                gg_ipc::ZoneEffect::Static { color: one(BLUE) },
+            ),
+            Zone::new("screen", gg_ipc::ZoneKeys::All, gg_ipc::ZoneEffect::Reflect),
+        ];
+        let set = |state: &mut State, lighting: Lighting| {
+            let (reply, mut answer) = oneshot::channel();
+            handle(Command::SetLighting { lighting, reply }, state, &event_tx);
+            answer.try_recv().unwrap()
+        };
+        let refused = set(&mut state, lit.clone()).unwrap_err();
+        assert!(
+            refused.contains("Lighting: Reflect screen colours")
+                && refused.contains("hasn't been tried on your hardware yet"),
+            "{refused}"
+        );
+        assert!(!state.lighting.uses_reflect(), "nothing kept");
+
+        let gate = Experimental {
+            lighting_reflect: true,
+            ..Experimental::default()
+        };
+        handle(Command::SetExperimental(gate), &mut state, &event_tx);
+        set(&mut state, lit.clone()).unwrap();
+        let frame = |state: &mut State| {
+            sync_reflect(state);
+            state.last_frame = None;
+            render(state);
+            last_color(&fake, 0x04)
+        };
+        assert_eq!(frame(&mut state), BLUE, "no screen frame yet: the base shows");
+        assert_eq!(snapshot(&state).reflect, gg_ipc::ReflectStatus::Running);
+        std::thread::sleep(Duration::from_millis(70)); // past the frame cap
+        assert_eq!(frame(&mut state), RED, "the screen's colour");
+
+        handle(
+            Command::SetExperimental(Experimental::default()),
+            &mut state,
+            &event_tx,
+        );
+        assert_eq!(frame(&mut state), BLUE, "the gate went off: see-through again");
+        assert!(matches!(
+            snapshot(&state).reflect,
+            gg_ipc::ReflectStatus::Stopped { .. }
+        ));
+        let dimmer = Lighting {
+            brightness: 50,
+            ..lit
+        };
+        assert!(
+            set(&mut state, dimmer).is_ok(),
+            "lighting that had Reflect already still changes"
         );
     }
 }

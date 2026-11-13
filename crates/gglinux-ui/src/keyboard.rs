@@ -508,6 +508,8 @@ pub(crate) mod tests {
                 ..Lighting::default()
             },
             reactive: ReactiveStatus::Off,
+            lighting_idle: false,
+            reflect: Default::default(),
             analog_keys: vec![0x04, 0x07],
             switches: Switches::default(),
             switches_error: None,
