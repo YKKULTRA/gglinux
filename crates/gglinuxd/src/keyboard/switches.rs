@@ -298,9 +298,9 @@ fn device_tap_mode(mode: TapMode) -> gg_device_keyboard::TapMode {
 
 #[cfg(test)]
 mod tests {
-    use gg_device_keyboard::layout;
     use super::*;
     use crate::scratch::Scratch;
+    use gg_device_keyboard::layout;
     use gg_device_keyboard::testing::{FakeTransport, Kind};
 
     #[test]
