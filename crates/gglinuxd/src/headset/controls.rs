@@ -5,10 +5,9 @@
 //! together with that.
 
 use gg_device_headset::{
-    AudioSettings, AutoOff, BluetoothCall as DevCall, BluetoothLink as DevLink,
-    DimTimeout, Gain as DevGain, Headset, HomeScreen as DevHome, LineOut as DevLineOut,
-    NoiseMode as DevNoise, Pairing as DevPairing, Port, Setting, Status, StreamMix,
-    WirelessMode,
+    AudioSettings, AutoOff, BluetoothCall as DevCall, BluetoothLink as DevLink, DimTimeout,
+    Gain as DevGain, Headset, HomeScreen as DevHome, LineOut as DevLineOut, NoiseMode as DevNoise,
+    Pairing as DevPairing, Port, Setting, Status, StreamMix, WirelessMode,
 };
 use gg_ipc::{
     BluetoothCall, BluetoothLink, Experimental, HeadsetChange, HeadsetControls, HeadsetGain,
@@ -312,8 +311,14 @@ mod tests {
     /// Every base-station setting, with GG's bytes for it.
     fn base_station_changes() -> Vec<(HeadsetChange, Vec<u8>)> {
         vec![
-            (HeadsetChange::BluetoothAtPowerOn(true), vec![0x06, 0xb2, 0x01]),
-            (HeadsetChange::BluetoothAtPowerOn(false), vec![0x06, 0xb2, 0x00]),
+            (
+                HeadsetChange::BluetoothAtPowerOn(true),
+                vec![0x06, 0xb2, 0x01],
+            ),
+            (
+                HeadsetChange::BluetoothAtPowerOn(false),
+                vec![0x06, 0xb2, 0x00],
+            ),
             (
                 HeadsetChange::BluetoothCall(BluetoothCall::LowerGame),
                 vec![0x06, 0xb3, 0x01],
@@ -326,10 +331,22 @@ mod tests {
                 HeadsetChange::BluetoothCall(BluetoothCall::Nothing),
                 vec![0x06, 0xb3, 0x00],
             ),
-            (HeadsetChange::Gain(HeadsetGain::High), vec![0x06, 0x27, 0x02]),
-            (HeadsetChange::Gain(HeadsetGain::Low), vec![0x06, 0x27, 0x01]),
-            (HeadsetChange::LineOut(LineOut::Stream), vec![0x06, 0x43, 0x02]),
-            (HeadsetChange::LineOut(LineOut::Speakers), vec![0x06, 0x43, 0x01]),
+            (
+                HeadsetChange::Gain(HeadsetGain::High),
+                vec![0x06, 0x27, 0x02],
+            ),
+            (
+                HeadsetChange::Gain(HeadsetGain::Low),
+                vec![0x06, 0x27, 0x01],
+            ),
+            (
+                HeadsetChange::LineOut(LineOut::Stream),
+                vec![0x06, 0x43, 0x02],
+            ),
+            (
+                HeadsetChange::LineOut(LineOut::Speakers),
+                vec![0x06, 0x43, 0x01],
+            ),
             (
                 HeadsetChange::LineOutMix(LineOutMix {
                     main: 50,
@@ -338,8 +355,14 @@ mod tests {
                 }),
                 vec![0x06, 0x47, 0x32, 0x00, 0x64, 0x64],
             ),
-            (HeadsetChange::HomeScreen(HomeScreen::Simple), vec![0x06, 0x89, 0x01]),
-            (HeadsetChange::HomeScreen(HomeScreen::Detailed), vec![0x06, 0x89, 0x00]),
+            (
+                HeadsetChange::HomeScreen(HomeScreen::Simple),
+                vec![0x06, 0x89, 0x01],
+            ),
+            (
+                HeadsetChange::HomeScreen(HomeScreen::Detailed),
+                vec![0x06, 0x89, 0x00],
+            ),
             (HeadsetChange::ScreenDimMinutes(0), vec![0x06, 0x83, 0x00]),
             (HeadsetChange::ScreenDimMinutes(1), vec![0x06, 0x83, 0x01]),
             (HeadsetChange::ScreenDimMinutes(5), vec![0x06, 0x83, 0x02]),
@@ -363,10 +386,17 @@ mod tests {
                 other => panic!("{change:?}: {other:?}"),
             }
         }
-        assert!(fake.reports().is_empty(), "nothing reached the base station");
+        assert!(
+            fake.reports().is_empty(),
+            "nothing reached the base station"
+        );
         // The gate is checked first: a missing base station doesn't hide it.
         let none: Option<&Headset<FakeBase>> = None;
-        let why = send_change(none, &Experimental::default(), &HeadsetChange::ScreenDimMinutes(5));
+        let why = send_change(
+            none,
+            &Experimental::default(),
+            &HeadsetChange::ScreenDimMinutes(5),
+        );
         assert!(matches!(why, Err(Failed::Refused(m)) if m.contains("Settings → Experimental")));
     }
 
@@ -384,9 +414,16 @@ mod tests {
     fn the_first_milestones_settings_need_no_gate_and_still_save() {
         let fake = FakeBase::new();
         let device = Headset::with_port(fake.clone());
-        send_change(Some(&device), &Experimental::default(), &HeadsetChange::Sidetone(1))
-            .unwrap();
-        assert_eq!(fake.commands(), vec![vec![0x06, 0x39, 0x01], vec![0x06, 0x09]]);
+        send_change(
+            Some(&device),
+            &Experimental::default(),
+            &HeadsetChange::Sidetone(1),
+        )
+        .unwrap();
+        assert_eq!(
+            fake.commands(),
+            vec![vec![0x06, 0x39, 0x01], vec![0x06, 0x09]]
+        );
     }
 
     #[test]
@@ -426,7 +463,10 @@ mod tests {
         assert_eq!(w.mic_volume, None, "read-back settings are not recorded");
         record(&mut w, &HeadsetChange::ScreenDimMinutes(5));
         record(&mut w, &HeadsetChange::HomeScreen(HomeScreen::Simple));
-        assert_eq!((w.screen_dim_minutes, w.home_screen), (Some(5), Some(HomeScreen::Simple)));
+        assert_eq!(
+            (w.screen_dim_minutes, w.home_screen),
+            (Some(5), Some(HomeScreen::Simple))
+        );
     }
 
     /// What the fake base station answers to a poll: GG's defaults.
@@ -488,6 +528,9 @@ mod tests {
             (Some(HomeScreen::Simple), Some(10)),
             "the screen settings are never read back"
         );
-        assert_eq!(merged(None, None, &Written::default()), HeadsetControls::default());
+        assert_eq!(
+            merged(None, None, &Written::default()),
+            HeadsetControls::default()
+        );
     }
 }

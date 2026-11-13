@@ -2289,7 +2289,10 @@ mod tests {
         ] {
             assert_eq!(change.feature(), None, "{change:?}");
         }
-        assert!(!SCREEN_DIM_MINUTES.contains(&60), "60 min was never captured");
+        assert!(
+            !SCREEN_DIM_MINUTES.contains(&60),
+            "60 min was never captured"
+        );
     }
 
     /// A daemon from before the base-station settings sends none of their fields.
@@ -2301,7 +2304,10 @@ mod tests {
         let c: HeadsetControls = serde_json::from_str(old).unwrap();
         assert_eq!(c.noise_mode, Some(NoiseMode::Anc));
         assert_eq!((c.gain, c.line_out, c.line_out_mix), (None, None, None));
-        assert_eq!((c.pairing, c.bluetooth_on, c.screen_dim_minutes), (None, None, None));
+        assert_eq!(
+            (c.pairing, c.bluetooth_on, c.screen_dim_minutes),
+            (None, None, None)
+        );
     }
 
     #[test]

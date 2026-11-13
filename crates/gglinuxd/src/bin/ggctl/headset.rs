@@ -394,7 +394,10 @@ mod tests {
         assert_eq!(set("mic-led 1"), HeadsetChange::MicLed(1));
         assert_eq!(set("auto-off never"), HeadsetChange::AutoOffMinutes(0));
         assert_eq!(set("auto-off 30"), HeadsetChange::AutoOffMinutes(30));
-        assert_eq!(set("radio range"), HeadsetChange::RadioMode(RadioMode::Range));
+        assert_eq!(
+            set("radio range"),
+            HeadsetChange::RadioMode(RadioMode::Range)
+        );
         assert_eq!(set("eq flat"), HeadsetChange::EqPreset(0));
         assert_eq!(set("eq smiley"), HeadsetChange::EqPreset(3));
         assert_eq!(

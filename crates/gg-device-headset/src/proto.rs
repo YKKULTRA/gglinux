@@ -912,7 +912,10 @@ mod tests {
     fn base_station_settings_encode_to_gg_bytes_and_send_no_save() {
         let cases: Vec<(Setting, Vec<u8>)> = vec![
             (Setting::BluetoothAtPowerOn(true), vec![0xb2, 1]),
-            (Setting::BluetoothCall(BluetoothCall::LowerGame), vec![0xb3, 1]),
+            (
+                Setting::BluetoothCall(BluetoothCall::LowerGame),
+                vec![0xb3, 1],
+            ),
             (Setting::Gain(Gain::High), vec![0x27, 2]),
             (Setting::LineOut(LineOut::Stream), vec![0x43, 2]),
             (
@@ -930,7 +933,10 @@ mod tests {
             assert_eq!(setting.packets().unwrap(), vec![expected], "{setting:?}");
             assert!(!setting.saved(), "{setting:?}: GG sends no save after it");
         }
-        assert!(Setting::Sidetone(1).saved(), "the first milestones' still save");
+        assert!(
+            Setting::Sidetone(1).saved(),
+            "the first milestones' still save"
+        );
         assert!(Setting::EqBands(vec![0.0; EQ_BANDS]).saved());
         assert!(Setting::StreamMix(StreamMix {
             main: 101,

@@ -100,7 +100,11 @@ impl FakeBase {
 
     /// Every output report, whole (64 bytes, report id first), in order.
     pub fn reports(&self) -> Vec<Vec<u8>> {
-        self.inner().reports.iter().map(|(_, r)| r.clone()).collect()
+        self.inner()
+            .reports
+            .iter()
+            .map(|(_, r)| r.clone())
+            .collect()
     }
 
     /// Every output report cut to its command's own length (report id, opcode and

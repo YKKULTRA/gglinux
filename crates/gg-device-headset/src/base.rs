@@ -403,9 +403,18 @@ mod tests {
     fn writes_match_the_captured_bytes() {
         assert_eq!(bluetooth_at_power_on_packet(true), vec![0xb2, 0x01]);
         assert_eq!(bluetooth_at_power_on_packet(false), vec![0xb2, 0x00]);
-        assert_eq!(bluetooth_call_packet(BluetoothCall::Nothing), vec![0xb3, 0x00]);
-        assert_eq!(bluetooth_call_packet(BluetoothCall::LowerGame), vec![0xb3, 0x01]);
-        assert_eq!(bluetooth_call_packet(BluetoothCall::MuteGame), vec![0xb3, 0x02]);
+        assert_eq!(
+            bluetooth_call_packet(BluetoothCall::Nothing),
+            vec![0xb3, 0x00]
+        );
+        assert_eq!(
+            bluetooth_call_packet(BluetoothCall::LowerGame),
+            vec![0xb3, 0x01]
+        );
+        assert_eq!(
+            bluetooth_call_packet(BluetoothCall::MuteGame),
+            vec![0xb3, 0x02]
+        );
         assert_eq!(gain_packet(Gain::Low), vec![0x27, 0x01]);
         assert_eq!(gain_packet(Gain::High), vec![0x27, 0x02]);
         assert_eq!(line_out_packet(LineOut::Speakers), vec![0x43, 0x01]);
@@ -518,7 +527,10 @@ mod tests {
     fn link_and_pairing_codes_are_arctis_sound_managers() {
         assert_eq!(BluetoothLink::from_code(0), Some(BluetoothLink::Off));
         assert_eq!(BluetoothLink::from_code(1), Some(BluetoothLink::Connected));
-        assert_eq!(BluetoothLink::from_code(2), Some(BluetoothLink::NotConnected));
+        assert_eq!(
+            BluetoothLink::from_code(2),
+            Some(BluetoothLink::NotConnected)
+        );
         assert_eq!(BluetoothLink::from_code(3), None);
         assert_eq!(Pairing::from_code(1), Some(Pairing::NotPaired));
         assert_eq!(Pairing::from_code(4), Some(Pairing::PairedOffline));
@@ -618,7 +630,10 @@ mod tests {
         // The 2026-09-27 read, as far as it was written down.
         let short = [0x06, 0x20, 0x00, 0x06, 0x01, 0x00, 0x00, 0x14, 0x14];
         let a = AudioSettings::decode(&short).unwrap();
-        assert_eq!((a.volume, a.gain, a.eq_preset), (Some(6), Some(Gain::Low), Some(0)));
+        assert_eq!(
+            (a.volume, a.gain, a.eq_preset),
+            (Some(6), Some(Gain::Low), Some(0))
+        );
         assert_eq!((a.eq_bands, a.line_out, a.stream_mix), (None, None, None));
         assert_eq!(AudioSettings::decode(&[0x06, 0xb0, 0x00, 0x06]), None);
         assert_eq!(AudioSettings::decode(&[0x06]), None);

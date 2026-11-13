@@ -733,7 +733,10 @@ mod tests {
         let sent = now.with(&HeadsetChange::Gain(HeadsetGain::High));
         f.extras.sent(sent);
         // The first read after the write may still say low.
-        assert_eq!(f.extras.show(&Extras::of(&daemon)).gain, Some(HeadsetGain::High));
+        assert_eq!(
+            f.extras.show(&Extras::of(&daemon)).gain,
+            Some(HeadsetGain::High)
+        );
         let caught_up = HeadsetControls {
             gain: Some(HeadsetGain::High),
             ..daemon.clone()

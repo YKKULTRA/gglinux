@@ -433,9 +433,16 @@ mod tests {
         let sent = fake.commands();
         assert_eq!(
             sent,
-            vec![vec![0x06, 0x27, 0x02], vec![0x06, 0x39, 0x02], vec![0x06, 0x09]]
+            vec![
+                vec![0x06, 0x27, 0x02],
+                vec![0x06, 0x39, 0x02],
+                vec![0x06, 0x09]
+            ]
         );
-        assert!(fake.reports().iter().all(|r| r.len() == 64), "64-byte reports");
+        assert!(
+            fake.reports().iter().all(|r| r.len() == 64),
+            "64-byte reports"
+        );
     }
 
     #[test]
@@ -474,7 +481,8 @@ mod tests {
         assert_eq!(first.line_out, Some(LineOut::Speakers), "stale");
         let second = h.poll().unwrap().audio.unwrap();
         assert_eq!(second.line_out, Some(LineOut::Stream));
-        h.apply(&Setting::BluetoothCall(BluetoothCall::MuteGame)).unwrap();
+        h.apply(&Setting::BluetoothCall(BluetoothCall::MuteGame))
+            .unwrap();
         h.poll().unwrap();
         let s = h.poll().unwrap().status.unwrap();
         assert_eq!(s.bluetooth_call, Some(BluetoothCall::MuteGame));
