@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The Rival 3 Wireless Gen 2 panel on the Engine page: DPI stages, polling
-//! rate, sleep timer, buttons and the onboard save.
+//! rate, sleep timer, buttons and wheel, and the onboard save.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gg_ipc::mouse_keys::{self, KEYS, MEDIA};
+use gg_ipc::mouse_keys::{self, KEYS, MEDIA, WHEEL, WHEEL_FACTORY};
 use gg_ipc::{
     DpiStage, Experimental, Feature, MouseRadio, MouseSettings, Request, MOUSE_SLEEP_MINUTES,
 };
@@ -122,6 +122,10 @@ pub struct MouseForm {
     pub buttons: Vec<String>,
     /// The key list under a button, while it's open.
     pub picker: Option<KeyPicker>,
+    /// What the wheel does turned up, then down: names from [`WHEEL`].
+    pub wheel: [String; 2],
+    /// `mouse_wheel` is on: the wheel goes out with the buttons. Followed from the daemon.
+    pub wheel_gate: bool,
     /// The sleep timer to send, in minutes ([`MOUSE_SLEEP_MINUTES`]).
     pub sleep: u8,
     /// The wireless mode to send.
@@ -142,6 +146,8 @@ impl Default for MouseForm {
             polling: 1000,
             buttons: FACTORY_BUTTONS.map(String::from).to_vec(),
             picker: None,
+            wheel: WHEEL_FACTORY.map(String::from),
+            wheel_gate: false,
             // GG's own default.
             sleep: 5,
             radio: MouseRadio::Normal,
@@ -165,11 +171,16 @@ impl MouseForm {
         match mouse {
             None => *self = MouseForm::default(),
             Some(m) => {
-                // Each part from what the mouse reports, or else what was written.
+                // Each part from what the mouse reports, or else what was written. What
+                // an asleep mouse said before it slept isn't taken: it can't be checked.
                 let applied = m.applied.clone().unwrap_or_default();
+                let reports = !asleep(m);
                 let known = MouseSettings {
-                    dpi: m.reported_dpi.clone().or(applied.dpi),
-                    polling_hz: m.reported_polling_hz.or(applied.polling_hz),
+                    dpi: m.reported_dpi.clone().filter(|_| reports).or(applied.dpi),
+                    polling_hz: m
+                        .reported_polling_hz
+                        .filter(|_| reports)
+                        .or(applied.polling_hz),
                     buttons: applied.buttons,
                     ..MouseSettings::default()
                 };
@@ -179,7 +190,9 @@ impl MouseForm {
                 self.seed_sleep(m);
                 if let (false, Some(radio)) = (
                     self.radio_seeded,
-                    m.radio.or(m.applied.as_ref().and_then(|a| a.radio)),
+                    m.radio
+                        .filter(|_| reports)
+                        .or(m.applied.as_ref().and_then(|a| a.radio)),
                 ) {
                     self.radio = radio;
                     self.radio_seeded = true;
@@ -209,6 +222,7 @@ impl MouseForm {
         }
         let minutes = m
             .sleep_secs
+            .filter(|_| !asleep(m))
             .map(|s| (s / 60) as u8)
             .or_else(|| m.applied.as_ref().and_then(|a| a.sleep_minutes));
         if let Some(minutes) = minutes {
@@ -257,7 +271,32 @@ impl MouseForm {
                 .enumerate()
                 .map(|(i, factory)| buttons.get(i).map_or(*factory, String::as_str).to_owned())
                 .collect();
+            // The wheel's two follow the six buttons, once they've been written.
+            if let [up, down] = &buttons[FACTORY_BUTTONS.len().min(buttons.len())..] {
+                self.wheel = [up.clone(), down.clone()];
+            }
         }
+    }
+
+    /// A pick from a wheel direction's menu (0 up, 1 down), by its place in [`WHEEL`].
+    pub fn pick_wheel(&mut self, direction: usize, action: usize) {
+        if let (Some(slot), Some((name, _))) = (self.wheel.get_mut(direction), WHEEL.get(action)) {
+            *slot = (*name).to_owned();
+        }
+    }
+
+    /// Each wheel direction's place in its menu, or -1 for a name the menu doesn't have.
+    pub fn wheel_menu(&self) -> Vec<i32> {
+        self.wheel
+            .iter()
+            .map(|w| {
+                let w = w.trim().to_ascii_lowercase();
+                WHEEL
+                    .iter()
+                    .position(|(n, _)| *n == w)
+                    .map_or(-1, |i| i as i32)
+            })
+            .collect()
     }
 
     /// A stage's number (both of them while X and Y are together).
@@ -352,8 +391,10 @@ impl MouseForm {
         });
     }
 
+    /// The factory buttons, and the factory wheel with them.
     pub fn factory_buttons(&mut self) {
         self.buttons = FACTORY_BUTTONS.map(String::from).to_vec();
+        self.wheel = WHEEL_FACTORY.map(String::from);
         self.picker = None;
     }
 
@@ -430,11 +471,14 @@ impl MouseForm {
         }
     }
 
+    /// The six buttons, and the wheel's two after them while `mouse_wheel` is on. Off,
+    /// the request is the six alone, as before the wheel: the daemon leaves the wheel be.
     pub fn buttons_request(&mut self, save: bool) -> Request {
-        Request::SetMouseButtons {
-            actions: self.buttons.clone(),
-            save,
+        let mut actions = self.buttons.clone();
+        if self.wheel_gate {
+            actions.extend(self.wheel.iter().cloned());
         }
+        Request::SetMouseButtons { actions, save }
     }
 }
 
@@ -524,8 +568,10 @@ pub fn summarise(a: &gg_ipc::MouseSettings) -> String {
     if let Some(hz) = a.polling_hz {
         parts.push(format!("{hz} Hz"));
     }
-    if a.buttons.is_some() {
-        parts.push("button layout".into());
+    match a.buttons.as_ref().map(Vec::len) {
+        Some(n) if n > FACTORY_BUTTONS.len() => parts.push("button layout and wheel".into()),
+        Some(_) => parts.push("button layout".into()),
+        None => {}
     }
     parts.join(" · ")
 }
@@ -557,11 +603,20 @@ pub fn reported_summary(m: &gg_ipc::MouseState) -> String {
     parts.join(" · ")
 }
 
+/// The mouse is there but asleep: it answers nothing, not even the battery. What it
+/// reported before isn't shown then, as it can't be checked until it wakes.
+pub fn asleep(m: &gg_ipc::MouseState) -> bool {
+    m.connected && m.battery.is_none()
+}
+
 /// The first line of the card's note: what the mouse reports, or why nothing is read.
 pub fn reported_note(gated: bool, mouse: Option<&gg_ipc::MouseState>) -> String {
     let summary = mouse.map(reported_summary).unwrap_or_default();
     if !gated {
         "Only the battery is read from this mouse while “Mouse: sleep timer and power settings” is off in Settings → Experimental.".into()
+    } else if mouse.is_some_and(asleep) {
+        "The mouse is asleep, so its settings aren't known until it wakes. Move it to wake it."
+            .into()
     } else if summary.is_empty() {
         "The mouse hasn't reported its settings yet: it answers once it's awake.".into()
     } else {
@@ -582,6 +637,7 @@ fn show_mouse_form(ui: &AppWindow, f: &MouseForm) {
     let radio = MouseRadio::ALL.iter().position(|r| *r == f.radio);
     g.set_radio(radio.map_or(-1, |i| i as i32));
     g.set_buttons(ints(f.button_menu()));
+    sync_rows(g.get_wheel(), f.wheel_menu(), |m| g.set_wheel(m));
     let keys: Vec<SharedString> = f.buttons.iter().map(|b| button_text(b).into()).collect();
     sync_rows(g.get_button_keys(), keys, |m| g.set_button_keys(m));
     show_picker(&g, f);
@@ -636,7 +692,18 @@ pub fn show_mouse(ui: &AppWindow, s: &State, form: &RefCell<MouseForm>) {
             .unwrap_or_default()
             .into(),
     );
-    g.set_sleep_read(sleep_read(s.mouse.as_ref().and_then(|m| m.sleep_secs)).into());
+    let wheel_gate = s.experimental.is_some_and(|e| e.on(Feature::MouseWheel));
+    g.set_wheel_gated(wheel_gate);
+    g.set_wheel_refusal(
+        Experimental::default()
+            .refusal(Feature::MouseWheel)
+            .unwrap_or_default()
+            .into(),
+    );
+    let labels = WHEEL.iter().map(|(_, l)| SharedString::from(*l)).collect();
+    sync_rows(g.get_wheel_actions(), labels, |m| g.set_wheel_actions(m));
+    let awake = s.mouse.as_ref().filter(|m| !asleep(m));
+    g.set_sleep_read(sleep_read(awake.and_then(|m| m.sleep_secs)).into());
     g.set_reported(
         reported_note(
             s.experimental.is_some_and(|e| e.on(Feature::MousePower)),
@@ -645,6 +712,7 @@ pub fn show_mouse(ui: &AppWindow, s: &State, form: &RefCell<MouseForm>) {
         .into(),
     );
     form.borrow_mut().follow(s.mouse.as_ref());
+    form.borrow_mut().wheel_gate = wheel_gate;
     let Some(m) = s.mouse.as_ref() else {
         // Onboard writes start off again too: they can't be undone.
         g.set_persist(false);
@@ -693,6 +761,7 @@ pub fn bind_mouse(ui: &AppWindow, client: &Client, form: Rc<RefCell<MouseForm>>)
     let radio = edit(|f, i, _| f.pick_radio(i as usize));
     g.on_pick_radio(move |i| radio(i, 0));
     g.on_pick_button(edit(|f, i, a| f.pick_button(i as usize, a as usize)));
+    g.on_pick_wheel(edit(|f, i, a| f.pick_wheel(i as usize, a as usize)));
     let factory = edit(|f, _, _| f.factory_buttons());
     g.on_factory_buttons(move || factory(0, 0));
     let pick_key = edit(|f, j, _| f.pick_key(j as usize));
@@ -759,6 +828,8 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
         m.invoke_set_stage_y(i, n);
     } else if let Some(i) = indexed("mouse.pick-button") {
         m.invoke_pick_button(i, n);
+    } else if let Some(i) = indexed("mouse.pick-wheel") {
+        m.invoke_pick_wheel(i, n);
     } else if let Some(text) = name.strip_prefix("mouse.key-filter=") {
         m.invoke_filter_keys(text.into());
     } else {
@@ -1218,10 +1289,14 @@ mod tests {
         assert_eq!(f.polling, 125);
     }
 
+    /// An awake mouse (it has a battery reading) that reports `sleep_secs`.
     fn reporting(sleep_secs: Option<u16>, written: Option<u8>) -> gg_ipc::MouseState {
         gg_ipc::MouseState {
             connected: true,
-            battery: None,
+            battery: Some(gg_ipc::BatteryState {
+                level: 50,
+                charging: false,
+            }),
             applied: written.map(|m| MouseSettings {
                 sleep_minutes: Some(m),
                 ..MouseSettings::default()
@@ -1298,6 +1373,99 @@ mod tests {
         let asleep = reporting(None, None);
         assert!(reported_note(true, Some(&asleep)).contains("once it's awake"));
         assert!(reported_note(true, None).contains("once it's awake"));
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn the_wheel_goes_with_the_buttons_only_while_its_gate_is_on() {
+        let mut f = MouseForm::default();
+        let Request::SetMouseButtons { actions, .. } = f.buttons_request(false) else {
+            panic!("not a buttons request");
+        };
+        assert_eq!(
+            actions, FACTORY_BUTTONS,
+            "gate off: the six alone, as before"
+        );
+        f.pick_wheel(0, 2);
+        f.pick_wheel(5, 0);
+        f.pick_wheel(1, 9);
+        assert_eq!(
+            f.wheel,
+            ["button4", "scrolldown"],
+            "picks past the menus change nothing"
+        );
+        assert_eq!(f.wheel_menu(), [2, 1]);
+        f.wheel_gate = true;
+        let Request::SetMouseButtons { actions, save } = f.buttons_request(true) else {
+            panic!("not a buttons request");
+        };
+        assert_eq!((actions.len(), save), (8, true));
+        assert_eq!(actions[6..], ["button4", "scrolldown"]);
+    }
+
+    #[test]
+    fn the_wheel_is_seeded_from_what_was_written_and_reset_with_the_buttons() {
+        let eight = names(&[
+            "button1",
+            "button2",
+            "button3",
+            "button4",
+            "button5",
+            "dpi",
+            "button4",
+            "scrolldown",
+        ]);
+        let mut f = MouseForm::default();
+        f.seed(&MouseSettings {
+            buttons: Some(eight.clone()),
+            ..MouseSettings::default()
+        });
+        assert_eq!((f.buttons.len(), f.wheel_menu()), (6, vec![2, 1]));
+        f.factory_buttons();
+        assert_eq!(
+            f.wheel_menu(),
+            [0, 1],
+            "reset to factory resets the wheel too"
+        );
+        assert_eq!(
+            summarise(&MouseSettings {
+                buttons: Some(eight),
+                ..MouseSettings::default()
+            }),
+            "button layout and wheel"
+        );
+        let mut g = MouseForm::default();
+        g.seed(&MouseSettings {
+            buttons: Some(names(&FACTORY_BUTTONS)),
+            ..MouseSettings::default()
+        });
+        assert_eq!(
+            g.wheel_menu(),
+            [0, 1],
+            "six written: the wheel stays factory"
+        );
+    }
+
+    /// The app's copy of the state keeps the old readings when only the battery goes to
+    /// none (that notification carries nothing else): they aren't shown or taken.
+    #[test]
+    fn an_asleep_mouse_shows_none_of_what_it_said_before() {
+        let mut m = reporting(Some(1200), Some(10));
+        m.reported_polling_hz = Some(125);
+        m.battery = None;
+        assert!(asleep(&m));
+        let note = reported_note(true, Some(&m));
+        assert!(note.contains("asleep") && !note.contains("125"), "{note}");
+        let mut f = MouseForm::default();
+        f.follow(Some(&m));
+        assert_eq!(f.polling, 1000, "not taken from an asleep mouse");
+        assert_eq!(f.sleep, 10, "what was written seeds it instead");
+        // Not connected isn't asleep: there's nothing to wake.
+        m.connected = false;
+        assert!(!asleep(&m));
     }
 
     #[test]

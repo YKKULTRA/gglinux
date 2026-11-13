@@ -2,9 +2,13 @@
 //! `ggctl mouse`: the Rival 3's settings, as the daemon has applied them.
 
 use anyhow::{bail, Context, Result};
-use gg_ipc::{DpiStage, MouseDpi, MouseRadio, MouseState, Request};
+use gg_device_mouse::{proto, ButtonAction};
+use gg_ipc::{DpiStage, MouseDpi, MouseRadio, MouseState, Request, ResponseData};
 
 use crate::flag_value;
+
+/// The factory buttons (`proto::default_buttons`), by the names the daemon takes.
+const FACTORY_BUTTONS: [&str; 6] = ["button1", "button2", "button3", "button4", "button5", "dpi"];
 
 /// Each mouse command takes exactly one value, so `dpi 800 1600` (a space where
 /// the comma belongs) is refused rather than sent as the single stage 800.
@@ -33,7 +37,20 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
                 .collect(),
             save,
         },
-        Some((&"buttons", _)) => bail!("usage: ggctl mouse buttons button1,...,dpi [--save]"),
+        Some((&"buttons", _)) => {
+            bail!("usage: ggctl mouse buttons button1,...,dpi[,up,down] [--save]   (6 buttons, then the wheel's two)")
+        }
+        // Checked before the daemon is asked anything, so a typo fails the same either way.
+        Some((&"wheel", [up, down])) => {
+            let wheel = [wheel_name(up)?, wheel_name(down)?];
+            wheel_request(applied_buttons()?.as_deref(), wheel, save)
+        }
+        Some((&"wheel", _)) => {
+            bail!(
+                "usage: ggctl mouse wheel <up> <down> [--save]   (each one of: {})",
+                wheel_names()
+            )
+        }
         Some((&"save", [])) => Request::SaveMouse,
         Some((&"save", _)) => bail!("usage: ggctl mouse save"),
         Some((&"sleep", [minutes])) => Request::SetMouseSleep {
@@ -53,10 +70,50 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
         Some((&"radio", _)) => bail!("usage: ggctl mouse radio normal|stable|efficient [--save]"),
         Some((other, _)) => {
             bail!(
-                "unknown mouse command '{other}' (try: dpi, polling, buttons, sleep, radio, save)"
+                "unknown mouse command '{other}' (try: dpi, polling, buttons, wheel, sleep, radio, save)"
             )
         }
     })
+}
+
+/// The names the wheel takes: only actions a capture of GG shows on it.
+fn wheel_names() -> String {
+    let names: Vec<&str> = gg_ipc::mouse_keys::WHEEL.iter().map(|(n, _)| *n).collect();
+    names.join(", ")
+}
+
+/// A wheel action as typed, if the daemon takes it for the wheel.
+fn wheel_name(name: &str) -> Result<String> {
+    match ButtonAction::parse(name) {
+        Ok(action) if proto::wheel_code(action).is_some() => Ok(name.trim().to_ascii_lowercase()),
+        _ => bail!(
+            "“{name}” is not known for the wheel yet (try: {})",
+            wheel_names()
+        ),
+    }
+}
+
+/// `ggctl mouse wheel`'s request: the six buttons as the daemon applied them (the factory
+/// six if it applied none), then the wheel's two. Buttons can't be read from the mouse, so
+/// the daemon's record is all there is.
+fn wheel_request(applied: Option<&[String]>, wheel: [String; 2], save: bool) -> Request {
+    let mut actions: Vec<String> = match applied {
+        Some(buttons) if buttons.len() >= FACTORY_BUTTONS.len() => {
+            buttons[..FACTORY_BUTTONS.len()].to_vec()
+        }
+        _ => FACTORY_BUTTONS.map(String::from).to_vec(),
+    };
+    actions.extend(wheel);
+    Request::SetMouseButtons { actions, save }
+}
+
+/// The buttons the daemon has applied, if any.
+fn applied_buttons() -> Result<Option<Vec<String>>> {
+    let ResponseData::Mouse { state } = crate::send(crate::connect()?, Request::GetMouseState)?
+    else {
+        bail!("the daemon did not send the mouse state");
+    };
+    Ok(state.applied.and_then(|a| a.buttons))
 }
 
 /// What `ggctl mouse` prints: whether it's there, its battery, what was applied.
@@ -79,6 +136,8 @@ pub fn print(state: &MouseState) {
         for line in reported {
             println!("  {line}");
         }
+    } else if state.connected && state.battery.is_none() {
+        println!("settings:  not known while it's asleep; it reports them once it wakes");
     }
     match &state.applied {
         Some(s) => {
@@ -86,7 +145,9 @@ pub fn print(state: &MouseState) {
                 println!("dpi:       {}", dpi_summary(dpi));
             }
             if let Some(buttons) = &s.buttons {
-                println!("buttons:   {}", buttons.join(","));
+                for line in button_lines(buttons) {
+                    println!("{line}");
+                }
             }
             if let Some(hz) = s.polling_hz {
                 println!("polling:   {hz} Hz");
@@ -102,6 +163,16 @@ pub fn print(state: &MouseState) {
         // genuinely unknown rather than assumed to be the default.
         None => println!("applied:   nothing yet this session (mouse is on its onboard settings)"),
     }
+}
+
+/// The applied buttons, and the wheel's two on their own line once they were written.
+fn button_lines(buttons: &[String]) -> Vec<String> {
+    let (six, wheel) = buttons.split_at(buttons.len().min(FACTORY_BUTTONS.len()));
+    let mut lines = vec![format!("buttons:   {}", six.join(","))];
+    if let [up, down] = wheel {
+        lines.push(format!("wheel:     up {up}, down {down}"));
+    }
+    lines
 }
 
 /// What the mouse itself reports of its settings, a line each; empty while they aren't
@@ -300,6 +371,74 @@ mod tests {
                 "radio:   stable (Wireless Stability)",
             ]
         );
+    }
+
+    #[test]
+    fn the_wheel_keeps_the_applied_buttons_or_the_factory_six() {
+        let wheel = || ["button4".to_string(), "scrolldown".to_string()];
+        let Request::SetMouseButtons { actions, save } = wheel_request(None, wheel(), true) else {
+            panic!("not a buttons request");
+        };
+        assert_eq!(
+            actions,
+            [
+                "button1",
+                "button2",
+                "button3",
+                "button4",
+                "button5",
+                "dpi",
+                "button4",
+                "scrolldown"
+            ]
+        );
+        assert!(save);
+        let applied: Vec<String> = [
+            "f13",
+            "button2",
+            "button3",
+            "button4",
+            "button5",
+            "dpi",
+            "scrollup",
+            "scrolldown",
+        ]
+        .map(String::from)
+        .to_vec();
+        let Request::SetMouseButtons { actions, .. } =
+            wheel_request(Some(applied.as_slice()), wheel(), false)
+        else {
+            panic!("not a buttons request");
+        };
+        assert_eq!(actions[0], "f13", "the applied buttons are kept");
+        assert_eq!(actions[6..], ["button4", "scrolldown"]);
+        assert_eq!(
+            button_lines(&actions),
+            [
+                "buttons:   f13,button2,button3,button4,button5,dpi",
+                "wheel:     up button4, down scrolldown"
+            ]
+        );
+        assert_eq!(
+            button_lines(&applied[..6]).len(),
+            1,
+            "no wheel line for six"
+        );
+    }
+
+    /// Refused before the daemon is asked anything, so no daemon is needed here.
+    #[test]
+    fn the_wheel_takes_only_what_a_capture_shows() {
+        for bad in ["mouse wheel f5 scrolldown", "mouse wheel scrollup dpi"] {
+            let e = parse(&args(bad)).err().unwrap().to_string();
+            assert!(e.contains("not known for the wheel yet"), "{bad}: {e}");
+            assert!(e.contains("scrollup, scrolldown, button4"), "{e}");
+        }
+        for bad in ["mouse wheel", "mouse wheel button4", "mouse wheel a b c"] {
+            let e = parse(&args(bad)).err().unwrap().to_string();
+            assert!(e.starts_with("usage: ggctl mouse wheel"), "{bad}: {e}");
+        }
+        assert_eq!(wheel_name(" Button4 ").unwrap(), "button4");
     }
 
     #[test]
