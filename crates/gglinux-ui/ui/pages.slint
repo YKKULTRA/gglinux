@@ -45,9 +45,14 @@ component Waiting inherits Text {
 export struct Game {
     name: string,
     who: string,
+    // Each event and what it draws on.
     events: string,
+    // What its screen handlers ask for that gglinux leaves out.
+    notes: string,
     enabled: bool,
     active: bool,
+    // Showing on the keyboard's screen now.
+    screen: bool,
 }
 
 export global GamesUi {
@@ -59,6 +64,7 @@ export global GamesUi {
     in property <string> error;
     callback set-enabled(bool);
     callback test();
+    callback test-screen();
     callback set-game(int, bool);
     callback remove(int);
 }
@@ -69,12 +75,14 @@ export component GamesPanel inherits Card {
         if !GamesUi.known : Waiting { text: "Asking gglinuxd about GameSense…"; }
         Shown { shown: GamesUi.known; gap: 0; VerticalLayout {
             spacing: 10px;
-            Toggle { text: "Let games control the keyboard lighting (GameSense)"; checked: GamesUi.enabled; enabled: !GamesUi.busy; toggled(v) => { GamesUi.set-enabled(v); } }
-            Hint { text: "Turning this on writes a small coreProps.json into each of Steam's Proton prefixes, so Windows games find gglinux; turning it off removes them. Games that support GameSense can take the keyboard over while they run, even with gglinux lighting off, and hand it back 15 seconds after they go quiet."; }
+            Toggle { text: "Let games control the keyboard lighting and screen (GameSense)"; checked: GamesUi.enabled; enabled: !GamesUi.busy; toggled(v) => { GamesUi.set-enabled(v); } }
+            Hint { text: "Turning this on writes a small coreProps.json into each of Steam's Proton prefixes, so Windows games find gglinux; turning it off removes them. Games that support GameSense can take the keyboard over while they run, even with gglinux lighting off, and hand it back 15 seconds after they go quiet. Text and pictures a game sends for the keyboard's screen show over your own screen picture, which comes back when the game's frames end."; }
             if GamesUi.enabled : Text { text: GamesUi.listening; color: Theme.text-dim; font-size: Theme.small; overflow: elide; }
             HorizontalLayout {
                 alignment: start;
-                Button { text: "Run test (F-key health bar, 20 s)"; enabled: !GamesUi.busy; clicked => { GamesUi.test(); } }
+                spacing: 10px;
+                Button { text: "Run test (F-key health bar and screen, 20 s)"; enabled: !GamesUi.busy; clicked => { GamesUi.test(); } }
+                Button { text: "Test the screen (4 s)"; enabled: !GamesUi.busy; clicked => { GamesUi.test-screen(); } }
             }
             Divider { }
             Head { text: "GAMES"; }
@@ -89,9 +97,14 @@ export component GamesPanel inherits Card {
                 VerticalLayout {
                     spacing: 2px;
                     horizontal-stretch: 1;
-                    Text { text: g.name; color: Theme.text; font-weight: 600; overflow: elide; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: g.name; color: Theme.text; font-weight: 600; overflow: elide; min-width: 0; horizontal-stretch: 1; }
+                        if g.screen : Text { text: "On the screen now"; color: Theme.accent; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 0; }
+                    }
                     if g.who != "" : Text { text: g.who; color: Theme.text-dim; font-size: Theme.small; overflow: elide; }
                     Text { text: g.events; color: Theme.text-dim; font-size: Theme.small; overflow: elide; }
+                    if g.notes != "" : Text { text: g.notes; color: Theme.text-dim; font-size: Theme.small; overflow: elide; }
                 }
                 VerticalLayout { alignment: center; horizontal-stretch: 0; Toggle { text: "on"; label-color: Theme.text-dim; checked: g.enabled; enabled: !GamesUi.busy; toggled(v) => { GamesUi.set-game(i, v); } } }
                 VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Remove"; small: true; enabled: !GamesUi.busy; clicked => { GamesUi.remove(i); } } }

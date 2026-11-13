@@ -50,12 +50,30 @@ pub fn show_games(ui: &AppWindow, s: &State) {
                 .unwrap_or_else(|| x.name.clone())
                 .into(),
             who: x.developer.clone().unwrap_or_default().into(),
-            events: x.events.join(", ").into(),
+            events: draws_line(x).into(),
+            notes: x.screen_notes().join(" · ").into(),
             enabled: x.enabled,
             active: x.active,
+            screen: x.on_screen,
         })
         .collect();
     sync_rows(g.get_games(), games, |m| g.set_games(m));
+}
+
+/// A game's events, each with what it draws on: "HEALTH: keys and screen · AMMO: keys".
+fn draws_line(game: &gg_ipc::GameInfo) -> String {
+    game.draws_by_event()
+        .into_iter()
+        .map(|(event, draws)| {
+            let labels: Vec<String> = draws.iter().map(|d| d.label()).collect();
+            if labels.is_empty() {
+                event.to_owned()
+            } else {
+                format!("{event}: {}", labels.join(" and "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn mark_games(ui: &AppWindow, busy: bool, error: SharedString) {
@@ -82,6 +100,8 @@ pub fn bind_games(ui: &AppWindow, client: &Client) {
     g.on_set_enabled(move |on| f(0, on));
     let f = send(|_, _, _| Some(Request::GamesenseTest));
     g.on_test(move || f(0, false));
+    let f = send(|_, _, _| Some(Request::GamesenseTestScreen));
+    g.on_test_screen(move || f(0, false));
     g.on_set_game(send(|gs, i, on| {
         gs.games.get(i as usize).map(|x| Request::SetGameEnabled {
             game: x.name.clone(),
@@ -913,6 +933,34 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_games_row_says_what_each_event_draws() {
+        use gg_ipc::{Draws, GameInfo, HandlerInfo};
+        let h = |event: &str, draws: Draws| HandlerInfo {
+            event: event.into(),
+            draws,
+        };
+        let game = GameInfo {
+            name: "G".into(),
+            display_name: None,
+            developer: None,
+            enabled: true,
+            active: false,
+            events: vec!["AMMO".into(), "HEALTH".into(), "OLD".into()],
+            handlers: vec![
+                h("AMMO", Draws::Keys),
+                h("HEALTH", Draws::Keys),
+                h("HEALTH", Draws::Screen { notes: Vec::new() }),
+            ],
+            on_screen: false,
+        };
+        assert_eq!(
+            draws_line(&game),
+            "AMMO: keys · HEALTH: keys and screen · OLD",
+            "an event with nothing known about it is just its name"
+        );
+    }
 
     #[test]
     fn the_rate_list_keeps_an_unusual_saved_rate() {
