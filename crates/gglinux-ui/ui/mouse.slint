@@ -44,9 +44,10 @@ export global MouseUi {
     in property <bool> wheel-gated;
     /// The sentence shown while it's off.
     in property <string> wheel-refusal;
-    /// Per direction (up, then down), its place in `actions`, as for a button: GG offers
-    /// the wheel what it offers a button.
-    in property <[int]> wheel: [7, 8];
+    /// Per direction: turned up its place in `actions`, as for a button (GG offers the
+    /// wheel what it offers a button); turned down its place in `down-actions`. -1 for a
+    /// name set elsewhere.
+    in property <[int]> wheel: [7, 0];
     /// Per direction, the line under it, as `button-keys` has it for a button.
     in property <[string]> wheel-keys: ["", ""];
     /// The row whose key list is open: a button (0 to 5), the wheel up (6) or down (7);
@@ -66,6 +67,9 @@ export global MouseUi {
     out property <[int]> rates: [125, 250, 500, 1000];
     out property <[string]> button-names: ["Left", "Right", "Middle", "Back", "Forward", "DPI"];
     out property <[string]> wheel-names: ["Scroll up", "Scroll down"];
+    /// The wheel turned down offers only the two entries a capture shows there
+    /// (mouse.rs: WHEEL_DOWN).
+    out property <[string]> down-actions: ["Scroll down", "Back"];
     /// The last two open a list to pick from (mouse.rs: KEY_ITEM, MEDIA_ITEM).
     out property <[string]> actions: [
         "Left click", "Right click", "Middle click", "Back", "Forward", "Button 6", "Cycle DPI",
@@ -93,7 +97,7 @@ export global MouseUi {
     callback pick-radio(int);
     callback apply-radio();
     callback pick-button(int, int);
-    /// Wheel direction (0 up, 1 down), and its place in `actions`.
+    /// Wheel direction (0 up, 1 down), and its place in `actions` (up) or `down-actions`.
     callback pick-wheel(int, int);
     callback factory-buttons();
     callback apply-dpi();
@@ -405,39 +409,40 @@ export component MousePanel inherits Card {
             }
         }
     }
-    // The wheel: greyed, with the reason, while its gate is off. Each direction is a row
-    // like a button's, with the same menu and key lists, as in GG.
+    // The wheel: greyed, with the reason, while its gate is off. Turned up, a row like a
+    // button's, with the same menu and key lists, as in GG; turned down, only the two
+    // entries a capture shows there.
     Shown { shown: !MouseUi.wheel-gated; gap: 0; Hint { text: MouseUi.wheel-refusal; color: Theme.accent; } }
-    for name[i] in MouseUi.wheel-names : VerticalLayout {
+    VerticalLayout {
         spacing: 0;
         Row {
-            label: name;
+            label: MouseUi.wheel-names[0];
             Pick {
                 width: 220px;
                 model: MouseUi.actions;
-                index: MouseUi.wheel[i];
+                index: MouseUi.wheel[0];
                 enabled: MouseUi.wheel-gated;
-                picked(a) => { MouseUi.pick-wheel(i, a); }
+                picked(a) => { MouseUi.pick-wheel(0, a); }
             }
         }
         Shown {
-            shown: MouseUi.wheel-keys[i] != "";
+            shown: MouseUi.wheel-keys[0] != "";
             gap: 0;
             HorizontalLayout {
                 padding-left: 122px;
                 padding-top: 4px;
-                Text { text: MouseUi.wheel-keys[i]; color: Theme.text-dim; font-size: Theme.small; }
+                Text { text: MouseUi.wheel-keys[0]; color: Theme.text-dim; font-size: Theme.small; }
             }
         }
         Shown {
-            shown: MouseUi.key-button == 6 + i;
+            shown: MouseUi.key-button == 6;
             gap: 0;
             HorizontalLayout {
                 padding-left: 122px;
                 padding-top: 8px;
                 KeyPicker {
-                    open: MouseUi.key-button == 6 + i;
-                    title: (MouseUi.key-media ? "Media key for " : "Keyboard key for ") + name;
+                    open: MouseUi.key-button == 6;
+                    title: (MouseUi.key-media ? "Media key for " : "Keyboard key for ") + MouseUi.wheel-names[0];
                     example: MouseUi.key-media ? "volume" : "F13";
                     choices: MouseUi.key-choices;
                     current: MouseUi.key-current;
@@ -449,7 +454,29 @@ export component MousePanel inherits Card {
             }
         }
     }
-    Hint { text: "The mouse can't report its buttons or its wheel back."; }
+    VerticalLayout {
+        spacing: 0;
+        Row {
+            label: MouseUi.wheel-names[1];
+            Pick {
+                width: 220px;
+                model: MouseUi.down-actions;
+                index: MouseUi.wheel[1];
+                enabled: MouseUi.wheel-gated;
+                picked(a) => { MouseUi.pick-wheel(1, a); }
+            }
+        }
+        Shown {
+            shown: MouseUi.wheel-keys[1] != "";
+            gap: 0;
+            HorizontalLayout {
+                padding-left: 122px;
+                padding-top: 4px;
+                Text { text: MouseUi.wheel-keys[1]; color: Theme.text-dim; font-size: Theme.small; }
+            }
+        }
+    }
+    Hint { text: "Turned down, the wheel offers only Scroll down or Back for now: no capture of GG shows anything else there. The mouse can't report its buttons or its wheel back."; }
     HorizontalLayout {
         alignment: start;
         Button { text: MouseUi.busy == "buttons" ? "Applying…" : "Apply buttons"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-buttons(); } }

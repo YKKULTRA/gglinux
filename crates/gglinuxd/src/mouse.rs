@@ -19,7 +19,7 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use gg_device_mouse::proto::{self, nearest_dpi};
+use gg_device_mouse::proto::{self, nearest_dpi, WheelSide};
 use gg_device_mouse::{
     ButtonAction, Mouse, PollingRate, Radio, ReadBack, BUTTON_COUNT, DEFAULT_WHEEL,
 };
@@ -611,10 +611,10 @@ struct ButtonPlan {
 }
 
 /// Check a buttons request and plan what goes out. Six names set the buttons and leave
-/// the wheel alone. Eight add the wheel's up and down: any button name, as the wheel takes
-/// every action GG offers for it ([`proto::wheel_takes`]), and anything but its factory pair
-/// needs [`Feature::MouseWheel`]. While that gate is off, eight names ending in the factory
-/// pair send exactly what six do.
+/// the wheel alone. Eight add the wheel's up and down: turned up any button name, turned
+/// down only what a capture shows there ([`proto::wheel_takes`]), and anything but its
+/// factory pair needs [`Feature::MouseWheel`]. While that gate is off, eight names ending in
+/// the factory pair send exactly what six do.
 fn button_plan(gates: &Experimental, actions: &[String]) -> Result<ButtonPlan, String> {
     let (buttons, wheel) = match actions.len() {
         BUTTON_COUNT => (actions, None),
@@ -633,7 +633,10 @@ fn button_plan(gates: &Experimental, actions: &[String]) -> Result<ButtonPlan, S
             wheel: None,
         });
     };
-    let wheel = [wheel_action(&names[0])?, wheel_action(&names[1])?];
+    let wheel = [
+        wheel_action(&names[0], WheelSide::Up)?,
+        wheel_action(&names[1], WheelSide::Down)?,
+    ];
     let wheel = match gates.refusal(Feature::MouseWheel) {
         None => Some(wheel),
         Some(_) if wheel == DEFAULT_WHEEL => None,
@@ -642,16 +645,20 @@ fn button_plan(gates: &Experimental, actions: &[String]) -> Result<ButtonPlan, S
     Ok(ButtonPlan { buttons, wheel })
 }
 
-/// The action a wheel name stands for: any name a button takes ([`ButtonAction::parse`]),
-/// as long as the wheel takes it too ([`proto::wheel_takes`], true for every parsed name).
-fn wheel_action(name: &str) -> Result<ButtonAction, String> {
+/// The action a wheel name stands for on `side`: a name a button takes
+/// ([`ButtonAction::parse`]) that the wheel takes there ([`proto::wheel_takes`]): turned up
+/// every one, turned down only scrolldown and button4 so far.
+fn wheel_action(name: &str, side: WheelSide) -> Result<ButtonAction, String> {
     let action = ButtonAction::parse(name).map_err(|e| {
         format!(
-            "{e}: the wheel takes what a button takes (button1 to button6, dpi, scrollup, scrolldown, disable, a key or a media key)"
+            "{e}: turned up, the wheel takes what a button takes (button1 to button6, dpi, scrollup, scrolldown, disable, a key or a media key)"
         )
     })?;
-    if !proto::wheel_takes(action) {
-        return Err(format!("the wheel doesn't take “{}”", name.trim()));
+    if !proto::wheel_takes(side, action) {
+        return Err(format!(
+            "“{}” is not known for the wheel's down position yet: turned down it takes scrolldown or button4",
+            name.trim()
+        ));
     }
     Ok(action)
 }
@@ -995,10 +1002,11 @@ mod tests {
         assert!(b.fake.sent().is_empty(), "refused before anything went out");
     }
 
-    /// Every action a button takes goes on the wheel too (captures rival-5, rival-8 to
-    /// rival-10), as its buttons-table entry, in either direction.
+    /// Turned up, every action a button takes goes on the wheel too (captures rival-5,
+    /// rival-8 to rival-10), as its buttons-table entry; turned down, only scrolldown and
+    /// button4, the two a capture shows there (review R2, M1).
     #[test]
-    fn the_wheel_takes_every_action_a_button_takes() {
+    fn the_wheel_takes_every_action_a_button_takes_turned_up() {
         for (name, entry) in [
             ("button1", [0x01, 0]),
             ("button6", [0x06, 0]),
@@ -1013,10 +1021,25 @@ mod tests {
             let sent = &b.fake.sent()[2];
             assert_eq!(sent[..3], [0x1A, entry[0], entry[1]], "{name} up");
             b.fake.clear_sent();
-            b.buttons(&with_wheel("scrollup", name), false).unwrap();
-            let sent = &b.fake.sent()[2];
-            assert_eq!(sent[6..8], entry, "{name} down");
+            let down = b.buttons(&with_wheel("scrollup", name), false);
+            if name == "scrolldown" {
+                assert_eq!(b.fake.sent()[2][6..8], entry, "{name} down");
+            } else {
+                let why = down.unwrap_err();
+                assert!(
+                    why.contains("not known for the wheel's down position yet"),
+                    "{why}"
+                );
+                assert!(b.fake.sent().is_empty(), "{name} down: nothing sent");
+            }
         }
+        let mut b = Bench::new(&[Feature::MouseWheel]);
+        b.buttons(&with_wheel("scrollup", "button4"), false)
+            .unwrap();
+        assert_eq!(b.fake.sent()[2][6..8], [0x04, 0], "button4 down");
+        assert!(b
+            .buttons(&with_wheel("scrolldown", "scrollup"), false)
+            .is_err());
     }
 
     #[test]
@@ -1026,7 +1049,10 @@ mod tests {
             let why = b
                 .buttons(&with_wheel(name, "scrolldown"), false)
                 .unwrap_err();
-            assert!(why.contains("the wheel takes what a button takes"), "{name}: {why}");
+            assert!(
+                why.contains("the wheel takes what a button takes"),
+                "{name}: {why}"
+            );
             assert!(b.buttons(&with_wheel("scrollup", name), false).is_err());
             assert!(b.fake.sent().is_empty(), "{name}");
         }
@@ -1075,9 +1101,9 @@ mod tests {
         assert_eq!((now.battery, now.sleep_secs), (None, None));
     }
 
-    /// The app and ggctl offer the button names for the wheel (the actions menu and the
-    /// key and media lists of `gg_ipc::mouse_keys`): each must be one the wheel takes, and
-    /// the factory pair must be the mouse's.
+    /// The app and ggctl offer the button names for the wheel turned up (the actions menu
+    /// and the key and media lists of `gg_ipc::mouse_keys`): each must be one the wheel
+    /// takes, and the factory pair must be the mouse's.
     #[test]
     fn every_name_the_app_offers_a_button_goes_on_the_wheel() {
         let actions = [
@@ -1097,9 +1123,13 @@ mod tests {
             .chain(gg_ipc::mouse_keys::MEDIA)
             .map(|(name, _)| *name);
         for name in actions.into_iter().chain(lists) {
-            assert!(wheel_action(name).is_ok(), "{name}");
+            assert!(wheel_action(name, WheelSide::Up).is_ok(), "{name}");
         }
-        let factory = gg_ipc::mouse_keys::WHEEL_FACTORY.map(|n| wheel_action(n).unwrap());
+        let [up, down] = gg_ipc::mouse_keys::WHEEL_FACTORY;
+        let factory = [
+            wheel_action(up, WheelSide::Up).unwrap(),
+            wheel_action(down, WheelSide::Down).unwrap(),
+        ];
         assert_eq!(factory, DEFAULT_WHEEL);
     }
 

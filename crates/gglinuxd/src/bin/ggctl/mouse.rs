@@ -2,7 +2,8 @@
 //! `ggctl mouse`: the Rival 3's settings, as the daemon has applied them.
 
 use anyhow::{bail, Context, Result};
-use gg_device_mouse::{proto, ButtonAction};
+use gg_device_mouse::proto::{self, WheelSide};
+use gg_device_mouse::ButtonAction;
 use gg_ipc::{DpiStage, MouseDpi, MouseRadio, MouseState, Request, ResponseData};
 
 use crate::flag_value;
@@ -42,7 +43,10 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
         }
         // Checked before the daemon is asked anything, so a typo fails the same either way.
         Some((&"wheel", [up, down])) => {
-            let wheel = [wheel_name(up)?, wheel_name(down)?];
+            let wheel = [
+                wheel_name(up, WheelSide::Up)?,
+                wheel_name(down, WheelSide::Down)?,
+            ];
             wheel_request(applied_buttons()?.as_deref(), wheel, save)
         }
         Some((&"wheel", _)) => {
@@ -73,15 +77,20 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
     })
 }
 
-/// What the wheel takes, in words: what a button takes, as GG offers it.
+/// What the wheel takes, in words: turned up what a button takes, as GG offers it; turned
+/// down only what a capture shows there.
 const WHEEL_TAKES: &str =
-    "what a button takes: button1 to button6, dpi, scrollup, scrolldown, disable, a key such as f5, or a media key such as volumeup";
+    "up: what a button takes (button1 to button6, dpi, scrollup, scrolldown, disable, a key such as f5, or a media key such as volumeup); down: scrolldown or button4";
 
-/// A wheel action as typed, if the daemon takes it for the wheel.
-fn wheel_name(name: &str) -> Result<String> {
+/// A wheel action as typed, if the daemon takes it for the wheel on `side`.
+fn wheel_name(name: &str, side: WheelSide) -> Result<String> {
     match ButtonAction::parse(name) {
-        Ok(action) if proto::wheel_takes(action) => Ok(name.trim().to_ascii_lowercase()),
-        _ => bail!("the wheel doesn't take “{}”: it takes {WHEEL_TAKES}", name.trim()),
+        Ok(action) if proto::wheel_takes(side, action) => Ok(name.trim().to_ascii_lowercase()),
+        Ok(_) => bail!(
+            "“{}” is not known for the wheel's down position yet: turned down it takes scrolldown or button4",
+            name.trim()
+        ),
+        Err(_) => bail!("the wheel doesn't take “{}”: {WHEEL_TAKES}", name.trim()),
     }
 }
 
@@ -418,13 +427,34 @@ mod tests {
         );
     }
 
-    /// Any name a button takes goes on the wheel; anything else is refused before the
-    /// daemon is asked anything, so no daemon is needed here.
+    /// Turned up, any name a button takes goes on the wheel; turned down only scrolldown
+    /// and button4. Anything else is refused before the daemon is asked anything, so no
+    /// daemon is needed here.
     #[test]
-    fn the_wheel_takes_any_button_name() {
-        for name in ["button1", "Button6", "dpi", "disable", "f5", "a", "volumeup", "mute"] {
-            assert_eq!(wheel_name(name).unwrap(), name.to_ascii_lowercase());
+    fn the_wheel_takes_any_button_name_turned_up() {
+        for name in [
+            "button1", "Button6", "dpi", "disable", "f5", "a", "volumeup", "mute",
+        ] {
+            assert_eq!(
+                wheel_name(name, WheelSide::Up).unwrap(),
+                name.to_ascii_lowercase()
+            );
+            if !name.eq_ignore_ascii_case("button4") {
+                let e = wheel_name(name, WheelSide::Down).unwrap_err().to_string();
+                assert!(
+                    e.contains("not known for the wheel's down position yet"),
+                    "{e}"
+                );
+            }
         }
+        for name in ["scrolldown", "button4"] {
+            assert_eq!(wheel_name(name, WheelSide::Down).unwrap(), name);
+        }
+        let e = parse(&args("mouse wheel scrolldown scrollup"))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains("down position"), "{e}");
         for bad in ["mouse wheel f99 scrolldown", "mouse wheel scrollup button7"] {
             let e = parse(&args(bad)).err().unwrap().to_string();
             assert!(e.contains("the wheel doesn't take"), "{bad}: {e}");
@@ -434,7 +464,7 @@ mod tests {
             let e = parse(&args(bad)).err().unwrap().to_string();
             assert!(e.starts_with("usage: ggctl mouse wheel"), "{bad}: {e}");
         }
-        assert_eq!(wheel_name(" Button4 ").unwrap(), "button4");
+        assert_eq!(wheel_name(" Button4 ", WheelSide::Down).unwrap(), "button4");
     }
 
     #[test]

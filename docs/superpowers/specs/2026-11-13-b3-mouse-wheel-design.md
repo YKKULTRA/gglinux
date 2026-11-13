@@ -108,3 +108,44 @@ errors. To check by hand (gate on: `ggctl experimental mouse_wheel on`):
    asleep: move it, then try again", exit status 1; `ggctl mouse` shows "settings: not known while
    it's asleep". Move it, wait a few seconds, `ggctl mouse` shows the settings again. Put the timer
    back with `ggctl mouse sleep 20`.
+
+## Addendum (unit c1-followups): every wheel action GG offers, by position
+
+**What changed.** The three-row table `WHEEL_ACTIONS` is gone. `gg_device_mouse::proto::wheel_takes(side,
+action)` is a rule over `ButtonAction` kinds and the wheel's two positions (`WheelSide::{Up, Down}`), and
+`wheel_packet` writes each entry with the same `entry()` the buttons table `19` uses (so a wheel entry is, by
+construction, the buttons field for that action, zeros after the used bytes).
+
+**Sources.** Our own GG 123 captures `rival-8.pcap` … `rival-10.pcap` (2026-11-13, decoded with
+`lab/usbpcap_hid.py FILE --dev 3`; GG-CAPTURES-2026-11-13.md, last Rival paragraph), plus rival-5:
+
+| GG action | entry | up position | down position |
+|---|---|---|---|
+| Button 1, 2, 3, 5, 6 | `01` `02` `03` `05` `06` | rival-8 22:08:25 … 22:09:12 | not captured |
+| Button 4 | `04` | rival-5 | rival-8 22:10:01 (`1a 31 00 00 00 00 04`) |
+| DPI Toggle | `30` | rival-8 22:09:25 | not captured |
+| Scroll Up | `31` | rival-5 (default) | not captured |
+| Scroll Down | `32` | rival-8 22:09:36 (`1a 32 … 32`) | rival-5 / rival-8 (default) |
+| Keyboard key | `51 <usage>` (A = `51 04`) | rival-9 22:11:45 | not captured |
+| Media key | `61 <usage>` (Volume Up = `61 e9`) | rival-9 22:12:15 | not captured |
+| Deactivate | `00` | rival-10 22:13:50 (GG sent `00 e9`) | not captured |
+
+**Decisions.**
+- **Turned up: every kind.** Buttons 1–6 (the mouse's six; `Button(0)` and `Button(7+)` refused), DPI, scroll up
+  and down, off, any key or media key whose code is in rivalcfg's tables (the only codes `ButtonAction::parse`
+  gives; other codes refused).
+- **Turned down: only `32` and `04`** (review R2, M1). Everything else is refused with "… is not known for the
+  wheel's down position yet". GG's own direction swap (`scrolldown scrollup`) is therefore refused.
+- **Zeros where GG left a stale byte.** rival-10 shows GG keeping the media usage `e9` after switching to
+  Deactivate (`1a 00 e9`) and back to Scroll Up (`1a 31 e9`). gglinux writes `1a 00 00 …` and `1a 31 00 …`, GG's
+  clean form. Whether the mouse reads that byte for these actions isn't known; every other capture has zeros there.
+- **ggctl:** `ggctl mouse wheel <up> <down>` takes any button name turned up and `scrolldown`/`button4` turned
+  down. **App:** the "Scroll up" row has the buttons' menu (now with "Button 6") plus "Keyboard key…" /
+  "Media key…"; the "Scroll down" row offers "Scroll down" and "Back" only, with a hint saying why.
+- `gg_ipc::mouse_keys::WHEEL` is no longer used by the app, ggctl or the daemon (its file isn't this unit's).
+
+**Unverified on hardware, two-minute check** (gate on: `ggctl experimental mouse_wheel on`):
+1. `ggctl mouse wheel a scrolldown` → "ok". In a text editor, turning the wheel up types `a`; down scrolls.
+2. `ggctl mouse wheel volumeup button4` → wheel up raises the volume, down goes back in a browser.
+3. `ggctl mouse wheel scrolldown scrollup` → refused, nothing sent.
+4. Put it back: `ggctl mouse wheel scrollup scrolldown`.
