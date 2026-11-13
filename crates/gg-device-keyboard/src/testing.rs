@@ -20,16 +20,28 @@
 //! - **lags** like the keyboard: a change scripted with [`FakeTransport::change_after`]
 //!   shows only from the second read after the command that makes it. The first read
 //!   still gets the old answer, so code that reads once, straight after a write, and
-//!   trusts what it gets fails here as it would on the device.
+//!   trusts what it gets fails here as it would on the device;
+//! - can **hold binding layers** ([`FakeTransport::hold_layer`]): a `36` write changes the
+//!   blocks it names, a `B6` read answers the keys asked from what is held. A write shows
+//!   only to reads asked [`READ_SETTLE`] or more after it, so code that reads a layer back
+//!   at once sees the old one. Layer writes can be dropped, as the owner's keyboard
+//!   dropped some: the next few ([`FakeTransport::drop_layer_writes`]), or each that comes
+//!   too soon after the report before ([`FakeTransport::drop_layer_writes_closer_than`]).
+//!   A slot load can replace a held layer, lagging one read like a scripted change
+//!   ([`FakeTransport::load_layer_after`]);
+//! - keeps when each report came ([`FakeTransport::sent_at`]).
 //!
 //! It checks nothing: the allowlist is [`crate::Keyboard`]'s, before the transport.
 
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Result};
 
+use crate::allow::{BLOCK, OP_BINDINGS, OP_READ_BINDINGS};
+use crate::bindings::{Block, Layer, READ_SETTLE};
 use crate::{proto, Keyboard, Transport};
 
 /// How a report was sent.
@@ -112,6 +124,67 @@ struct Pending {
 /// Counts from 1, the end left out.
 type Span = (usize, usize);
 
+/// A binding layer the fake holds.
+struct Held {
+    layer: u8,
+    blocks: Vec<Block>,
+    /// Writes not shown yet, with when they came, oldest first.
+    pending: Vec<(Instant, Vec<Block>)>,
+    /// A layer a command loaded, and whether the first read after it went by.
+    loading: Option<(Vec<Block>, bool)>,
+}
+
+impl Held {
+    /// Show the writes that came `settle` or more before `now`.
+    fn settle(&mut self, now: Instant, settle: Duration) {
+        while let Some((at, _)) = self.pending.first() {
+            if now.saturating_duration_since(*at) < settle {
+                break;
+            }
+            let (_, blocks) = self.pending.remove(0);
+            for b in blocks {
+                match self.blocks.iter_mut().find(|h| h.code == b.code) {
+                    Some(slot) => *slot = b,
+                    None => self.blocks.push(b),
+                }
+            }
+        }
+    }
+
+    /// The answer to a read of `asked`: `B6 00 <layer> <count> <blocks>`, for the keys held.
+    /// A loaded layer shows from the second read after its command.
+    fn reply(&mut self, asked: &[u8]) -> Vec<u8> {
+        match self.loading.take() {
+            Some((blocks, false)) => self.loading = Some((blocks, true)),
+            Some((blocks, true)) => self.blocks = blocks,
+            None => {}
+        }
+        let found: Vec<&Block> = asked
+            .iter()
+            .filter_map(|code| self.blocks.iter().find(|b| b.code == *code))
+            .collect();
+        let mut reply = vec![OP_READ_BINDINGS, 0x00, self.layer, found.len() as u8];
+        reply.extend(found.iter().flat_map(|b| b.bytes()));
+        reply
+    }
+}
+
+/// The blocks a `36` or `B6` report (report id first) names, as many as its count says.
+fn named_blocks(report: &[u8]) -> Vec<Block> {
+    let count = usize::from(report.get(3).copied().unwrap_or(0));
+    report
+        .get(4..)
+        .unwrap_or_default()
+        .chunks_exact(BLOCK)
+        .take(count)
+        .map(|b| Block {
+            code: b[0],
+            function: b[1],
+            codes: [b[2], b[3], b[4], b[5]],
+        })
+        .collect()
+}
+
 fn span(range: impl RangeBounds<usize>) -> Span {
     let start = match range.start_bound() {
         Bound::Included(&n) => n,
@@ -129,6 +202,10 @@ fn span(range: impl RangeBounds<usize>) -> Span {
 #[derive(Default)]
 struct Inner {
     sent: Vec<Sent>,
+    /// When each report in `sent` came.
+    sent_at: Vec<Instant>,
+    /// When the last report came, failed sends left out; kept by `clear_sent`.
+    last_at: Option<Instant>,
     /// Sends tried, failed ones too.
     sends: usize,
     fail: Vec<usize>,
@@ -145,6 +222,16 @@ struct Inner {
     pending: Vec<Pending>,
     last_feature: Option<Vec<u8>>,
     last_output: Option<Vec<u8>>,
+    /// The binding layers held ([`FakeTransport::hold_layer`]).
+    layers: Vec<Held>,
+    /// How many writes of a held layer are still to be dropped.
+    drop_writes: usize,
+    /// A write of a held layer this soon after the report before is dropped.
+    drop_closer_than: Option<Duration>,
+    /// How long a write of a held layer takes to show; [`READ_SETTLE`] when not set.
+    layer_settle: Option<Duration>,
+    /// Commands that load a held layer ([`FakeTransport::load_layer_after`]).
+    layer_loads: Vec<(Key, u8, Vec<Block>)>,
 }
 
 /// See the module docs. Clones share one fake: keep one to look at what was sent after
@@ -301,9 +388,74 @@ impl FakeTransport {
         self.lock().sent.clone()
     }
 
+    /// When each report in [`FakeTransport::sent`] came, in the same order.
+    pub fn sent_at(&self) -> Vec<Instant> {
+        self.lock().sent_at.clone()
+    }
+
     /// Forget the reports sent so far (the count for [`FakeTransport::fail_send`] goes on).
     pub fn clear_sent(&self) {
-        self.lock().sent.clear();
+        let mut inner = self.lock();
+        inner.sent.clear();
+        inner.sent_at.clear();
+    }
+
+    /// Hold `blocks` as the keyboard's `layer`: from now on a `36` write of that layer
+    /// changes the blocks it names, from [`READ_SETTLE`] after it, and a `B6` read of it
+    /// answers the keys asked from what is held, before anything scripted.
+    pub fn hold_layer(&self, layer: Layer, blocks: &[Block]) -> &Self {
+        let mut inner = self.lock();
+        inner.layers.retain(|h| h.layer != layer.byte());
+        inner.layers.push(Held {
+            layer: layer.byte(),
+            blocks: blocks.to_vec(),
+            pending: Vec::new(),
+            loading: None,
+        });
+        drop(inner);
+        self
+    }
+
+    /// What the fake holds as `layer` now, writes that don't show yet left out.
+    pub fn held_layer(&self, layer: Layer) -> Option<Vec<Block>> {
+        let mut inner = self.lock();
+        let settle = inner.layer_settle.unwrap_or(READ_SETTLE);
+        let held = inner.layers.iter_mut().find(|h| h.layer == layer.byte())?;
+        held.settle(Instant::now(), settle);
+        Some(held.blocks.clone())
+    }
+
+    /// Drop the next `n` writes of a held layer: they're kept in [`FakeTransport::sent`],
+    /// but the layer stays as it was, as the owner's keyboard did now and then without a
+    /// word (4 of 16 deep-layer writes through the daemon, 2026-11-13).
+    pub fn drop_layer_writes(&self, n: usize) -> &Self {
+        self.lock().drop_writes = n;
+        self
+    }
+
+    /// Drop each write of a held layer that comes less than `gap` after the report before
+    /// it: the owner's keyboard dropped 2 of 3 written 0 ms after another report, and kept
+    /// every one 2 ms or more after it.
+    pub fn drop_layer_writes_closer_than(&self, gap: Duration) -> &Self {
+        self.lock().drop_closer_than = Some(gap);
+        self
+    }
+
+    /// Once a report matching `command` goes out (a slot load, `B2`), the held `layer`
+    /// becomes `blocks`, writes not shown yet dropped, from the second read of it on: the
+    /// first still shows the layer from before, as the keyboard serves the state from
+    /// before a command on the first read after it. Each time the command goes.
+    pub fn load_layer_after(&self, command: Key, layer: Layer, blocks: &[Block]) -> &Self {
+        self.lock()
+            .layer_loads
+            .push((command, layer.byte(), blocks.to_vec()));
+        self
+    }
+
+    /// Make a write of a held layer show only `settle` after it, not [`READ_SETTLE`].
+    pub fn layer_settle(&self, settle: Duration) -> &Self {
+        self.lock().layer_settle = Some(settle);
+        self
     }
 
     fn script(&self, read: Read, key: Key, answer: Answer) -> &Self {
@@ -330,6 +482,23 @@ impl Inner {
             kind,
             report: report.to_vec(),
         });
+        let now = Instant::now();
+        let close = self
+            .last_at
+            .zip(self.drop_closer_than)
+            .is_some_and(|(last, gap)| now.saturating_duration_since(last) < gap);
+        self.sent_at.push(now);
+        self.last_at = Some(now);
+        if kind == Kind::Feature {
+            self.layer_report(report, now, close);
+        }
+        for (command, layer, blocks) in &self.layer_loads {
+            let held = self.layers.iter_mut().find(|h| h.layer == *layer);
+            if let Some(held) = held.filter(|_| command.matches(report)) {
+                held.pending.clear();
+                held.loading = Some((blocks.clone(), false));
+            }
+        }
         if let Some(i) = self.queue_after.iter().position(|(k, _)| k.matches(report)) {
             let (_, late) = self.queue_after.remove(i);
             self.queue.push_back(late);
@@ -349,8 +518,39 @@ impl Inner {
         Ok(())
     }
 
+    /// A held layer's write (`36`) waits to show, unless it's dropped (`close`: it came
+    /// too soon after the report before); its read (`B6`) shows the writes due by now.
+    fn layer_report(&mut self, report: &[u8], now: Instant, close: bool) {
+        let (op, layer) = match report {
+            [_, op, layer, ..] => (*op, *layer),
+            _ => return,
+        };
+        let Some(held) = self.layers.iter_mut().find(|h| h.layer == layer) else {
+            return;
+        };
+        match op {
+            OP_BINDINGS if close => {}
+            OP_BINDINGS if self.drop_writes > 0 => self.drop_writes -= 1,
+            OP_BINDINGS => {
+                // A load before this write is in by now.
+                if let Some((blocks, _)) = held.loading.take() {
+                    held.blocks = blocks;
+                }
+                held.pending.push((now, named_blocks(report)));
+            }
+            OP_READ_BINDINGS => held.settle(now, self.layer_settle.unwrap_or(READ_SETTLE)),
+            _ => {}
+        }
+    }
+
     /// What a read after `request` gets, if anything is scripted for it.
     fn answer(&mut self, read: Read, request: &[u8]) -> Option<Vec<u8>> {
+        if let [_, OP_READ_BINDINGS, layer, ..] = request {
+            if let Some(held) = self.layers.iter_mut().find(|h| h.layer == *layer) {
+                let asked: Vec<u8> = named_blocks(request).iter().map(|b| b.code).collect();
+                return (read == Read::Feature).then(|| held.reply(&asked));
+            }
+        }
         // The lag: the first read after a change's command passes it by; the second
         // makes it the answer from then on.
         if let Some(i) = self
@@ -619,5 +819,107 @@ mod tests {
         fake.write(&[0, 0x02, 0x01, 0x84]).unwrap();
         assert_eq!(validate(&fake), 0x01, "still the old answer");
         assert_eq!(validate(&fake), 0x00);
+    }
+
+    fn key(code: u8, function: u8) -> Block {
+        Block {
+            code,
+            function,
+            codes: [code, 0, 0, 0],
+        }
+    }
+
+    /// The bytes after the report id of a read of `codes` on the normal layer.
+    fn read_normal(fake: &FakeTransport, codes: &[u8]) -> Vec<u8> {
+        let request = crate::bindings::read_request(Layer::Normal, codes).unwrap();
+        fake.send_feature(&request).unwrap();
+        feature_read(fake)[1..].to_vec()
+    }
+
+    fn write_normal(fake: &FakeTransport, blocks: &[Block]) {
+        let report = crate::bindings::write_report(Layer::Normal, blocks).unwrap();
+        fake.send_feature(&report).unwrap();
+    }
+
+    #[test]
+    fn a_held_layer_answers_the_keys_asked_and_shows_a_write_a_settle_after_it() {
+        let fake = FakeTransport::new();
+        // Longer than READ_SETTLE, so "at once" holds on a busy machine too.
+        let settle = Duration::from_millis(300);
+        fake.hold_layer(Layer::Normal, &[key(0x04, 0x51), key(0x05, 0x51)])
+            .layer_settle(settle);
+        assert_eq!(
+            read_normal(&fake, &[0x05])[..10],
+            [0xB6, 0x00, 0x00, 0x01, 0x05, 0x51, 0x05, 0, 0, 0],
+            "only the key asked"
+        );
+        write_normal(&fake, &[key(0x04, 0x30)]);
+        assert_eq!(
+            read_normal(&fake, &[0x04])[5],
+            0x51,
+            "asked at once: still the old block"
+        );
+        std::thread::sleep(settle);
+        assert_eq!(
+            read_normal(&fake, &[0x04, 0x05])[4..16],
+            [0x04, 0x30, 0x04, 0, 0, 0, 0x05, 0x51, 0x05, 0, 0, 0]
+        );
+        assert_eq!(
+            fake.held_layer(Layer::Normal).unwrap(),
+            [key(0x04, 0x30), key(0x05, 0x51)]
+        );
+        assert_eq!(fake.held_layer(Layer::Fn), None);
+        // A layer not held is answered as before: the bare acknowledgement.
+        let fn_read = crate::bindings::read_request(Layer::Fn, &[0x04]).unwrap();
+        fake.send_feature(&fn_read).unwrap();
+        assert_eq!(feature_read(&fake)[1..3], [0xB6, 0x00]);
+        assert_eq!(fake.sent_at().len(), fake.sent().len());
+    }
+
+    #[test]
+    fn held_layer_writes_can_be_dropped_the_next_few_or_those_too_soon_after_another() {
+        let fake = FakeTransport::new();
+        fake.hold_layer(Layer::Normal, &[key(0x04, 0x51)]);
+        fake.drop_layer_writes(1);
+        write_normal(&fake, &[key(0x04, 0x30)]);
+        std::thread::sleep(READ_SETTLE);
+        assert_eq!(
+            fake.held_layer(Layer::Normal).unwrap(),
+            [key(0x04, 0x51)],
+            "dropped"
+        );
+        write_normal(&fake, &[key(0x04, 0x30)]);
+        std::thread::sleep(READ_SETTLE);
+        assert_eq!(
+            fake.held_layer(Layer::Normal).unwrap(),
+            [key(0x04, 0x30)],
+            "kept"
+        );
+        assert_eq!(fake.sent().len(), 2, "both reached it");
+
+        let gap = Duration::from_secs(1);
+        fake.drop_layer_writes_closer_than(gap);
+        fake.send_feature(&[0, 0x40]).unwrap();
+        write_normal(&fake, &[key(0x04, 0x31)]);
+        std::thread::sleep(gap.max(READ_SETTLE));
+        assert_eq!(
+            fake.held_layer(Layer::Normal).unwrap(),
+            [key(0x04, 0x30)],
+            "too soon"
+        );
+        write_normal(&fake, &[key(0x04, 0x31)]);
+        std::thread::sleep(READ_SETTLE);
+        assert_eq!(fake.held_layer(Layer::Normal).unwrap(), [key(0x04, 0x31)]);
+    }
+
+    #[test]
+    fn a_load_replaces_a_held_layer_from_the_second_read_after_it() {
+        let fake = FakeTransport::new();
+        fake.hold_layer(Layer::Normal, &[key(0x04, 0x51)])
+            .load_layer_after(Key::op(0xB2), Layer::Normal, &[key(0x04, 0x01)]);
+        fake.write(&[0, 0xB2, 0x01]).unwrap();
+        assert_eq!(read_normal(&fake, &[0x04])[5], 0x51, "the first read lags");
+        assert_eq!(read_normal(&fake, &[0x04])[5], 0x01);
+        assert_eq!(read_normal(&fake, &[0x04])[5], 0x01, "and stays");
     }
 }

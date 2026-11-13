@@ -2,8 +2,9 @@
 //! The fake keyboard's key bindings, kept like the daemon keeps them. Its keyboard starts
 //! stock: every key itself on the normal layer, the nine shortcuts of its own on the Fn
 //! layer, nothing past the second point. A change is merged onto that as the daemon merges
-//! it (so a change to one of those shortcuts is refused), and a read lags like the
-//! keyboard: the first read after a change still shows what was there before it.
+//! it (so a change to one of those shortcuts is refused). The daemon reads every layer it
+//! writes back before it answers (the keyboard's first read after a write is that one),
+//! so a read after a change shows it at once, here too.
 //!
 //! Like the daemon, it refuses `read_bindings` and `set_bindings` while the fake's
 //! `keyboard_bindings` gate is off. It announces nothing; a client reads the state again.
@@ -32,8 +33,6 @@ struct Board {
     state: BindingsState,
     /// What the keyboard holds now.
     layers: Layers,
-    /// What it held before the last change, shown once by the next read.
-    before: Option<Layers>,
 }
 
 static BOARD: Mutex<Option<Board>> = Mutex::new(None);
@@ -63,7 +62,6 @@ pub fn handle(req: Request, s: &mut Fake) -> ResponseData {
     let board = guard.get_or_insert_with(|| Board {
         state: BindingsState::default(),
         layers: stock_layers(),
-        before: None,
     });
     let refusal = s.experimental.refusal(Feature::KeyboardBindings);
     match req {
@@ -74,8 +72,7 @@ pub fn handle(req: Request, s: &mut Fake) -> ResponseData {
             error(refusal.unwrap_or_default())
         }
         Request::ReadBindings => {
-            let shown = board.before.take().unwrap_or_else(|| board.layers.clone());
-            board.state.read = Some(decode(&shown));
+            board.state.read = Some(decode(&board.layers));
             ResponseData::Bindings {
                 state: board.state.clone(),
             }
@@ -104,8 +101,8 @@ fn set(board: &mut Board, bindings: Bindings, enabled: bool) -> Result<(), Strin
         )
         .map_err(|e| e.to_string())?;
     }
-    if enabled && merged != board.layers {
-        board.before = Some(std::mem::replace(&mut board.layers, merged));
+    if enabled {
+        board.layers = merged;
     }
     board.state.bindings = bindings;
     board.state.enabled = enabled;
@@ -215,12 +212,11 @@ mod tests {
         Board {
             state: BindingsState::default(),
             layers: stock_layers(),
-            before: None,
         }
     }
 
     #[test]
-    fn a_stock_read_shows_the_nine_shortcuts_and_a_change_shows_one_read_late() {
+    fn a_stock_read_shows_the_nine_shortcuts_and_a_change_shows_at_once() {
         let mut b = fresh();
         assert_eq!(decode(&b.layers).fn_layer.len(), 9);
         let caps = Bindings {
@@ -233,9 +229,15 @@ mod tests {
             ..Bindings::default()
         };
         set(&mut b, caps.clone(), true).unwrap();
-        let first = b.before.take().unwrap();
-        assert!(decode(&first).normal.is_empty(), "the first read lags");
+        assert_eq!(
+            decode(&b.layers).normal,
+            caps.normal,
+            "read back by the daemon"
+        );
+        // Turned off: saved, nothing written.
+        set(&mut b, Bindings::default(), false).unwrap();
         assert_eq!(decode(&b.layers).normal, caps.normal);
+        set(&mut b, caps.clone(), true).unwrap();
         let f9 = Bindings {
             fn_layer: vec![KeyBinding {
                 code: 0x42,

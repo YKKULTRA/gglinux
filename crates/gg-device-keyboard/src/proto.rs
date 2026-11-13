@@ -243,29 +243,66 @@ fn switch_table(sub: u8) -> Vec<u8> {
     report
 }
 
+/// `(h, l)` GG 123 leaves in the actuation table for an analog key the board doesn't
+/// have, whatever the setting: our capture apex-10 (19:20:44 and 19:21:09), where the
+/// seven keys a US board lacks ([`US_ABSENT`]) stay at `2f 2a` at 1.5 mm and at 1.8 mm.
+pub const ABSENT_POINT: (u8, u8) = (0x2F, 0x2A);
+/// The release mode GG 123 leaves for such a key: `00`, with Rapid Trigger on for every
+/// other key (apex-10, 19:20:52).
+pub const ABSENT_RELEASE: u8 = RELEASE_NORMAL;
+/// The analog keys a US board doesn't have: the ISO keys `32` and `64` and the JIS keys
+/// `87`–`8B` (apex-10).
+pub const US_ABSENT: [u8; 7] = [0x32, 0x64, 0x87, 0x88, 0x89, 0x8A, 0x8B];
+
 /// The actuation table: every analog key's actuation point, in tenths of a millimetre.
+/// For a board with every analog key; see [`actuation_table_for`].
 pub fn actuation_table(actuation_of: impl Fn(u8) -> u8) -> Vec<u8> {
+    actuation_table_for(|_| true, actuation_of)
+}
+
+/// The actuation table on a board with the keys `has_key` names: their actuation points,
+/// and GG's [`ABSENT_POINT`] for the analog keys it doesn't have.
+pub fn actuation_table_for(
+    has_key: impl Fn(u8) -> bool,
+    actuation_of: impl Fn(u8) -> u8,
+) -> Vec<u8> {
     let mut report = switch_table(SW_THRESHOLDS);
     report[4] = 0; // the primary actuation point
     for (i, &code) in ANALOG_KEYS.iter().enumerate() {
-        let (h, l) = thresholds(actuation_of(code));
+        let (h, l) = if has_key(code) {
+            thresholds(actuation_of(code))
+        } else {
+            ABSENT_POINT
+        };
         report[5 + i * 3..8 + i * 3].copy_from_slice(&[code, h, l]);
     }
     report
 }
 
 /// The release-mode table: which analog keys have Rapid Trigger, Protection Mode, or both.
+/// For a board with every analog key; see [`release_mode_table_for`].
 pub fn release_mode_table(
+    rapid_trigger: impl Fn(u8) -> bool,
+    protection: impl Fn(u8) -> bool,
+) -> Vec<u8> {
+    release_mode_table_for(|_| true, rapid_trigger, protection)
+}
+
+/// The release-mode table on a board with the keys `has_key` names: their modes, and GG's
+/// [`ABSENT_RELEASE`] for the analog keys it doesn't have.
+pub fn release_mode_table_for(
+    has_key: impl Fn(u8) -> bool,
     rapid_trigger: impl Fn(u8) -> bool,
     protection: impl Fn(u8) -> bool,
 ) -> Vec<u8> {
     let mut report = switch_table(SW_RELEASE_MODE);
     for (i, &code) in ANALOG_KEYS.iter().enumerate() {
-        let mode = match (rapid_trigger(code), protection(code)) {
-            (false, false) => RELEASE_NORMAL,
-            (true, false) => RELEASE_RAPID_TRIGGER,
-            (false, true) => RELEASE_PROTECTION,
-            (true, true) => RELEASE_RAPID_TRIGGER_PROTECTION,
+        let mode = match (has_key(code), rapid_trigger(code), protection(code)) {
+            (false, ..) => ABSENT_RELEASE,
+            (true, false, false) => RELEASE_NORMAL,
+            (true, true, false) => RELEASE_RAPID_TRIGGER,
+            (true, false, true) => RELEASE_PROTECTION,
+            (true, true, true) => RELEASE_RAPID_TRIGGER_PROTECTION,
         };
         report[4 + i * 2..6 + i * 2].copy_from_slice(&[code, mode]);
     }
@@ -326,6 +363,86 @@ pub fn rapid_tap_pairs(pairs: &[TapPair]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bytes written as hex pairs with spaces, as the capture decoder prints them.
+    fn hex(s: &str) -> Vec<u8> {
+        s.split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect()
+    }
+
+    /// GG 123 setting every key to 1.5 mm on the owner's US board (apex-10, 19:20:44):
+    /// the report after its id, up to the end of the 68 blocks; zeros after.
+    const GG_ALL_1_5_MM: &str = "38 61 44 00 \
+        04 1e 1b 05 1e 1b 06 1e 1b 07 1e 1b 08 1e 1b 09 1e 1b 0a 1e 1b 0b 1e 1b 0c 1e 1b 0d 1e 1b \
+        0e 1e 1b 0f 1e 1b 10 1e 1b 11 1e 1b 12 1e 1b 13 1e 1b 14 1e 1b 15 1e 1b 16 1e 1b 17 1e 1b \
+        18 1e 1b 19 1e 1b 1a 1e 1b 1b 1e 1b 1c 1e 1b 1d 1e 1b 1e 1e 1b 1f 1e 1b 20 1e 1b 21 1e 1b \
+        22 1e 1b 23 1e 1b 24 1e 1b 25 1e 1b 26 1e 1b 27 1e 1b 28 1e 1b 2a 1e 1b 2b 1e 1b 2c 1e 1b \
+        2d 1e 1b 2e 1e 1b 2f 1e 1b 30 1e 1b 31 1e 1b 32 2f 2a 33 1e 1b 34 1e 1b 35 1e 1b 36 1e 1b \
+        37 1e 1b 38 1e 1b 39 1e 1b 64 2f 2a 87 2f 2a 88 2f 2a 89 2f 2a 8a 2f 2a 8b 2f 2a e0 1e 1b \
+        e1 1e 1b e2 1e 1b e3 1e 1b e4 1e 1b e5 1e 1b e6 1e 1b e7 1e 1b f0 1e 1b";
+
+    /// GG 123 turning Rapid Trigger on for every key on the same board (apex-10, 19:20:52).
+    const GG_ALL_RAPID_TRIGGER: &str = "38 62 44 \
+        04 02 05 02 06 02 07 02 08 02 09 02 0a 02 0b 02 0c 02 0d 02 0e 02 0f 02 10 02 11 02 12 02 \
+        13 02 14 02 15 02 16 02 17 02 18 02 19 02 1a 02 1b 02 1c 02 1d 02 1e 02 1f 02 20 02 21 02 \
+        22 02 23 02 24 02 25 02 26 02 27 02 28 02 2a 02 2b 02 2c 02 2d 02 2e 02 2f 02 30 02 31 02 \
+        32 00 33 02 34 02 35 02 36 02 37 02 38 02 39 02 64 00 87 00 88 00 89 00 8a 00 8b 00 e0 02 \
+        e1 02 e2 02 e3 02 e4 02 e5 02 e6 02 e7 02 f0 02";
+
+    fn us_board(code: u8) -> bool {
+        !US_ABSENT.contains(&code)
+    }
+
+    #[test]
+    fn on_a_us_board_the_actuation_table_is_ggs_byte_for_byte() {
+        let gg = hex(GG_ALL_1_5_MM);
+        assert_eq!(gg.len(), 4 + 68 * 3);
+        // Whatever the settings say for the seven keys the board doesn't have.
+        let ours = actuation_table_for(us_board, |code| if us_board(code) { 15 } else { 4 });
+        assert_eq!(ours[1..1 + gg.len()], gg[..]);
+        assert!(ours[1 + gg.len()..].iter().all(|&b| b == 0), "padding");
+        let blocks: Vec<&[u8]> = ours[5..5 + 68 * 3].chunks(3).collect();
+        assert_eq!(blocks.iter().filter(|b| b[1..] == [0x1e, 0x1b]).count(), 61);
+        assert_eq!(blocks.iter().filter(|b| b[1..] == [0x2f, 0x2a]).count(), 7);
+        assert!(check_report(&ours).is_ok());
+        // 1.8 mm (19:21:09): the 61 keys move, the seven stay.
+        let at_1_8 = actuation_table_for(us_board, |_| 18);
+        for (block, &code) in at_1_8[5..5 + 68 * 3].chunks(3).zip(&ANALOG_KEYS) {
+            let want = if us_board(code) {
+                [0x28, 0x25]
+            } else {
+                [0x2f, 0x2a]
+            };
+            assert_eq!(block, [code, want[0], want[1]], "{code:#04x}");
+        }
+        // A board with every key: the old table.
+        assert_eq!(
+            actuation_table_for(|_| true, |_| 15),
+            actuation_table(|_| 15)
+        );
+    }
+
+    #[test]
+    fn on_a_us_board_the_rapid_trigger_table_is_ggs_byte_for_byte() {
+        let gg = hex(GG_ALL_RAPID_TRIGGER);
+        assert_eq!(gg.len(), 3 + 68 * 2);
+        // Protection asked for too: the seven keys still get mode 00.
+        let ours = release_mode_table_for(us_board, |_| true, |code| !us_board(code));
+        assert_eq!(ours[1..1 + gg.len()], gg[..]);
+        assert!(ours[1 + gg.len()..].iter().all(|&b| b == 0), "padding");
+        let modes: Vec<u8> = ours[4..4 + 68 * 2].chunks(2).map(|p| p[1]).collect();
+        assert_eq!(modes.iter().filter(|&&m| m == 0x02).count(), 61);
+        assert_eq!(modes.iter().filter(|&&m| m == 0x00).count(), 7);
+        assert!(check_report(&ours).is_ok());
+        // Rapid Trigger off for all (19:21:00): every key 00.
+        let off = release_mode_table_for(us_board, |_| false, |_| false);
+        assert!(off[4..4 + 68 * 2].chunks(2).all(|p| p[1] == 0));
+        assert_eq!(
+            release_mode_table_for(|_| true, |_| true, |_| false),
+            release_mode_table(|_| true, |_| false)
+        );
+    }
 
     #[test]
     fn only_the_seven_vetted_opcodes_pass() {

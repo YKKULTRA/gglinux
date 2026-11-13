@@ -3,6 +3,11 @@
 //! Tap. They live in the keyboard's RAM, so [`SwitchesState`] sends them once each time it
 //! connects, and again after a change. Off by default: gglinux leaves the keyboard's own.
 //!
+//! They take five reports. As GG 123 does (our capture apex-10), a change sends only the
+//! reports whose bytes differ from what this connection last sent; after a connect or a
+//! slot load all five go. The analog keys the board doesn't have (it depends on the
+//! region) get what GG leaves there, whatever the settings say.
+//!
 //! Keys may also have a second (deep-press) actuation point. Its table goes after the
 //! others, and only while the keyboard lets the bindings family out (`keyboard_bindings`
 //! on); with the gate off exactly the same reports go out as without deep-press points.
@@ -17,11 +22,11 @@
 
 use std::path::{Path, PathBuf};
 
-use gg_device_keyboard::layout::US;
+use gg_device_keyboard::layout::{self, Key, US};
 use gg_device_keyboard::proto::{self, ANALOG_KEYS};
-use gg_device_keyboard::Keyboard;
+use gg_device_keyboard::{Keyboard, SentSwitches, SwitchReports};
 use gg_ipc::{Switches, TapMode};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// The switch settings as the keyboard worker keeps them, and what sending them gave.
 pub struct SwitchesState {
@@ -29,6 +34,11 @@ pub struct SwitchesState {
     path: PathBuf,
     /// What sending the switches to the open keyboard gave; `None`: not sent to it yet.
     sent: Option<Result<(), String>>,
+    /// The five switch reports as last sent to the open keyboard.
+    reports: SentSwitches,
+    /// The analog keys the board lacks, as the last reports were made for: they're made
+    /// again when the board turns out to be another.
+    absent: Option<Vec<u8>>,
     /// With which bindings family the open keyboard last had its deep-press points
     /// dealt with: sent (`true`), held back (`false`), or not yet.
     second: Option<bool>,
@@ -51,6 +61,8 @@ impl SwitchesState {
             switches: super::load(&path, "switch"),
             path,
             sent: None,
+            reports: SentSwitches::default(),
+            absent: None,
             second: None,
             protection: None,
             points: Vec::new(),
@@ -72,8 +84,16 @@ impl SwitchesState {
         Ok(())
     }
 
-    /// Send the switch settings once to a keyboard that hasn't had them since it connected.
+    /// [`SwitchesState::sync_board`] on the US board, as for a keyboard whose region
+    /// isn't known.
     pub fn sync(&mut self, device: Option<&Keyboard>) {
+        self.sync_board(device, layout::for_region(None));
+    }
+
+    /// Send the switch settings to a keyboard that hasn't had them since it connected or
+    /// since they changed, for the keys `board` has: only the reports that differ from
+    /// what it was last sent.
+    pub fn sync_board(&mut self, device: Option<&Keyboard>, board: &[Key]) {
         if !self.switches.enabled {
             return;
         }
@@ -83,14 +103,15 @@ impl SwitchesState {
         // Again when the protection gate changes, so its keys follow it at once.
         let protection = device.families().protection;
         let follows = !self.switches.protection.enabled || self.protection == Some(protection);
-        if self.sent.is_none() || !follows {
-            self.send(device);
+        let absent = absent(board);
+        if self.sent.is_none() || !follows || self.absent.as_ref() != Some(&absent) {
+            self.send(device, absent);
         }
         self.sync_second(device);
     }
 
-    /// The actuation points, Rapid Trigger and Rapid Tap.
-    fn send(&mut self, device: &Keyboard) {
+    /// The actuation points, Rapid Trigger and Rapid Tap: the reports that changed.
+    fn send(&mut self, device: &Keyboard, absent: Vec<u8>) {
         let s = &self.switches;
         let pairs: Vec<gg_device_keyboard::TapPair> = s
             .rapid_tap
@@ -107,21 +128,24 @@ impl SwitchesState {
         // Protection Mode only while its gate lets it out; without, the keys go unprotected.
         let protection = device.families().protection;
         self.protection = Some(protection);
-        let result = device
-            .set_switches(&gg_device_keyboard::Switches {
-                actuation: &|code| s.actuation_of(code),
-                rapid_trigger: &|code| s.rapid_trigger_on(code),
-                protection: &|code| protection && s.protection_on(code),
-                sensitivity: &|_| sensitivity,
-                rapid_tap: s.rapid_tap.enabled,
-                tap_pairs: &pairs,
-            })
+        let switches = gg_device_keyboard::Switches {
+            actuation: &|code| s.actuation_of(code),
+            rapid_trigger: &|code| s.rapid_trigger_on(code),
+            protection: &|code| protection && s.protection_on(code),
+            sensitivity: &|_| sensitivity,
+            rapid_tap: s.rapid_tap.enabled,
+            tap_pairs: &pairs,
+        };
+        let result = SwitchReports::new(&switches, &|code| !absent.contains(&code))
+            .and_then(|reports| device.send_switches(&reports, &mut self.reports))
             .map_err(|e| format!("{e:#}"));
         match &result {
-            Ok(()) => info!("keyboard switch settings sent"),
+            Ok(0) => debug!("keyboard switch settings unchanged: nothing sent"),
+            Ok(n) => info!(reports = n, "keyboard switch settings sent"),
             Err(e) => warn!(error = %e, "the keyboard did not take the switch settings"),
         }
-        self.sent = Some(result);
+        self.sent = Some(result.map(|_| ()));
+        self.absent = Some(absent);
         self.second = None;
     }
 
@@ -169,6 +193,8 @@ impl SwitchesState {
     /// onboard slot, has its own.
     pub fn forget(&mut self) {
         self.sent = None;
+        self.reports = SentSwitches::default();
+        self.absent = None;
         self.second = None;
         self.protection = None;
         self.points.clear();
@@ -199,6 +225,15 @@ impl SwitchesState {
             _ => None,
         }
     }
+}
+
+/// The analog keys `board` doesn't have, in table order.
+fn absent(board: &[Key]) -> Vec<u8> {
+    ANALOG_KEYS
+        .iter()
+        .copied()
+        .filter(|&code| !board.iter().any(|k| k.0 == code))
+        .collect()
 }
 
 /// A key's deep press must go to the keyboard deeper than its first press. The keyboard
@@ -300,11 +335,178 @@ mod tests {
             switches,
             path: PathBuf::new(),
             sent: None,
+            reports: SentSwitches::default(),
+            absent: None,
             second: None,
             protection: None,
             points: Vec::new(),
             points_sent: false,
         }
+    }
+
+    fn us_board(code: u8) -> bool {
+        !proto::US_ABSENT.contains(&code)
+    }
+
+    fn sent_ops(fake: &FakeTransport) -> Vec<(Kind, u8, u8)> {
+        fake.sent()
+            .iter()
+            .map(|s| (s.kind, s.report[1], s.report[2]))
+            .collect()
+    }
+
+    fn all_at(actuation: u8, rapid_trigger: bool) -> Switches {
+        Switches {
+            enabled: true,
+            actuation,
+            rapid_trigger: gg_ipc::RapidTrigger {
+                enabled: rapid_trigger,
+                keys: Vec::new(),
+                sensitivity: 2,
+            },
+            ..Switches::default()
+        }
+    }
+
+    #[test]
+    fn a_change_sends_only_the_switch_reports_that_differ_and_a_reconnect_all_five() {
+        let d = Scratch::new("switches-only-changed");
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        let mut s = SwitchesState::load(&d.0);
+        s.set(all_at(15, false)).unwrap();
+        s.sync(Some(&kb));
+        assert_eq!(
+            fake.sent().len(),
+            5,
+            "the first time on a connection, all five"
+        );
+
+        // 1.5 to 1.8 mm: only the actuation table, as GG sends it (apex-10, 19:21:09).
+        fake.clear_sent();
+        s.set(all_at(18, false)).unwrap();
+        s.sync(Some(&kb));
+        s.sync(Some(&kb));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x38, 0x61)]);
+        let table = &fake.sent()[0].report;
+        assert_eq!(table[1..5], [0x38, 0x61, 0x44, 0x00]);
+        assert_eq!(*table, proto::actuation_table_for(us_board, |_| 18));
+
+        // Rapid Trigger on for every key: only the release modes.
+        fake.clear_sent();
+        let rapid = all_at(18, true);
+        assert!(rapid.rapid_trigger_on(0x04), "{:?}", rapid.rapid_trigger);
+        s.set(rapid.clone()).unwrap();
+        s.sync(Some(&kb));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x38, 0x62)]);
+
+        // Nothing changed: nothing goes.
+        fake.clear_sent();
+        s.set(rapid.clone()).unwrap();
+        s.sync(Some(&kb));
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        assert_eq!(s.error(), None);
+
+        // A reconnect (or a slot load) has the keyboard's own: all five again.
+        s.forget();
+        s.sync(Some(&kb));
+        assert_eq!(
+            sent_ops(&fake),
+            [
+                (Kind::Feature, 0x38, 0x61),
+                (Kind::Feature, 0x38, 0x62),
+                (Kind::Feature, 0x38, 0x65),
+                (Kind::Output, 0x38, 0x67),
+                (Kind::Output, 0x38, 0x66),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_report_the_keyboard_refused_goes_with_the_next_change() {
+        let d = Scratch::new("switches-refused-again");
+        let fake = FakeTransport::new();
+        fake.fail_send(2);
+        let kb = fake.keyboard();
+        let mut s = SwitchesState::load(&d.0);
+        s.set(all_at(15, false)).unwrap();
+        s.sync(Some(&kb));
+        assert!(s.error().unwrap().contains("0x38"), "{:?}", s.error());
+        s.sync(Some(&kb));
+        assert_eq!(fake.sent().len(), 1, "not tried every loop");
+        fake.clear_sent();
+        s.set(all_at(18, false)).unwrap();
+        s.sync(Some(&kb));
+        assert_eq!(
+            sent_ops(&fake),
+            [
+                (Kind::Feature, 0x38, 0x61),
+                (Kind::Feature, 0x38, 0x62),
+                (Kind::Feature, 0x38, 0x65),
+                (Kind::Output, 0x38, 0x67),
+                (Kind::Output, 0x38, 0x66),
+            ],
+            "the changed table and the four that never got there"
+        );
+        assert_eq!(s.error(), None);
+    }
+
+    #[test]
+    fn keys_the_board_lacks_get_ggs_values_whatever_the_settings() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        // ISO's 0x64 and JIS's 0x87 at 0.4 mm with Rapid Trigger, on a US board.
+        let mut on = all_at(15, true);
+        on.rapid_trigger.keys = vec![0x04, 0x64, 0x87];
+        for code in [0x64, 0x87] {
+            on.keys.push(gg_ipc::KeyActuation { code, actuation: 4 });
+        }
+        let mut s = state(on.clone());
+        s.sync(Some(&kb));
+        let sent = fake.sent();
+        let block = |table: &[u8], code: u8, size: usize| {
+            let i = ANALOG_KEYS.iter().position(|&c| c == code).unwrap();
+            let at = if size == 3 { 5 } else { 4 } + i * size;
+            table[at..at + size].to_vec()
+        };
+        for code in proto::US_ABSENT {
+            assert_eq!(
+                block(&sent[0].report, code, 3),
+                [code, 0x2F, 0x2A],
+                "{code:#04x}"
+            );
+            assert_eq!(block(&sent[1].report, code, 2), [code, 0x00], "{code:#04x}");
+        }
+        assert_eq!(
+            block(&sent[0].report, 0x04, 3),
+            [0x04, 30, 27],
+            "A at 1.5 mm"
+        );
+        assert_eq!(
+            block(&sent[1].report, 0x04, 2),
+            [0x04, 0x02],
+            "A with Rapid Trigger"
+        );
+
+        // A UK board has 0x64 but not 0x31: 0x64 gets its setting, 0x31 GG's values.
+        fake.clear_sent();
+        s.sync_board(Some(&kb), layout::for_region(Some(3)));
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 2, "the two tables the board changes");
+        assert_eq!(
+            block(&sent[0].report, 0x64, 3),
+            [0x64, 7, 5],
+            "0x64 at 0.4 mm"
+        );
+        assert_eq!(block(&sent[0].report, 0x31, 3), [0x31, 0x2F, 0x2A]);
+        assert_eq!(block(&sent[1].report, 0x64, 2), [0x64, 0x02]);
+        assert_eq!(block(&sent[1].report, 0x31, 2), [0x31, 0x00]);
+        assert_eq!(
+            absent(layout::for_region(None)),
+            proto::US_ABSENT,
+            "the capture's seven"
+        );
+        assert_eq!(absent(&layout::US), proto::US_ABSENT);
     }
 
     /// The release-mode tables (`38 62`) among what was sent, as each key's mode.
@@ -400,8 +602,8 @@ mod tests {
         );
         assert_eq!(
             fake.sent()[0].report,
-            gg_device_keyboard::proto::actuation_table(|_| 20),
-            "every key at 2.0 mm, on the primary layer"
+            proto::actuation_table_for(us_board, |_| 20),
+            "every key of the US board at 2.0 mm, on the primary layer"
         );
         assert_eq!(on.error(), None);
         on.forget();
@@ -548,9 +750,13 @@ mod tests {
         s.sync(Some(&kb));
         s.sync(Some(&kb));
         let sent = fake.sent();
-        assert_eq!(sent.len(), 6, "the switches, then one deep-press table");
         assert_eq!(
-            sent[5].report,
+            sent.len(),
+            1,
+            "the switches didn't change: one deep-press table"
+        );
+        assert_eq!(
+            sent[0].report,
             gg_device_keyboard::bindings::second_actuation_table(|_| None, |c| c == 0x1A),
             "W reset, every other key left as it is"
         );
@@ -565,7 +771,11 @@ mod tests {
         })
         .unwrap();
         s.sync(Some(&kb));
-        assert_eq!(fake.sent().len(), 5);
+        assert_eq!(
+            sent_ops(&fake),
+            [(Kind::Feature, 0x38, 0x61)],
+            "the actuation only"
+        );
 
         // Removed while the gate is off: nothing then, the table once it's back on.
         s.set(deep(true)).unwrap();
@@ -574,14 +784,17 @@ mod tests {
         s.set(none()).unwrap();
         fake.clear_sent();
         s.sync(Some(&kb));
-        assert_eq!(fake.sent().len(), 5, "the switches only");
+        assert!(
+            fake.sent().is_empty(),
+            "the switches didn't change: nothing"
+        );
         kb.set_families(bindings_on());
         s.sync(Some(&kb));
         s.sync(Some(&kb));
         let sent = fake.sent();
-        assert_eq!(sent.len(), 6);
+        assert_eq!(sent.len(), 1);
         assert_eq!(
-            sent[5].report,
+            sent[0].report,
             gg_device_keyboard::bindings::second_actuation_table(|_| None, |c| c == 0x1A)
         );
 
@@ -592,7 +805,11 @@ mod tests {
         s.set(none()).unwrap();
         fake.clear_sent();
         s.sync(Some(&kb));
-        assert_eq!(fake.sent().len(), 5);
+        assert_eq!(
+            fake.sent().len(),
+            5,
+            "after a reconnect, all five and no reset"
+        );
     }
 
     #[test]

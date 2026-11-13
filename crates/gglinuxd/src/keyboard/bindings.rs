@@ -9,7 +9,10 @@
 //! are kept byte for byte. Only the layers that differ from what the keyboard holds are
 //! written, and the Fn key and its lit keys only when an Fn key is chosen, or once when
 //! it goes back to the keyboard's own (the SteelSeries key). A read that looks blank is
-//! never written over. After an onboard slot is loaded ([`on_slot_loaded`]) the next
+//! never written over. Every layer write is read back, and written again up to three
+//! times in all if the keyboard didn't keep it (the owner's keyboard drops one now and
+//! then); one it never keeps is reported and not taken as written, so the next change
+//! writes it again. After an onboard slot is loaded ([`on_slot_loaded`]) the next
 //! change reads again first. Turning the bindings off sends nothing: what was sent stays
 //! on the keyboard until it's unplugged.
 //!
@@ -68,7 +71,7 @@ pub struct Store {
     /// A slot was just loaded: the next read asks for each layer twice and keeps the
     /// second answer, since the first may still show the slot the keyboard ran before.
     loaded: bool,
-    /// What gglinux last wrote on each layer on this connection.
+    /// What gglinux last wrote on each layer on this connection, and read back.
     written: [Option<Vec<Block>>; 3],
     /// The Fn key and its lit keys as last sent on this connection.
     fn_sent: Option<(u8, [u8; 32])>,
@@ -615,8 +618,17 @@ mod tests {
         r
     }
 
-    /// A fake that answers reads as a stock keyboard does.
+    /// A fake holding a stock keyboard's three layers: a write changes what a read shows.
     fn stock_keyboard() -> FakeTransport {
+        let fake = FakeTransport::new();
+        for (_, layer) in LAYERS {
+            fake.hold_layer(layer, &stock(layer));
+        }
+        fake
+    }
+
+    /// A fake that answers every read as a stock keyboard does, whatever is written.
+    fn scripted_keyboard() -> FakeTransport {
         let fake = FakeTransport::new();
         for (_, layer) in LAYERS {
             fake.answer_feature(Key::sub(0xB6, layer.byte()), &reply(layer, &stock(layer)));
@@ -721,7 +733,14 @@ mod tests {
         let sent = fake.sent();
         assert_eq!(
             sent_ops(&fake),
-            [READS[0], READS[1], READS[2], (Kind::Feature, 0x36, 0x00)]
+            [
+                READS[0],
+                READS[1],
+                READS[2],
+                (Kind::Feature, 0x36, 0x00),
+                READS[0]
+            ],
+            "read, write, and read back"
         );
         for (s, (_, layer)) in sent.iter().zip(LAYERS) {
             assert_eq!(s.report, read_request(layer, layer.keys()).unwrap());
@@ -783,8 +802,9 @@ mod tests {
                 READS[1],
                 READS[2],
                 (Kind::Feature, 0x36, 0x01),
+                READS[1],
                 (Kind::Output, 0x35, 0xE7),
-                (Kind::Output, 0x3C, fake.sent()[5].report[2]),
+                (Kind::Output, 0x3C, fake.sent()[6].report[2]),
             ]
         );
         let write = &fake.sent()[3].report;
@@ -807,9 +827,9 @@ mod tests {
             .find(|b| b.code == 0x3A)
             .unwrap()
             .function = 0x61;
-        assert_eq!(fake.sent()[5].report[2..34], kb::fn_mask(&fn_layer));
+        assert_eq!(fake.sent()[6].report[2..34], kb::fn_mask(&fn_layer));
         assert_eq!(
-            fake.sent()[5].report[2 + 0x3A / 8] & (1 << (0x3A & 7)),
+            fake.sent()[6].report[2 + 0x3A / 8] & (1 << (0x3A & 7)),
             1 << 2
         );
 
@@ -853,7 +873,13 @@ mod tests {
         let state = settle(&kb).await;
         assert_eq!(
             sent_ops(&fake),
-            [READS[0], READS[1], READS[2], (Kind::Feature, 0x36, 0x00)]
+            [
+                READS[0],
+                READS[1],
+                READS[2],
+                (Kind::Feature, 0x36, 0x00),
+                READS[0]
+            ]
         );
         assert_eq!(
             fake.sent()[3].report,
@@ -865,9 +891,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lagging_keyboard_shows_the_old_bindings_once_and_writes_arent_trusted_to_reads() {
+    async fn a_keyboard_that_shows_the_old_layer_once_more_gets_the_write_again() {
         let d = Scratch::new("bindings-lag");
-        let fake = stock_keyboard();
+        let fake = scripted_keyboard();
         fake.change_after(
             Key::sub(0x36, 0x00),
             Read::Feature,
@@ -879,16 +905,33 @@ mod tests {
         settle(&kb).await;
         let caps = || set(vec![bind(CAPS, ctrl_a())], true);
         assert!(matches!(handle(caps(), &kb).await, ResponseData::Success));
-        let read = |kb: Handle| async move {
-            match handle(Request::ReadBindings, &kb).await {
-                ResponseData::Bindings { state } => state.read.unwrap().normal,
-                other => panic!("{other:?}"),
+        let write = (Kind::Feature, 0x36, 0x00);
+        assert_eq!(
+            sent_ops(&fake),
+            [READS[0], READS[1], READS[2], write, READS[0], write, READS[0]],
+            "the first read back still showed the old layer: written once more"
+        );
+        match handle(Request::ReadBindings, &kb).await {
+            ResponseData::Bindings { state } => {
+                assert_eq!(state.read.unwrap().normal, [bind(CAPS, ctrl_a())]);
             }
-        };
-        assert!(read(kb.clone()).await.is_empty(), "the first read lags");
-        assert_eq!(read(kb.clone()).await, [bind(CAPS, ctrl_a())]);
+            other => panic!("{other:?}"),
+        }
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
 
-        // The same again writes nothing: gglinux knows what it wrote.
+    #[tokio::test]
+    async fn the_same_again_writes_nothing_and_a_key_dropped_goes_back_to_itself() {
+        let d = Scratch::new("bindings-same-again");
+        let fake = stock_keyboard();
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        let caps = || set(vec![bind(CAPS, ctrl_a())], true);
+        assert!(matches!(handle(caps(), &kb).await, ResponseData::Success));
+        assert_eq!(fake.held_layer(kb::Layer::Normal).unwrap(), caps_layer());
+
+        // The same again writes nothing: gglinux knows what the keyboard kept.
         fake.clear_sent();
         assert!(matches!(handle(caps(), &kb).await, ResponseData::Success));
         assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
@@ -898,11 +941,83 @@ mod tests {
             handle(set(vec![], true), &kb).await,
             ResponseData::Success
         ));
-        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00)]);
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00), READS[0]]);
         assert_eq!(
             fake.sent()[0].report,
             write_report(kb::Layer::Normal, &stock(kb::Layer::Normal)).unwrap()
         );
+        assert_eq!(
+            fake.held_layer(kb::Layer::Normal).unwrap(),
+            stock(kb::Layer::Normal)
+        );
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_layer_write_the_keyboard_drops_once_is_written_again_and_kept() {
+        let d = Scratch::new("bindings-dropped-once");
+        let fake = stock_keyboard();
+        fake.drop_layer_writes(1);
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        assert!(matches!(
+            handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
+            ResponseData::Success
+        ));
+        let write = (Kind::Feature, 0x36, 0x00);
+        assert_eq!(
+            sent_ops(&fake),
+            [READS[0], READS[1], READS[2], write, READS[0], write, READS[0]]
+        );
+        assert_eq!(fake.held_layer(kb::Layer::Normal).unwrap(), caps_layer());
+        assert_eq!(get(&kb).await.error, None);
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_layer_the_keyboard_drops_three_times_is_reported_and_not_taken_as_written() {
+        let d = Scratch::new("bindings-dropped-thrice");
+        let fake = stock_keyboard();
+        fake.drop_layer_writes(3);
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        match handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await {
+            ResponseData::Error { message } => assert!(
+                message.contains("the keyboard didn't keep the normal bindings after 3 tries"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let write = (Kind::Feature, 0x36, 0x00);
+        assert_eq!(
+            sent_ops(&fake)[3..],
+            [write, READS[0], write, READS[0], write, READS[0]]
+        );
+        let state = get(&kb).await;
+        assert!(state.error.unwrap().contains("3 tries"));
+        assert_eq!(
+            state.bindings.normal,
+            [bind(CAPS, ctrl_a())],
+            "saved, for the next try"
+        );
+
+        // Nothing was taken as written: back to the keyboard's own sends nothing, since
+        // that's what it still holds, and Caps Lock again is written again.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(set(vec![], true), &kb).await,
+            ResponseData::Success
+        ));
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        assert!(matches!(
+            handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(sent_ops(&fake), [write, READS[0]]);
+        assert_eq!(fake.held_layer(kb::Layer::Normal).unwrap(), caps_layer());
+        assert_eq!(get(&kb).await.error, None);
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 
@@ -1010,7 +1125,7 @@ mod tests {
             handle(ask(caps(), vec![]), &kb).await,
             ResponseData::Success
         ));
-        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00)]);
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00), READS[0]]);
 
         // An Fn-layer change changes the mask: the Fn key and the new mask go again.
         fake.clear_sent();
@@ -1023,11 +1138,12 @@ mod tests {
             sent_ops(&fake),
             [
                 (Kind::Feature, 0x36, 0x01),
+                READS[1],
                 (Kind::Output, 0x35, 0xE7),
                 (Kind::Output, 0x3C, 0x00),
             ]
         );
-        assert_eq!(sent[2].report[2 + 0x3A / 8] & (1 << (0x3A & 7)), 1 << 2);
+        assert_eq!(sent[3].report[2 + 0x3A / 8] & (1 << (0x3A & 7)), 1 << 2);
 
         // The same again: nothing.
         fake.clear_sent();
@@ -1043,8 +1159,9 @@ mod tests {
     async fn a_write_that_fails_half_way_keeps_what_went_through_and_sends_the_rest_next_time() {
         let d = Scratch::new("bindings-half-way");
         let fake = stock_keyboard();
-        // Sends 1 to 3 are the reads, 4 the normal layer: the Fn layer's fails.
-        fake.fail_send(5);
+        // Sends 1 to 3 are the reads, 4 the normal layer and 5 its read back: the Fn
+        // layer's fails.
+        fake.fail_send(6);
         let (tx, _rx) = broadcast::channel(16);
         let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
         settle(&kb).await;
@@ -1062,7 +1179,13 @@ mod tests {
         }
         assert_eq!(
             sent_ops(&fake),
-            [READS[0], READS[1], READS[2], (Kind::Feature, 0x36, 0x00)]
+            [
+                READS[0],
+                READS[1],
+                READS[2],
+                (Kind::Feature, 0x36, 0x00),
+                READS[0]
+            ]
         );
         let state = get(&kb).await;
         assert!(state.error.unwrap().contains("0x36"));
@@ -1071,7 +1194,7 @@ mod tests {
         // Asked again, only the Fn layer goes: the normal layer is on the keyboard.
         fake.clear_sent();
         assert!(matches!(handle(both(), &kb).await, ResponseData::Success));
-        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x01)]);
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x01), READS[1]]);
         assert_eq!(get(&kb).await.error, None);
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
@@ -1156,7 +1279,8 @@ mod tests {
         settle(&kb).await;
         let sent = fake.sent();
         let ops = sent_ops(&fake);
-        assert_eq!(ops.len(), 7, "{ops:?}");
+        assert_eq!(ops.len(), 8, "{ops:?}");
+        assert_eq!(ops[7], READS[2], "the deep layer read back");
         assert_eq!(
             sent[5].report[1..5],
             [0x38, 0x61, 68, 0x02],
@@ -1185,14 +1309,22 @@ mod tests {
         .unwrap();
         settle(&kb).await;
         let sent = fake.sent();
-        assert_eq!(sent.len(), 7, "{:?}", sent_ops(&fake));
         assert_eq!(
-            sent[5].report[5 + at * 3..8 + at * 3],
+            sent_ops(&fake),
+            [
+                (Kind::Feature, 0x38, 0x61),
+                (Kind::Feature, 0x36, 0x02),
+                READS[2]
+            ],
+            "the switches didn't change: the points table, the deep layer, its read back"
+        );
+        assert_eq!(
+            sent[0].report[5 + at * 3..8 + at * 3],
             [0x1A, 0xFF, 0xFF],
             "W reset"
         );
-        assert_eq!(sent[5].report[5..8], [0x04, 0x00, 0x00], "A left as it is");
-        assert!(deep_blocks(&sent[6].report)
+        assert_eq!(sent[0].report[5..8], [0x04, 0x00, 0x00], "A left as it is");
+        assert!(deep_blocks(&sent[1].report)
             .iter()
             .zip(&ANALOG_KEYS)
             .all(|(b, &code)| *b == [code, 0, 0, 0, 0, 0]));
@@ -1203,6 +1335,74 @@ mod tests {
         );
 
         // Nothing more while nothing changes.
+        fake.clear_sent();
+        settle(&kb).await;
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_deep_layer_after_a_points_table_is_read_back_and_written_again_if_dropped() {
+        let d = Scratch::new("bindings-deep-dropped");
+        let fake = stock_keyboard();
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        let deep_w_types_a = Request::SetBindings {
+            bindings: Bindings {
+                second: vec![bind(0x1A, KeyAction::Keys { codes: vec![0x04] })],
+                ..Bindings::default()
+            },
+            enabled: true,
+        };
+        assert!(matches!(
+            handle(deep_w_types_a, &kb).await,
+            ResponseData::Success
+        ));
+        fake.clear_sent();
+        fake.drop_layer_writes(1);
+        kb.send(|reply| Command::SetSwitches {
+            switches: w_point(true),
+            reply,
+        })
+        .await
+        .unwrap();
+        settle(&kb).await;
+        let ops = sent_ops(&fake);
+        let deep = (Kind::Feature, 0x36, 0x02);
+        assert_eq!(
+            ops[5..],
+            [(Kind::Feature, 0x38, 0x61), deep, READS[2], deep, READS[2]],
+            "{ops:?}"
+        );
+        let held = fake.held_layer(kb::Layer::Second).unwrap();
+        let w = held.iter().find(|b| b.code == 0x1A).unwrap();
+        assert_eq!(
+            w.bytes(),
+            [0x1A, 0x51, 0x04, 0, 0, 0],
+            "kept the second time"
+        );
+        assert_eq!(get(&kb).await.error, None);
+
+        // Dropped every time: reported, and nothing more until the next change.
+        fake.clear_sent();
+        fake.drop_layer_writes(3);
+        kb.send(|reply| Command::SetSwitches {
+            switches: w_point(false),
+            reply,
+        })
+        .await
+        .unwrap();
+        settle(&kb).await;
+        let error = get(&kb).await.error.unwrap();
+        assert!(
+            error.contains("the keyboard didn't keep the deep-press bindings after 3 tries"),
+            "{error}"
+        );
+        assert_eq!(
+            sent_ops(&fake)[1..],
+            [deep, READS[2], deep, READS[2], deep, READS[2]]
+        );
         fake.clear_sent();
         settle(&kb).await;
         assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
@@ -1294,12 +1494,7 @@ mod tests {
         // load: the first still shows the slot it ran before.
         let mut slot = stock(kb::Layer::Normal);
         slot.iter_mut().find(|b| b.code == 0x14).unwrap().codes = [0x04, 0, 0, 0];
-        fake.change_after(
-            Key::op(0xB2),
-            Read::Feature,
-            Key::sub(0xB6, 0x00),
-            &reply(kb::Layer::Normal, &slot),
-        );
+        fake.load_layer_after(Key::op(0xB2), kb::Layer::Normal, &slot);
         let (tx, mut rx) = broadcast::channel(64);
         let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, with_onboard());
         settle(&kb).await;
@@ -1334,7 +1529,8 @@ mod tests {
                 READS[1],
                 READS[2],
                 READS[2],
-                (Kind::Feature, 0x36, 0x00)
+                (Kind::Feature, 0x36, 0x00),
+                READS[0]
             ]
         );
         let mut want = slot.clone();
@@ -1361,7 +1557,7 @@ mod tests {
             handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
             ResponseData::Success
         ));
-        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00)]);
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00), READS[0]]);
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 
@@ -1389,8 +1585,8 @@ mod tests {
         ));
         assert_eq!(
             sent_ops(&fake),
-            [(Kind::Feature, 0x36, 0x00)],
-            "no new read"
+            [(Kind::Feature, 0x36, 0x00), READS[0]],
+            "no new read, only the write's own read back"
         );
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
@@ -1408,10 +1604,7 @@ mod tests {
     async fn a_normal_layer_read_with_almost_no_key_typing_itself_is_refused_and_read_again() {
         let d = Scratch::new("bindings-blank-normal");
         let fake = stock_keyboard();
-        fake.answer_feature(
-            Key::sub(0xB6, 0x00),
-            &reply(kb::Layer::Normal, &blank(kb::Layer::Normal)),
-        );
+        fake.hold_layer(kb::Layer::Normal, &blank(kb::Layer::Normal));
         let (tx, _rx) = broadcast::channel(16);
         let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
         settle(&kb).await;
@@ -1428,10 +1621,7 @@ mod tests {
         assert!(!d.0.join("bindings.json").exists(), "nothing saved");
 
         // Not kept as the keyboard's own: a good read later is.
-        fake.answer_feature(
-            Key::sub(0xB6, 0x00),
-            &reply(kb::Layer::Normal, &stock(kb::Layer::Normal)),
-        );
+        fake.hold_layer(kb::Layer::Normal, &stock(kb::Layer::Normal));
         fake.clear_sent();
         assert!(matches!(
             handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
@@ -1439,7 +1629,13 @@ mod tests {
         ));
         assert_eq!(
             sent_ops(&fake),
-            [READS[0], READS[1], READS[2], (Kind::Feature, 0x36, 0x00)]
+            [
+                READS[0],
+                READS[1],
+                READS[2],
+                (Kind::Feature, 0x36, 0x00),
+                READS[0]
+            ]
         );
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
@@ -1448,10 +1644,7 @@ mod tests {
     async fn an_fn_layer_read_without_the_keyboards_shortcuts_takes_no_fn_change() {
         let d = Scratch::new("bindings-blank-fn");
         let fake = stock_keyboard();
-        fake.answer_feature(
-            Key::sub(0xB6, 0x01),
-            &reply(kb::Layer::Fn, &blank(kb::Layer::Fn)),
-        );
+        fake.hold_layer(kb::Layer::Fn, &blank(kb::Layer::Fn));
         let (tx, _rx) = broadcast::channel(16);
         let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
         settle(&kb).await;
@@ -1480,7 +1673,7 @@ mod tests {
             handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await,
             ResponseData::Success
         ));
-        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00)]);
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00), READS[0]]);
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 

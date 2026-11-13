@@ -15,10 +15,12 @@
 //!
 //! Checked on the owner's keyboard (firmware 1.19.7, 2026-11-13): the 91 keys ([`KEYS`]);
 //! a deep-press binding is kept only on a key that already has a second actuation point
-//! (written before the point, the keyboard drops it without a word); and no table takes a
-//! point away again ([`second_actuation_table`]).
+//! (written before the point, the keyboard drops it without a word); no table takes a
+//! point away again ([`second_actuation_table`]); and now and then a layer write is
+//! dropped without a word, so every write is read back ([`Keyboard::write_bindings`]).
 
 use anyhow::{bail, ensure, Context, Result};
+use tracing::warn;
 
 use crate::allow::{
     BLOCK, BLOCKS, FN_MASK_BYTES, OP_BINDINGS, OP_FN_KEY, OP_FN_MASK, OP_READ_BINDINGS,
@@ -85,13 +87,17 @@ pub const STOCK_FN_KEY: u8 = 0xF0;
 /// one to the command before ("the feature read slot holds the response to the last
 /// command"). The source gives no time.
 const READ_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
-/// How long the keyboard gets to put a read's answer in the read slot before it's read.
-/// Read with no wait, the owner's keyboard still held the layer read just before ("answered
-/// for layer 0 when asked for the Fn layer", 2026-11-13). Apex Control's code waits 13 ms
-/// after each query.
-const READ_SETTLE: std::time::Duration = std::time::Duration::from_millis(13);
+/// How long the keyboard gets to put a read's answer in the read slot before it's read,
+/// and to take a layer write before it's read back. Read with no wait, the owner's
+/// keyboard still held the layer read just before ("answered for layer 0 when asked for
+/// the Fn layer", 2026-11-13). Apex Control's code waits 13 ms after each query.
+pub const READ_SETTLE: std::time::Duration = std::time::Duration::from_millis(13);
 /// How often a read is asked in all while the read slot still holds an earlier answer.
 const READ_TRIES: usize = 4;
+/// How often a layer is written in all while it doesn't read back as written. On the
+/// owner's keyboard (2026-11-13) a layer write was now and then dropped without a word:
+/// 4 of 16 deep-layer writes through the daemon, 1 of 32 with a bare probe.
+pub const WRITE_TRIES: usize = 3;
 /// How long the keyboard gets after a second actuation table before the next report. On
 /// the owner's keyboard (2026-11-13) a deep-press binding written straight after the table
 /// was dropped now and then, 2 ms and more after it every time. GG 123 leaves about 15 ms
@@ -574,12 +580,35 @@ impl Keyboard {
         Ok(blocks)
     }
 
-    /// Write `layer` whole. Lasts until the keyboard loses power.
+    /// Write `layer` whole, and see that the keyboard kept it: a [`READ_SETTLE`] after the
+    /// write the layer is read back, and if it isn't what was written it's written again,
+    /// [`WRITE_TRIES`] times in all, then it's an error that names the layer. A kept write
+    /// costs one write and one read. Lasts until the keyboard loses power.
     pub fn write_bindings(&self, layer: Layer, blocks: &[Block]) -> Result<()> {
-        for report in write_reports(layer, blocks)? {
-            self.feature(&report)?;
+        let reports = write_reports(layer, blocks)?;
+        for attempt in 1..=WRITE_TRIES {
+            for report in &reports {
+                self.feature(report)?;
+            }
+            std::thread::sleep(READ_SETTLE);
+            let back = self
+                .read_bindings(layer)
+                .with_context(|| format!("checking the {} layer after writing it", layer.name()))?;
+            // Both hold each key of the layer once: the same blocks, in any order.
+            if blocks.iter().all(|b| back.contains(b)) {
+                return Ok(());
+            }
+            warn!(
+                layer = layer.name(),
+                attempt, "the keyboard didn't keep a bindings write; writing it again"
+            );
         }
-        Ok(())
+        bail!(
+            "the keyboard didn't keep the {} bindings after {WRITE_TRIES} tries: each time the \
+             layer read back different from what was sent. gglinux tries again with the next \
+             change; if this keeps happening, unplug the keyboard and plug it back in",
+            layer.name()
+        )
     }
 
     /// Make `code` the key that holds the Fn layer.
@@ -1205,9 +1234,7 @@ mod tests {
 
     #[test]
     fn the_keyboard_writes_and_sets_the_fn_key_mask_and_second_point_with_the_right_kinds() {
-        let fake = FakeTransport::new();
-        let kb = fake.keyboard();
-        kb.set_families(ON);
+        let (fake, kb) = holding();
         kb.write_bindings(Layer::Normal, &stock(Layer::Normal))
             .unwrap();
         kb.set_fn_key(0xE7).unwrap();
@@ -1218,6 +1245,7 @@ mod tests {
             sent,
             [
                 (Kind::Feature, 0x36),
+                (Kind::Feature, 0xB6),
                 (Kind::Output, 0x35),
                 (Kind::Output, 0x3C),
                 (Kind::Feature, 0x38),
@@ -1232,7 +1260,128 @@ mod tests {
                 .is_err(),
             "not whole: nothing sent"
         );
-        assert_eq!(fake.sent().len(), 4);
+        assert_eq!(fake.sent().len(), 5);
+    }
+
+    /// A keyboard holding a stock keyboard's three layers, the bindings family on.
+    fn holding() -> (FakeTransport, Keyboard) {
+        let fake = FakeTransport::new();
+        for layer in Layer::ALL {
+            fake.hold_layer(layer, &stock(layer));
+        }
+        let kb = fake.keyboard();
+        kb.set_families(ON);
+        (fake, kb)
+    }
+
+    /// `layer` with one key changed: Caps Lock types Ctrl+A, Fn+F1 mutes, or W types x
+    /// past its second point.
+    fn changed(layer: Layer) -> Vec<Block> {
+        let (code, action) = match layer {
+            Layer::Normal => (0x39, Action::Keys(vec![0xE0, 0x04])),
+            Layer::Fn => (0x3A, Action::Consumer(226)),
+            Layer::Second => (0x1A, Action::Keys(vec![0x1B])),
+        };
+        let mut blocks = stock(layer);
+        let slot = blocks.iter_mut().find(|b| b.code == code).unwrap();
+        *slot = Block::new(code, &action).unwrap();
+        blocks
+    }
+
+    fn ops(fake: &FakeTransport) -> Vec<(Kind, u8, u8)> {
+        fake.sent()
+            .iter()
+            .map(|s| (s.kind, s.report[1], s.report[2]))
+            .collect()
+    }
+
+    #[test]
+    fn a_kept_layer_write_costs_one_write_and_one_read_a_settle_later() {
+        for layer in Layer::ALL {
+            let (fake, kb) = holding();
+            kb.write_bindings(layer, &changed(layer)).unwrap();
+            let l = layer.byte();
+            assert_eq!(
+                ops(&fake),
+                [(Kind::Feature, 0x36, l), (Kind::Feature, 0xB6, l)],
+                "{layer:?}"
+            );
+            assert_eq!(
+                fake.sent()[1].report,
+                read_request(layer, layer.keys()).unwrap()
+            );
+            let at = fake.sent_at();
+            assert!(at[1] - at[0] >= READ_SETTLE, "{:?}", at[1] - at[0]);
+            assert_eq!(fake.held_layer(layer).unwrap(), changed(layer));
+        }
+    }
+
+    #[test]
+    fn a_dropped_layer_write_is_written_again_and_kept() {
+        for layer in Layer::ALL {
+            let (fake, kb) = holding();
+            fake.drop_layer_writes(1);
+            kb.write_bindings(layer, &changed(layer)).unwrap();
+            let (write, read) = (
+                (Kind::Feature, 0x36, layer.byte()),
+                (Kind::Feature, 0xB6, layer.byte()),
+            );
+            assert_eq!(ops(&fake), [write, read, write, read], "{layer:?}");
+            assert_eq!(
+                fake.sent()[0].report,
+                fake.sent()[2].report,
+                "the same again"
+            );
+            assert_eq!(fake.held_layer(layer).unwrap(), changed(layer));
+        }
+    }
+
+    #[test]
+    fn a_layer_the_keyboard_drops_three_times_is_an_error_naming_it() {
+        let (fake, kb) = holding();
+        fake.drop_layer_writes(3);
+        let e = format!(
+            "{:#}",
+            kb.write_bindings(Layer::Second, &changed(Layer::Second))
+                .unwrap_err()
+        );
+        assert!(
+            e.contains("the keyboard didn't keep the deep-press bindings after 3 tries"),
+            "{e}"
+        );
+        let (write, read) = ((Kind::Feature, 0x36, 0x02), (Kind::Feature, 0xB6, 0x02));
+        assert_eq!(ops(&fake), [write, read, write, read, write, read]);
+        assert_eq!(
+            fake.held_layer(Layer::Second).unwrap(),
+            stock(Layer::Second)
+        );
+        let (fake, kb) = holding();
+        fake.drop_layer_writes(3);
+        let e = kb
+            .write_bindings(Layer::Fn, &changed(Layer::Fn))
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("the Fn bindings"), "{e:#}");
+    }
+
+    #[test]
+    fn a_layer_write_right_after_another_report_is_kept_as_reports_keep_their_distance() {
+        let (fake, kb) = holding();
+        // As the owner's keyboard: a layer write 0 ms after another report may go.
+        fake.drop_layer_writes_closer_than(std::time::Duration::from_millis(2));
+        kb.set_second_actuation(|c| (c == 0x1A).then_some(30), |_| false)
+            .unwrap();
+        kb.show(|_| crate::Rgb::default()).unwrap();
+        kb.write_bindings(Layer::Second, &changed(Layer::Second))
+            .unwrap();
+        assert_eq!(
+            ops(&fake)[1..],
+            [
+                (Kind::Feature, 0x40, 112),
+                (Kind::Feature, 0x36, 0x02),
+                (Kind::Feature, 0xB6, 0x02)
+            ],
+            "one write, kept"
+        );
     }
 
     #[test]
