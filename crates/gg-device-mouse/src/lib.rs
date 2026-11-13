@@ -21,7 +21,7 @@ use tracing::debug;
 pub mod proto;
 pub mod tables;
 
-pub use proto::{Battery, ButtonAction, DpiStage, PollingRate, BUTTON_COUNT, MAX_PRESETS};
+pub use proto::{Battery, ButtonAction, DpiStage, PollingRate, Radio, BUTTON_COUNT, MAX_PRESETS};
 
 pub const VENDOR_ID: u16 = 0x1038;
 pub const PRODUCT_ID: u16 = 0x1872;
@@ -155,6 +155,40 @@ impl Mouse {
     pub fn set_buttons(&self, actions: &[ButtonAction; BUTTON_COUNT]) -> Result<()> {
         debug!(?actions, "setting button mapping");
         self.send(&proto::buttons_packet(actions))
+    }
+
+    /// Ask `query` and decode the answer; `None` for no answer.
+    fn ask<T>(&self, query: &[u8], decode: impl FnOnce(&[u8]) -> Option<T>) -> Result<Option<T>> {
+        self.drain();
+        self.send(query)?;
+        Ok(self.recv()?.and_then(|data| decode(&data)))
+    }
+
+    /// Read the DPI stages and which one is active (from 0). `None` means no answer:
+    /// a mouse that answers always has at least one stage.
+    pub fn dpi(&self) -> Result<Option<(Vec<DpiStage>, usize)>> {
+        self.ask(&proto::read_sensitivity_packet(), proto::decode_sensitivity)
+    }
+
+    /// Read the polling rate. All zeros reads as 1000 Hz, so only trust it next to a
+    /// [`Mouse::dpi`] that answered.
+    pub fn polling_rate(&self) -> Result<Option<PollingRate>> {
+        self.ask(
+            &proto::read_polling_rate_packet(),
+            proto::decode_polling_rate,
+        )
+    }
+
+    /// Read the radio mode. All zeros reads as High-Efficiency Mode, so only trust it
+    /// next to a [`Mouse::dpi`] that answered.
+    pub fn radio(&self) -> Result<Option<Radio>> {
+        self.ask(&proto::read_radio_packet(), proto::decode_radio)
+    }
+
+    /// Set the radio mode, as GG does on each switch: at once, without a save.
+    pub fn set_radio(&self, radio: Radio) -> Result<()> {
+        debug!(?radio, "setting the radio mode");
+        self.send(&proto::radio_packet(radio))
     }
 
     /// Read the sleep timer, in seconds. `None` means asleep or no answer.

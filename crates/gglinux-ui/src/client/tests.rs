@@ -423,7 +423,7 @@ fn a_battery_alone_is_not_a_mouse_state() {
         connected: true,
         battery: None,
         applied: None,
-        sleep_secs: None,
+        ..MouseState::default()
     });
     s.apply(Event::MouseBattery { battery });
     assert_eq!(s.mouse.unwrap().battery, battery);

@@ -6,7 +6,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gg_ipc::mouse_keys::{self, KEYS, MEDIA};
-use gg_ipc::{DpiStage, Experimental, Feature, Request, MOUSE_SLEEP_MINUTES};
+use gg_ipc::{
+    DpiStage, Experimental, Feature, MouseRadio, MouseSettings, Request, MOUSE_SLEEP_MINUTES,
+};
 use slint::{ComponentHandle, SharedString};
 
 use crate::client::{Client, State, TIMEOUT};
@@ -117,9 +119,13 @@ pub struct MouseForm {
     pub picker: Option<KeyPicker>,
     /// The sleep timer to send, in minutes ([`MOUSE_SLEEP_MINUTES`]).
     pub sleep: u8,
+    /// The wireless mode to send.
+    pub radio: MouseRadio,
     seeded: bool,
     /// The sleep timer was taken from the mouse (or from what was written) once.
     sleep_seeded: bool,
+    /// And so was the wireless mode.
+    radio_seeded: bool,
 }
 
 impl Default for MouseForm {
@@ -133,8 +139,10 @@ impl Default for MouseForm {
             picker: None,
             // GG's own default.
             sleep: 5,
+            radio: MouseRadio::Normal,
             seeded: false,
             sleep_seeded: false,
+            radio_seeded: false,
         }
     }
 }
@@ -152,11 +160,40 @@ impl MouseForm {
         match mouse {
             None => *self = MouseForm::default(),
             Some(m) => {
-                if let Some(a) = &m.applied {
-                    self.seed(a);
+                // Each part from what the mouse reports, or else what was written.
+                let applied = m.applied.clone().unwrap_or_default();
+                let known = MouseSettings {
+                    dpi: m.reported_dpi.clone().or(applied.dpi),
+                    polling_hz: m.reported_polling_hz.or(applied.polling_hz),
+                    buttons: applied.buttons,
+                    ..MouseSettings::default()
+                };
+                if known != MouseSettings::default() {
+                    self.seed(&known);
                 }
                 self.seed_sleep(m);
+                if let (false, Some(radio)) = (
+                    self.radio_seeded,
+                    m.radio.or(m.applied.as_ref().and_then(|a| a.radio)),
+                ) {
+                    self.radio = radio;
+                    self.radio_seeded = true;
+                }
             }
+        }
+    }
+
+    /// A pick from the wireless modes, by its place in [`MouseRadio::ALL`].
+    pub fn pick_radio(&mut self, index: usize) {
+        if let Some(radio) = MouseRadio::ALL.get(index) {
+            self.radio = *radio;
+        }
+    }
+
+    pub fn radio_request(&mut self, save: bool) -> Request {
+        Request::SetMouseRadio {
+            radio: self.radio,
+            save,
         }
     }
 
@@ -488,6 +525,45 @@ pub fn summarise(a: &gg_ipc::MouseSettings) -> String {
     parts.join(" · ")
 }
 
+/// What the mouse itself reports, as the line at the top of its card shows it; "" while
+/// nothing is read.
+pub fn reported_summary(m: &gg_ipc::MouseState) -> String {
+    let mut parts = Vec::new();
+    if let Some(dpi) = &m.reported_dpi {
+        let list: Vec<String> = dpi.stages.iter().map(stage_text).collect();
+        parts.push(format!(
+            "{} dpi · stage {}",
+            list.join(" / "),
+            dpi.active + 1
+        ));
+    }
+    if let Some(hz) = m.reported_polling_hz {
+        parts.push(format!("{hz} Hz"));
+    }
+    if let Some(secs) = m.sleep_secs {
+        parts.push(match secs % 60 {
+            0 => format!("sleep after {} min", secs / 60),
+            s => format!("sleep after {} min {s} s", secs / 60),
+        });
+    }
+    if let Some(radio) = m.radio {
+        parts.push(format!("wireless: {}", radio.label()));
+    }
+    parts.join(" · ")
+}
+
+/// The first line of the card's note: what the mouse reports, or why nothing is read.
+pub fn reported_note(gated: bool, mouse: Option<&gg_ipc::MouseState>) -> String {
+    let summary = mouse.map(reported_summary).unwrap_or_default();
+    if !gated {
+        "Only the battery is read from this mouse while “Mouse: sleep timer and power settings” is off in Settings → Experimental.".into()
+    } else if summary.is_empty() {
+        "The mouse hasn't reported its settings yet: it answers once it's awake.".into()
+    } else {
+        format!("The mouse reports: {summary}.")
+    }
+}
+
 fn show_mouse_form(ui: &AppWindow, f: &MouseForm) {
     let g = ui.global::<MouseUi>();
     let xs = f.stages.iter().map(|s| s.x).collect();
@@ -498,6 +574,8 @@ fn show_mouse_form(ui: &AppWindow, f: &MouseForm) {
     g.set_active(f.active as i32);
     g.set_polling(f.polling as i32);
     g.set_sleep(f.sleep as i32);
+    let radio = MouseRadio::ALL.iter().position(|r| *r == f.radio);
+    g.set_radio(radio.map_or(-1, |i| i as i32));
     g.set_buttons(ints(f.button_menu()));
     let keys: Vec<SharedString> = f.buttons.iter().map(|b| button_text(b).into()).collect();
     sync_rows(g.get_button_keys(), keys, |m| g.set_button_keys(m));
@@ -554,6 +632,13 @@ pub fn show_mouse(ui: &AppWindow, s: &State, form: &RefCell<MouseForm>) {
             .into(),
     );
     g.set_sleep_read(sleep_read(s.mouse.as_ref().and_then(|m| m.sleep_secs)).into());
+    g.set_reported(
+        reported_note(
+            s.experimental.is_some_and(|e| e.on(Feature::MousePower)),
+            s.mouse.as_ref(),
+        )
+        .into(),
+    );
     form.borrow_mut().follow(s.mouse.as_ref());
     let Some(m) = s.mouse.as_ref() else {
         // Onboard writes start off again too: they can't be undone.
@@ -600,6 +685,8 @@ pub fn bind_mouse(ui: &AppWindow, client: &Client, form: Rc<RefCell<MouseForm>>)
     g.on_pick_polling(move |hz| polling(hz, 0));
     let sleep = edit(|f, m, _| f.set_sleep(m));
     g.on_pick_sleep(move |m| sleep(m, 0));
+    let radio = edit(|f, i, _| f.pick_radio(i as usize));
+    g.on_pick_radio(move |i| radio(i, 0));
     g.on_pick_button(edit(|f, i, a| f.pick_button(i as usize, a as usize)));
     let factory = edit(|f, _, _| f.factory_buttons());
     g.on_factory_buttons(move || factory(0, 0));
@@ -641,6 +728,7 @@ pub fn bind_mouse(ui: &AppWindow, client: &Client, form: Rc<RefCell<MouseForm>>)
     g.on_apply_dpi(send("dpi", MouseForm::dpi_request));
     g.on_apply_polling(send("polling", MouseForm::polling_request));
     g.on_apply_sleep(send("sleep", MouseForm::sleep_request));
+    g.on_apply_radio(send("radio", MouseForm::radio_request));
     g.on_apply_buttons(send("buttons", MouseForm::buttons_request));
     g.on_save(send("save", |_, _| Request::SaveMouse));
 }
@@ -687,6 +775,8 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
             "mouse.apply-polling" => m.invoke_apply_polling(),
             "mouse.pick-sleep" => m.invoke_pick_sleep(n),
             "mouse.apply-sleep" => m.invoke_apply_sleep(),
+            "mouse.pick-radio" => m.invoke_pick_radio(n),
+            "mouse.apply-radio" => m.invoke_apply_radio(),
             "mouse.apply-buttons" => m.invoke_apply_buttons(),
             "mouse.save" => m.invoke_save(),
             _ => return false,
@@ -796,7 +886,7 @@ mod tests {
                     .map(String::from)
                     .to_vec(),
             ),
-            sleep_minutes: None,
+            ..MouseSettings::default()
         };
         let mut f = MouseForm::default();
         f.seed(&applied);
@@ -1097,9 +1187,8 @@ mod tests {
     fn a_daemon_gone_takes_the_working_copy_with_it() {
         let state = |applied: Option<MouseSettings>| gg_ipc::MouseState {
             connected: true,
-            battery: None,
             applied,
-            sleep_secs: None,
+            ..gg_ipc::MouseState::default()
         };
         let first = MouseSettings {
             polling_hz: Some(500),
@@ -1133,7 +1222,77 @@ mod tests {
                 ..MouseSettings::default()
             }),
             sleep_secs,
+            ..gg_ipc::MouseState::default()
         }
+    }
+
+    #[test]
+    fn what_the_mouse_reports_fills_the_form_where_nothing_was_written() {
+        let mut m = reporting(Some(1200), None);
+        m.radio = Some(MouseRadio::Stable);
+        m.reported_polling_hz = Some(125);
+        m.reported_dpi = Some(MouseDpi {
+            stages: vec![DpiStage { x: 400, y: 400 }, DpiStage { x: 500, y: 400 }],
+            active: 1,
+        });
+        let mut f = MouseForm::default();
+        f.follow(Some(&m));
+        assert_eq!(
+            (f.stages.clone(), f.split, f.active, f.polling, f.radio),
+            (
+                vec![Stage::both(400), Stage { x: 500, y: 400 }],
+                true,
+                1,
+                125,
+                MouseRadio::Stable
+            )
+        );
+        assert_eq!(
+            reported_summary(&m),
+            "400 / 500×400 dpi · stage 2 · 125 Hz · sleep after 20 min · wireless: Wireless Stability"
+        );
+        // What the mouse reports wins over what was written; what it doesn't report
+        // comes from what was written.
+        m.applied = Some(MouseSettings {
+            polling_hz: Some(500),
+            radio: Some(MouseRadio::Normal),
+            ..MouseSettings::default()
+        });
+        let mut g = MouseForm::default();
+        g.follow(Some(&m));
+        assert_eq!(
+            (g.polling, g.stages.len(), g.radio),
+            (125, 2, MouseRadio::Stable)
+        );
+        m.reported_polling_hz = None;
+        m.radio = None;
+        let mut g = MouseForm::default();
+        g.follow(Some(&m));
+        assert_eq!((g.polling, g.radio), (500, MouseRadio::Normal));
+        // A pick is sent as it is; the modes are in the menu's order.
+        g.pick_radio(2);
+        assert!(matches!(
+            g.radio_request(true),
+            Request::SetMouseRadio {
+                radio: MouseRadio::HighEfficiency,
+                save: true
+            }
+        ));
+        g.pick_radio(9);
+        assert_eq!(g.radio, MouseRadio::HighEfficiency);
+    }
+
+    #[test]
+    fn the_cards_note_says_what_is_read_or_why_not() {
+        let m = reporting(Some(600), None);
+        assert!(reported_note(false, Some(&m)).starts_with("Only the battery is read"));
+        assert_eq!(
+            reported_note(true, Some(&m)),
+            "The mouse reports: sleep after 10 min."
+        );
+        let asleep = reporting(None, None);
+        assert!(reported_note(true, Some(&asleep)).contains("once it's awake"));
+        assert!(reported_note(true, None).contains("once it's awake"));
     }
 
     #[test]

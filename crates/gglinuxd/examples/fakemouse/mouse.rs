@@ -2,8 +2,8 @@
 //! The fake Rival 3: settings echoed back as applied, a battery that drifts.
 
 use gg_ipc::{
-    DeviceKind, Feature, MouseDpi, MouseSettings, MouseState, Request, ResponseData,
-    MOUSE_SLEEP_MINUTES,
+    DeviceKind, DpiStage, Feature, MouseDpi, MouseRadio, MouseSettings, MouseState, Request,
+    ResponseData, MOUSE_SLEEP_MINUTES,
 };
 
 use crate::log::method_name;
@@ -56,6 +56,14 @@ pub fn handle(req: Request, s: &mut Fake) -> ResponseData {
             eprintln!(">>   (would also commit to onboard memory)");
             ResponseData::Success
         }
+        Request::SetMouseRadio { radio, save } => {
+            if let Some(why) = s.experimental.refusal(Feature::MousePower) {
+                return error(why);
+            }
+            s.applied.get_or_insert_with(MouseSettings::default).radio = Some(radio);
+            note_save(save);
+            ResponseData::Success
+        }
         other => error(format!("{} is not a mouse request", method_name(&other))),
     }
 }
@@ -67,19 +75,27 @@ fn note_save(save: bool) {
 }
 
 fn mouse_state(s: &Fake) -> MouseState {
+    let power = s.experimental.on(Feature::MousePower);
+    let applied = s.applied.as_ref();
     MouseState {
         connected: s.devices.iter().any(|d| d.kind == DeviceKind::Mouse),
         battery: s.battery,
         applied: s.applied.clone(),
-        // The fake mouse "reports" the timer last written, 5 minutes before that, while
+        // The fake mouse "reports" what was last written, GG's defaults before that, while
         // the gate is on: as the daemon reads it.
-        sleep_secs: s.experimental.on(Feature::MousePower).then(|| {
-            let minutes = s
-                .applied
-                .as_ref()
-                .and_then(|a| a.sleep_minutes)
-                .unwrap_or(5);
+        sleep_secs: power.then(|| {
+            let minutes = applied.and_then(|a| a.sleep_minutes).unwrap_or(5);
             u16::from(minutes) * 60
         }),
+        radio: power.then(|| applied.and_then(|a| a.radio).unwrap_or(MouseRadio::Normal)),
+        reported_dpi: power.then(|| {
+            applied.and_then(|a| a.dpi.clone()).unwrap_or(MouseDpi {
+                stages: [400, 800, 1600, 2400, 3200]
+                    .map(|d| DpiStage { x: d, y: d })
+                    .to_vec(),
+                active: 2,
+            })
+        }),
+        reported_polling_hz: power.then(|| applied.and_then(|a| a.polling_hz).unwrap_or(1000)),
     }
 }

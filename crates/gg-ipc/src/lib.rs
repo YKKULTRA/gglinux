@@ -78,7 +78,8 @@ pub struct MouseDpi {
 /// Mouse settings, as written by gglinux.
 ///
 /// Each part is `None` until it has been written. A part never written is unknown, not its
-/// factory default: only the sleep timer is read back (see [`MouseState::sleep_secs`]).
+/// factory default; what the mouse itself reports is in [`MouseState`] (`sleep_secs`,
+/// `radio`, `reported_dpi`, `reported_polling_hz`). The buttons aren't read back.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseSettings {
     pub dpi: Option<MouseDpi>,
@@ -88,6 +89,46 @@ pub struct MouseSettings {
     /// The sleep timer, in minutes ([`MOUSE_SLEEP_MINUTES`]).
     #[serde(default)]
     pub sleep_minutes: Option<u8>,
+    #[serde(default)]
+    pub radio: Option<MouseRadio>,
+}
+
+/// How the mouse talks to its dongle: GG's High-Efficiency Mode and Wireless Stability
+/// switches, as the three states GG sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseRadio {
+    /// GG's High-Efficiency Mode: longer battery life.
+    HighEfficiency,
+    /// Neither switch on.
+    Normal,
+    /// GG's Wireless Stability: for places with much radio traffic.
+    Stable,
+}
+
+impl MouseRadio {
+    pub const ALL: [MouseRadio; 3] = [
+        MouseRadio::Normal,
+        MouseRadio::Stable,
+        MouseRadio::HighEfficiency,
+    ];
+
+    /// The name `ggctl mouse radio` takes.
+    pub fn key(self) -> &'static str {
+        match self {
+            MouseRadio::HighEfficiency => "efficient",
+            MouseRadio::Normal => "normal",
+            MouseRadio::Stable => "stable",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MouseRadio::HighEfficiency => "High-Efficiency Mode",
+            MouseRadio::Normal => "Normal",
+            MouseRadio::Stable => "Wireless Stability",
+        }
+    }
 }
 
 /// The sleep timers the mouse takes, in whole minutes: GG's own range, the only values seen
@@ -95,7 +136,7 @@ pub struct MouseSettings {
 pub const MOUSE_SLEEP_MINUTES: std::ops::RangeInclusive<u8> = 1..=20;
 
 /// What the daemon knows about the mouse.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseState {
     pub connected: bool,
     /// `None` while the mouse is asleep or has not reported yet.
@@ -110,6 +151,17 @@ pub struct MouseState {
     /// [`Feature::MousePower`] is on; `None` while it's off, or the mouse is asleep.
     #[serde(default)]
     pub sleep_secs: Option<u16>,
+    /// The radio mode as the mouse reports it; read and `None` as [`MouseState::sleep_secs`].
+    #[serde(default)]
+    pub radio: Option<MouseRadio>,
+    /// The DPI stages as the mouse reports them; read and `None` as
+    /// [`MouseState::sleep_secs`].
+    #[serde(default)]
+    pub reported_dpi: Option<MouseDpi>,
+    /// The polling rate as the mouse reports it; read and `None` as
+    /// [`MouseState::sleep_secs`].
+    #[serde(default)]
+    pub reported_polling_hz: Option<u16>,
 }
 
 /// Burn-in protection for the headset base station's screen.
@@ -1202,6 +1254,13 @@ pub enum Request {
     SetMouseSleep {
         minutes: u8,
     },
+    /// Set how the mouse talks to its dongle, at once as GG does. Needs
+    /// [`Feature::MousePower`].
+    SetMouseRadio {
+        radio: MouseRadio,
+        #[serde(default)]
+        save: bool,
+    },
     /// Headset battery, power, and screen settings.
     GetHeadsetState,
     /// Replace the base-station screen settings.
@@ -1398,7 +1457,8 @@ impl Request {
             | R::SetMousePolling { .. }
             | R::SetMouseButtons { .. }
             | R::SaveMouse
-            | R::SetMouseSleep { .. } => Part::Mouse,
+            | R::SetMouseSleep { .. }
+            | R::SetMouseRadio { .. } => Part::Mouse,
             R::GetHeadsetState | R::SetHeadsetScreen { .. } | R::SetHeadset { .. } => Part::Headset,
             R::GetSonarState
             | R::SetSonarEnabled { .. }
@@ -1809,7 +1869,7 @@ mod tests {
                 charging: false,
             }),
             applied: None,
-            sleep_secs: None,
+            ..MouseState::default()
         };
         let json = serde_json::to_string(&ResponseData::Mouse { state }).unwrap();
         assert!(json.contains(r#""applied":null"#), "{json}");
@@ -1825,7 +1885,7 @@ mod tests {
         let json = serde_json::to_string(&applied).unwrap();
         assert_eq!(
             json,
-            r#"{"dpi":null,"polling_hz":500,"buttons":null,"sleep_minutes":null}"#
+            r#"{"dpi":null,"polling_hz":500,"buttons":null,"sleep_minutes":null,"radio":null}"#
         );
     }
 

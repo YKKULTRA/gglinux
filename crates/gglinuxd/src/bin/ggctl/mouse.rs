@@ -2,7 +2,7 @@
 //! `ggctl mouse`: the Rival 3's settings, as the daemon has applied them.
 
 use anyhow::{bail, Context, Result};
-use gg_ipc::{DpiStage, MouseDpi, MouseState, Request};
+use gg_ipc::{DpiStage, MouseDpi, MouseRadio, MouseState, Request};
 
 use crate::flag_value;
 
@@ -43,8 +43,18 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
                 .context("the sleep timer is a number of minutes, 1 to 20")?,
         },
         Some((&"sleep", _)) => bail!("usage: ggctl mouse sleep 20   (minutes, 1 to 20; saved)"),
+        Some((&"radio", [mode])) => Request::SetMouseRadio {
+            radio: MouseRadio::ALL
+                .into_iter()
+                .find(|r| r.key() == *mode)
+                .context("the radio mode is one of: normal, stable, efficient")?,
+            save,
+        },
+        Some((&"radio", _)) => bail!("usage: ggctl mouse radio normal|stable|efficient [--save]"),
         Some((other, _)) => {
-            bail!("unknown mouse command '{other}' (try: dpi, polling, buttons, sleep, save)")
+            bail!(
+                "unknown mouse command '{other}' (try: dpi, polling, buttons, sleep, radio, save)"
+            )
         }
     })
 }
@@ -63,8 +73,12 @@ pub fn print(state: &MouseState) {
             None => "unknown (asleep — move the mouse and retry)".into(),
         }
     );
-    if let Some(secs) = state.sleep_secs {
-        println!("sleep:     {} (as the mouse reports it)", sleep_text(secs));
+    let reported = reported_lines(state);
+    if !reported.is_empty() {
+        println!("the mouse reports:");
+        for line in reported {
+            println!("  {line}");
+        }
     }
     match &state.applied {
         Some(s) => {
@@ -80,11 +94,33 @@ pub fn print(state: &MouseState) {
             if let (Some(m), None) = (s.sleep_minutes, state.sleep_secs) {
                 println!("sleep:     {m} min (written)");
             }
+            if let (Some(r), None) = (s.radio, state.radio) {
+                println!("radio:     {} (written)", r.key());
+            }
         }
         // The mouse protocol is write-only, so an unwritten setting is
         // genuinely unknown rather than assumed to be the default.
         None => println!("applied:   nothing yet this session (mouse is on its onboard settings)"),
     }
+}
+
+/// What the mouse itself reports of its settings, a line each; empty while they aren't
+/// read (`mouse_power` off, or no answer yet).
+fn reported_lines(state: &MouseState) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(dpi) = &state.reported_dpi {
+        lines.push(format!("dpi:     {}", dpi_summary(dpi)));
+    }
+    if let Some(hz) = state.reported_polling_hz {
+        lines.push(format!("polling: {hz} Hz"));
+    }
+    if let Some(secs) = state.sleep_secs {
+        lines.push(format!("sleep:   {}", sleep_text(secs)));
+    }
+    if let Some(radio) = state.radio {
+        lines.push(format!("radio:   {} ({})", radio.key(), radio.label()));
+    }
+    lines
 }
 
 /// A sleep timer in seconds as minutes, or minutes and seconds if it isn't whole.
@@ -221,6 +257,49 @@ mod tests {
         }
         assert_eq!(sleep_text(1200), "20 min");
         assert_eq!(sleep_text(90), "1 min 30 s");
+    }
+
+    #[test]
+    fn radio_takes_one_of_its_three_names() {
+        for (name, radio) in [
+            ("normal", MouseRadio::Normal),
+            ("stable", MouseRadio::Stable),
+            ("efficient", MouseRadio::HighEfficiency),
+        ] {
+            match sends(&format!("mouse radio {name} --save")) {
+                Request::SetMouseRadio { radio: r, save } => assert_eq!((r, save), (radio, true)),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+        for bad in [
+            "mouse radio",
+            "mouse radio fast",
+            "mouse radio normal stable",
+        ] {
+            assert!(parse(&args(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn what_the_mouse_reports_is_listed_only_where_it_answered() {
+        let mut state = MouseState::default();
+        assert!(reported_lines(&state).is_empty());
+        state.sleep_secs = Some(1200);
+        state.radio = Some(MouseRadio::Stable);
+        state.reported_polling_hz = Some(125);
+        state.reported_dpi = Some(MouseDpi {
+            stages: [400, 800].map(|d| DpiStage { x: d, y: d }).to_vec(),
+            active: 0,
+        });
+        assert_eq!(
+            reported_lines(&state),
+            [
+                "dpi:     400,800 (stage 0 active, counting from 0)",
+                "polling: 125 Hz",
+                "sleep:   20 min",
+                "radio:   stable (Wireless Stability)",
+            ]
+        );
     }
 
     #[test]

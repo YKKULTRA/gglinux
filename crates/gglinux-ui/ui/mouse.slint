@@ -30,6 +30,10 @@ export global MouseUi {
     in property <bool> power-gated;
     /// The sentence shown while it's off.
     in property <string> power-refusal;
+    /// The wireless mode to send: its place in "Normal", "Stability", "High efficiency".
+    in property <int> radio;
+    /// The first line of the card's note: what the mouse reports, or why nothing is read.
+    in property <string> reported;
     /// Per button, its place in `actions`, or -1 for a name set elsewhere that
     /// the menu doesn't offer.
     in property <[int]> buttons: [0, 1, 2, 3, 4, 5];
@@ -75,6 +79,8 @@ export global MouseUi {
     callback pick-polling(int);
     callback pick-sleep(int);
     callback apply-sleep();
+    callback pick-radio(int);
+    callback apply-radio();
     callback pick-button(int, int);
     callback factory-buttons();
     callback apply-dpi();
@@ -83,9 +89,10 @@ export global MouseUi {
     callback save();
 }
 
-/// The mouse can't be read: say so, and what this session wrote.
+/// What the mouse reports (or why nothing is read), and what this session wrote.
 component Caveat inherits Rectangle {
     in property <string> applied;
+    in property <string> reported;
     background: Theme.surface-2;
     border-radius: 8px;
     VerticalLayout {
@@ -94,7 +101,7 @@ component Caveat inherits Rectangle {
         padding-top: 8px;
         padding-bottom: 8px;
         spacing: 2px;
-        Hint { text: "This mouse reports only its battery and sleep timer back, so the rest here isn't read from the hardware."; }
+        Hint { text: root.reported; }
         HorizontalLayout {
             spacing: root.applied != "" ? 5px : 0;
             Hint {
@@ -213,7 +220,7 @@ export component MousePanel inherits Card {
             : "not connected";
         if MouseUi.battery >= 0 : Battery { level: MouseUi.battery; }
     }
-    Caveat { applied: MouseUi.applied; }
+    Caveat { applied: MouseUi.applied; reported: MouseUi.reported; }
     Divider { }
     Head {
         text: "DPI STAGES";
@@ -319,6 +326,22 @@ export component MousePanel inherits Card {
     HorizontalLayout {
         alignment: start;
         Button { text: MouseUi.busy == "sleep" ? "Saving…" : "Save sleep timer"; enabled: MouseUi.busy == "" && MouseUi.power-gated; clicked => { MouseUi.apply-sleep(); } }
+    }
+    Divider { }
+    Head { text: "WIRELESS MODE"; }
+    Shown { shown: !MouseUi.power-gated; gap: 0; Hint { text: MouseUi.power-refusal; color: Theme.accent; } }
+    HorizontalLayout {
+        alignment: start;
+        Segmented {
+            options: ["Normal", "Stability", "High efficiency"];
+            current: MouseUi.radio;
+            picked(i) => { MouseUi.pick-radio(i); }
+        }
+    }
+    Hint { text: "Stability is for places with a lot of radio traffic; High efficiency makes the battery last longer. GG calls them Wireless Stability and High-Efficiency Mode."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "radio" ? "Applying…" : "Apply wireless mode"; enabled: MouseUi.busy == "" && MouseUi.power-gated; clicked => { MouseUi.apply-radio(); } }
     }
     Divider { }
     Head {

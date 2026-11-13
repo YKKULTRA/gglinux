@@ -75,8 +75,15 @@ pub const NO_SECOND_POINT: (u8, u8) = (0xFF, 0xFF);
 pub const STOCK_FN_KEY: u8 = 0xF0;
 /// How long a read waits before it asks again, when the keyboard's answer was still the
 /// one to the command before ("the feature read slot holds the response to the last
-/// command"). The source gives no time; one short retry is all a read gets.
+/// command"). The source gives no time.
 const READ_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+/// How long the keyboard gets to put a read's answer in the read slot before it's read.
+/// Read with no wait, the owner's keyboard still held the layer read just before ("answered
+/// for layer 0 when asked for the Fn layer", 2026-11-13). Apex Control's code waits 13 ms
+/// after each query.
+const READ_SETTLE: std::time::Duration = std::time::Duration::from_millis(13);
+/// How often a read is asked in all while the read slot still holds an earlier answer.
+const READ_TRIES: usize = 4;
 
 /// What a stock keyboard's Fn layer holds, as Apex Control read it: F9–F12, Left GUI, O,
 /// I, T and Q run the keyboard's own shortcuts (brightness, media, the screen menu). For
@@ -510,18 +517,33 @@ pub fn second_actuation_table(second_of: impl Fn(u8) -> Option<u8>) -> Vec<u8> {
     report
 }
 
+/// Whether `reply` is an answer left in the read slot from before this read of `layer`:
+/// another command's, or a bindings read of another layer. A refusal (`B6` with an error
+/// byte) is this read's own answer.
+fn stale(layer: Layer, reply: &[u8]) -> bool {
+    match reply {
+        [OP_READ_BINDINGS, 0, other, ..] => *other != layer.byte(),
+        [OP_READ_BINDINGS, ..] => false,
+        _ => true,
+    }
+}
+
 impl Keyboard {
-    /// Read `layer` back, every key it has, in [`Layer::keys`] order. An answer that is
-    /// still another command's (the switch tables' `38 00`, a colour frame's `40 00`) is
-    /// asked for once more, a moment later.
+    /// Read `layer` back, every key it has, in [`Layer::keys`] order. The keyboard gets
+    /// [`READ_SETTLE`] to answer; an answer that is still an earlier one (the switch tables'
+    /// `38 00`, a colour frame's `40 00`, or the layer read just before) is asked for again
+    /// a moment later, [`READ_TRIES`] times in all.
     pub fn read_bindings(&self, layer: Layer) -> Result<Vec<Block>> {
         let mut blocks = Vec::new();
         for asked in layer.keys().chunks(MAX_BLOCKS) {
             let request = read_request(layer, asked)?;
-            let mut reply = self.exchange_feature(&request)?;
-            if reply.first() != Some(&OP_READ_BINDINGS) {
+            let mut reply = self.exchange_feature_settled(&request, READ_SETTLE)?;
+            for _ in 1..READ_TRIES {
+                if !stale(layer, &reply) {
+                    break;
+                }
                 std::thread::sleep(READ_RETRY);
-                reply = self.exchange_feature(&request)?;
+                reply = self.exchange_feature_settled(&request, READ_SETTLE)?;
             }
             blocks.extend(
                 decode_reply(layer, asked, &reply)
@@ -845,17 +867,50 @@ mod tests {
         let sent = fake.sent();
         assert_eq!(sent.len(), 2, "one retry");
         assert!(sent.iter().all(|s| s.report == request));
-        // Still another command's answer: refused, saying what it found, asked twice only.
+        // Still another command's answer: refused, saying what it found, after its tries.
         fake.clear_sent();
         fake.answer_feature(Key::sub(0xB6, 0x00), &[0x40, 0x00]);
         let e = format!("{:#}", kb.read_bindings(Layer::Normal).unwrap_err());
         assert!(e.contains("answered 0x40 0x00"), "{e}");
-        assert_eq!(fake.sent().len(), 2);
+        assert_eq!(fake.sent().len(), READ_TRIES);
         // A real answer that's wrong isn't asked again.
         fake.clear_sent();
         fake.answer_feature(Key::sub(0xB6, 0x00), &[0xB6, 0x01]);
         assert!(kb.read_bindings(Layer::Normal).is_err());
         assert_eq!(fake.sent().len(), 1);
+    }
+
+    /// As the owner's keyboard did on 2026-11-13: the Fn layer's read still found the
+    /// normal layer's answer in the read slot.
+    #[test]
+    fn a_read_that_finds_the_layer_read_before_is_asked_again() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        kb.set_families(ON);
+        let mut answers = 0;
+        fake.answer_feature_with(Key::sub(0xB6, 0x01), move |_| {
+            answers += 1;
+            if answers <= 2 {
+                reply(Layer::Normal, &stock(Layer::Normal))
+            } else {
+                reply(Layer::Fn, &stock(Layer::Fn))
+            }
+        });
+        assert_eq!(kb.read_bindings(Layer::Fn).unwrap(), stock(Layer::Fn));
+        assert_eq!(
+            fake.sent().len(),
+            3,
+            "asked until the answer is the Fn layer's"
+        );
+        // A slot that never moves on is refused, naming the layer it held.
+        fake.clear_sent();
+        fake.answer_feature(
+            Key::sub(0xB6, 0x01),
+            &reply(Layer::Normal, &stock(Layer::Normal)),
+        );
+        let e = format!("{:#}", kb.read_bindings(Layer::Fn).unwrap_err());
+        assert!(e.contains("answered for layer 0"), "{e}");
+        assert_eq!(fake.sent().len(), READ_TRIES);
     }
 
     #[test]

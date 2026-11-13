@@ -130,7 +130,7 @@ impl Experimental {
     pub fn refusal(&self, feature: Feature) -> Option<String> {
         (!self.on(feature)).then(|| {
             format!(
-                "{} hasn't been tried on your hardware yet: turn it on in Settings → Experimental first",
+                "“{}” hasn't been tried on your hardware yet: turn it on in Settings → Experimental first",
                 feature.label()
             )
         })

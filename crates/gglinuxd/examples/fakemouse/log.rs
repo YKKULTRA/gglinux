@@ -13,6 +13,7 @@ pub fn method_name(req: &Request) -> &'static str {
         Request::SetMouseButtons { .. } => "set_mouse_buttons",
         Request::SaveMouse => "save_mouse",
         Request::SetMouseSleep { .. } => "set_mouse_sleep",
+        Request::SetMouseRadio { .. } => "set_mouse_radio",
         Request::GetHeadsetState => "get_headset_state",
         Request::SetHeadsetScreen { .. } => "set_headset_screen",
         Request::SetHeadset { .. } => "set_headset",

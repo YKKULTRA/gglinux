@@ -70,10 +70,14 @@ to queries are 64-byte input reports, first byte at index 0.
 |---|---|---|
 | Sleep timer | `2B 00 00 00 00 <seconds u16 LE>` | GG sends it only when saving, then `09`; GG offers 1–20 min (seen: `58 02` = 10 min, `B0 04` = 20 min). **Built (gated `mouse_power`), untested here.** |
 | Read sleep timer | `AB` → `00 00 00 00 <seconds u16 LE>` | 300, 600, 1200 read back as set. **Built (gated `mouse_power`).** |
-| High-Efficiency / Wireless Stability | `2E 00` (High-Efficiency on), `2E 02 00` (normal), `2E 02 01` (normal + stability) | sent live; read back with `AE` → `<mode> <stability>` |
-| Wheel bindings | `1A 31 00 00 00 00 32 …` | wheel up/down, same codes as `19` |
-| Read DPI stages | `AC` → `<count> <current> <X×count> <Y×count>` | the layout of `2C` |
-| Read polling rate | `97` → `<code>` | the codes of `17` |
+| High-Efficiency / Wireless Stability | `2E 00` (High-Efficiency on), `2E 02 00` (normal), `2E 02 01` (normal + stability) | sent live; read back with `AE` → `<mode> <stability>`. **Built (gated `mouse_power`).** |
+| Wheel bindings | `1A 31 00 00 00 00 32 …` | wheel up/down, same codes as `19`; only the default was captured, so not built |
+| Read DPI stages | `AC` → `<count> <current> <X×5> <Y×5>` | the layout of `2C`. **Built (gated `mouse_power`).** |
+| Read polling rate | `97` → `<code>` | the codes of `17`. **Built (gated `mouse_power`).** |
+
+A mouse that isn't answering reads as all zeros, which would decode as 1000 Hz (`97` → `00`) and
+High-Efficiency Mode (`AE` → `00 00`). gglinux believes those two only next to an `AC` answer with a
+stage count of 1 to 5, which zeros can't be.
 | Unknown queries | `D0`, `90` → `01 05`; `E8` → `04`/`01` | GG polls `E8` every ~2 s |
 
 Acceleration, deceleration and angle snapping send nothing to the mouse (only `09` on save): GG

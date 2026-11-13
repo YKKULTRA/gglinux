@@ -24,6 +24,15 @@ pub const CMD_READ_SLEEP_TIMER: u8 = 0xAB;
 pub const SLEEP_MINUTES: std::ops::RangeInclusive<u8> = 1..=20;
 /// Where the timer's seconds (`u16`, little-endian) sit, counting from the command byte.
 const SLEEP_OFFSET: usize = 5;
+/// Set how the mouse talks to its dongle (GG's High-Efficiency Mode and Wireless
+/// Stability). Same captures; GG sends it at once, without a save.
+pub const CMD_RADIO: u8 = 0x2E;
+/// Read it back: the answer is [`CMD_RADIO`]'s two arguments.
+pub const CMD_READ_RADIO: u8 = 0xAE;
+/// Read the DPI stages back: the answer is [`CMD_SENSITIVITY`]'s arguments.
+pub const CMD_READ_SENSITIVITY: u8 = 0xAC;
+/// Read the polling rate back: the answer is [`CMD_POLLING_RATE`]'s code.
+pub const CMD_READ_POLLING_RATE: u8 = 0x97;
 
 /// The firmware always parses five DPI slots, whatever `count` says.
 pub const MAX_PRESETS: usize = 5;
@@ -160,6 +169,97 @@ impl PollingRate {
 
 pub fn polling_rate_packet(rate: PollingRate) -> Vec<u8> {
     vec![CMD_POLLING_RATE, rate.code()]
+}
+
+pub fn read_polling_rate_packet() -> Vec<u8> {
+    vec![CMD_READ_POLLING_RATE]
+}
+
+/// The answer to `97`: the rate's code. `None` for a code no rate has. A mouse that
+/// isn't answering reads as all zeros, which is also 1000 Hz's code: the caller decides
+/// whether the mouse answered at all (see [`decode_sensitivity`], which can tell).
+pub fn decode_polling_rate(data: &[u8]) -> Option<PollingRate> {
+    [
+        PollingRate::Hz1000,
+        PollingRate::Hz500,
+        PollingRate::Hz250,
+        PollingRate::Hz125,
+    ]
+    .into_iter()
+    .find(|r| Some(&r.code()) == data.first())
+}
+
+pub fn read_sensitivity_packet() -> Vec<u8> {
+    vec![CMD_READ_SENSITIVITY]
+}
+
+/// The DPI of a TrueMove Air code, or `None` for a code the sensor table doesn't have.
+pub fn dpi_of_code(code: u8) -> Option<u16> {
+    let stage = TRUEMOVE_AIR.iter().position(|&c| c == code)?;
+    Some((stage as u16 + 1) * DPI_STEP)
+}
+
+/// The answer to `AC`: `<count> <selected, from 1> <x1..x5> <y1..y5>`, the arguments of
+/// `2C`. Gives the live stages and which one is active (from 0). `None` unless the count,
+/// the selection and every live code make sense: all zeros (no answer) is `None`.
+pub fn decode_sensitivity(data: &[u8]) -> Option<(Vec<DpiStage>, usize)> {
+    let count = usize::from(*data.first()?);
+    let selected = usize::from(*data.get(1)?);
+    if !(1..=MAX_PRESETS).contains(&count) || !(1..=count).contains(&selected) {
+        return None;
+    }
+    let xs = data.get(2..2 + MAX_PRESETS)?;
+    let ys = data.get(2 + MAX_PRESETS..2 + 2 * MAX_PRESETS)?;
+    let stages = (0..count)
+        .map(|i| {
+            Some(DpiStage {
+                x: dpi_of_code(xs[i])?,
+                y: dpi_of_code(ys[i])?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((stages, selected - usize::from(FIRST_PRESET)))
+}
+
+/// How the mouse talks to its dongle. GG shows it as two switches, High-Efficiency Mode
+/// and Wireless Stability; these three are every state it sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Radio {
+    /// GG's High-Efficiency Mode on: `2E 00`.
+    HighEfficiency,
+    /// Both off: `2E 02 00`.
+    Normal,
+    /// GG's Wireless Stability on: `2E 02 01`.
+    Stable,
+}
+
+impl Radio {
+    const ALL: [Radio; 3] = [Radio::HighEfficiency, Radio::Normal, Radio::Stable];
+
+    fn bytes(self) -> [u8; 2] {
+        match self {
+            Radio::HighEfficiency => [0x00, 0x00],
+            Radio::Normal => [0x02, 0x00],
+            Radio::Stable => [0x02, 0x01],
+        }
+    }
+}
+
+pub fn radio_packet(radio: Radio) -> Vec<u8> {
+    let [mode, stability] = radio.bytes();
+    vec![CMD_RADIO, mode, stability]
+}
+
+pub fn read_radio_packet() -> Vec<u8> {
+    vec![CMD_READ_RADIO]
+}
+
+/// The answer to `AE`: `<mode> <stability>`, as `2E` takes them. `None` for any pair GG
+/// never sent. All zeros is High-Efficiency Mode, and also a mouse that isn't answering:
+/// as with [`decode_polling_rate`], the caller decides whether it answered.
+pub fn decode_radio(data: &[u8]) -> Option<Radio> {
+    let pair = data.get(..2)?;
+    Radio::ALL.into_iter().find(|r| r.bytes() == pair)
 }
 
 /// What a physical mouse button does when pressed.
@@ -492,6 +592,94 @@ mod tests {
         assert_eq!(decode_battery(&[0x00, 0, 0]), None, "0 means asleep");
         assert_eq!(decode_battery(&[0xFF, 0, 0]), None, "out of range");
         assert_eq!(decode_battery(&[0x10, 0x00]), None, "short reply");
+    }
+
+    /// Byte for byte as GG 123 sent them on each switch (rival-1 capture), and the mouse's
+    /// answers to `AE` there.
+    #[test]
+    fn the_radio_modes_go_out_and_read_back_as_in_ggs_capture() {
+        assert_eq!(radio_packet(Radio::HighEfficiency), [0x2E, 0x00, 0x00]);
+        assert_eq!(radio_packet(Radio::Normal), [0x2E, 0x02, 0x00]);
+        assert_eq!(radio_packet(Radio::Stable), [0x2E, 0x02, 0x01]);
+        assert_eq!(read_radio_packet(), [0xAE]);
+        let mut answer = [0u8; 64];
+        assert_eq!(decode_radio(&answer), Some(Radio::HighEfficiency));
+        answer[0] = 0x02;
+        assert_eq!(decode_radio(&answer), Some(Radio::Normal));
+        answer[1] = 0x01;
+        assert_eq!(decode_radio(&answer), Some(Radio::Stable));
+        for unseen in [[0x00, 0x01], [0x01, 0x00], [0x02, 0x02], [0x03, 0x00]] {
+            assert_eq!(decode_radio(&unseen), None, "{unseen:02X?}");
+        }
+        assert_eq!(decode_radio(&[0x02]), None, "short");
+    }
+
+    /// The mouse's answers to `AC` in the captures, next to the `2C` GG had just sent.
+    #[test]
+    fn the_dpi_stages_read_back_from_the_mouses_answer() {
+        assert_eq!(read_sensitivity_packet(), [0xAC]);
+        let mut answer = [0u8; 64];
+        // GG's defaults, stage 3 active: 400, 800, 1600, 2400, 3200.
+        answer[..12].copy_from_slice(&[
+            5, 3, 0x04, 0x09, 0x12, 0x1B, 0x26, 0x04, 0x09, 0x12, 0x1B, 0x26,
+        ]);
+        let (stages, active) = decode_sensitivity(&answer).unwrap();
+        assert_eq!(stages, [400, 800, 1600, 2400, 3200].map(DpiStage::uniform));
+        assert_eq!(active, 2);
+        // Stage 1 at X 500, Y 400, and active.
+        answer[..12].copy_from_slice(&[
+            5, 1, 0x05, 0x09, 0x12, 0x1B, 0x26, 0x04, 0x09, 0x12, 0x1B, 0x26,
+        ]);
+        let (stages, active) = decode_sensitivity(&answer).unwrap();
+        assert_eq!((stages[0], active), (DpiStage { x: 500, y: 400 }, 0));
+        // What comes back is what would be sent.
+        let sent = sensitivity_packet(&stages, active).unwrap();
+        assert_eq!(sent[1..], answer[..12]);
+        // Two stages: only the live codes are read.
+        answer[..12].copy_from_slice(&[2, 2, 0x09, 0x12, 0, 0, 0, 0x09, 0x12, 0, 0, 0]);
+        let (stages, active) = decode_sensitivity(&answer).unwrap();
+        assert_eq!((stages.len(), active), (2, 1));
+    }
+
+    #[test]
+    fn a_dpi_answer_that_makes_no_sense_reads_as_nothing() {
+        assert_eq!(decode_sensitivity(&[0u8; 64]), None, "no answer");
+        let ok = [
+            5, 3, 0x04, 0x09, 0x12, 0x1B, 0x26, 0x04, 0x09, 0x12, 0x1B, 0x26,
+        ];
+        assert!(decode_sensitivity(&ok).is_some());
+        for (at, bad, why) in [
+            (0, 6, "six stages"),
+            (1, 0, "no stage active"),
+            (1, 6, "a stage past the count"),
+            (2, 0x01, "a code the sensor has none for"),
+        ] {
+            let mut answer = ok;
+            answer[at] = bad;
+            assert_eq!(decode_sensitivity(&answer), None, "{why}");
+        }
+        assert_eq!(decode_sensitivity(&ok[..11]), None, "short");
+        // Every code the table has comes back as its DPI.
+        for dpi in (DPI_MIN..=DPI_MAX).step_by(usize::from(DPI_STEP)) {
+            assert_eq!(dpi_of_code(dpi_code(dpi)), Some(dpi));
+        }
+    }
+
+    /// The mouse's answers to `97` in the captures: `03` before (125 Hz), `01` after 500 Hz
+    /// was saved, `00` after 1000 Hz.
+    #[test]
+    fn the_polling_rate_reads_back_from_the_mouses_answer() {
+        assert_eq!(read_polling_rate_packet(), [0x97]);
+        for (code, rate) in [
+            (0x00, PollingRate::Hz1000),
+            (0x01, PollingRate::Hz500),
+            (0x02, PollingRate::Hz250),
+            (0x03, PollingRate::Hz125),
+        ] {
+            assert_eq!(decode_polling_rate(&[code, 0, 0]), Some(rate));
+        }
+        assert_eq!(decode_polling_rate(&[0x04]), None);
+        assert_eq!(decode_polling_rate(&[]), None);
     }
 
     /// Byte for byte as GG 123 sent them when saving 20 and 10 minutes (rival-2/-3b captures).

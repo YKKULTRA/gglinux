@@ -13,10 +13,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use gg_device_mouse::proto::nearest_dpi;
-use gg_device_mouse::{ButtonAction, Mouse, PollingRate, BUTTON_COUNT};
+use gg_device_mouse::{ButtonAction, Mouse, PollingRate, Radio, BUTTON_COUNT};
 use gg_ipc::{
-    BatteryState, DpiStage, Event, Experimental, Feature, MouseDpi, MouseSettings, MouseState,
-    MOUSE_SLEEP_MINUTES,
+    BatteryState, DpiStage, Event, Experimental, Feature, MouseDpi, MouseRadio, MouseSettings,
+    MouseState, MOUSE_SLEEP_MINUTES,
 };
 use hidapi::HidApi;
 use tokio::sync::{broadcast, oneshot, watch};
@@ -61,6 +61,12 @@ pub enum Command {
     /// The sleep timer, saved with it (see [`gg_ipc::Request::SetMouseSleep`]).
     SetSleep {
         minutes: u8,
+        reply: Reply<()>,
+    },
+    /// The radio mode (see [`gg_ipc::Request::SetMouseRadio`]).
+    SetRadio {
+        radio: MouseRadio,
+        save: bool,
         reply: Reply<()>,
     },
 }
@@ -112,9 +118,68 @@ struct State {
     /// When the battery was last read, however that read was triggered.
     last_poll: Option<Instant>,
     gates: watch::Receiver<Experimental>,
-    /// The sleep timer as last read, in seconds: kept while the mouse sleeps, dropped
-    /// when it goes away or the gate goes off.
+    /// The mouse's own settings as last read: kept while the mouse sleeps, dropped when
+    /// it goes away or the gate goes off.
+    reported: Reported,
+}
+
+/// What the mouse last reported of its own settings.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Reported {
     sleep_secs: Option<u16>,
+    radio: Option<MouseRadio>,
+    dpi: Option<MouseDpi>,
+    polling_hz: Option<u16>,
+}
+
+/// One round of answers from the mouse, as decoded.
+#[derive(Debug, Default)]
+struct Answers {
+    dpi: Option<(Vec<gg_device_mouse::DpiStage>, usize)>,
+    polling: Option<PollingRate>,
+    radio: Option<Radio>,
+    sleep_secs: Option<u16>,
+}
+
+impl Reported {
+    /// Take in a round of answers. A mouse that isn't answering reads as all zeros, which
+    /// would pass for 1000 Hz and High-Efficiency Mode: those two are believed only next
+    /// to DPI stages that answered (zeros there are no stages at all). What isn't
+    /// answered keeps the reading it had: the settings don't change while the mouse sleeps.
+    fn take(&mut self, answers: Answers) {
+        if let Some(secs) = answers.sleep_secs {
+            self.sleep_secs = Some(secs);
+        }
+        let Some((stages, active)) = answers.dpi else {
+            return;
+        };
+        self.dpi = Some(MouseDpi {
+            stages: stages.iter().map(|s| DpiStage { x: s.x, y: s.y }).collect(),
+            active,
+        });
+        if let Some(rate) = answers.polling {
+            self.polling_hz = Some(rate.hz());
+        }
+        if let Some(radio) = answers.radio {
+            self.radio = Some(from_device(radio));
+        }
+    }
+}
+
+fn to_device(radio: MouseRadio) -> Radio {
+    match radio {
+        MouseRadio::HighEfficiency => Radio::HighEfficiency,
+        MouseRadio::Normal => Radio::Normal,
+        MouseRadio::Stable => Radio::Stable,
+    }
+}
+
+fn from_device(radio: Radio) -> MouseRadio {
+    match radio {
+        Radio::HighEfficiency => MouseRadio::HighEfficiency,
+        Radio::Normal => MouseRadio::Normal,
+        Radio::Stable => MouseRadio::Stable,
+    }
 }
 
 impl State {
@@ -143,7 +208,7 @@ fn worker(
         battery: None,
         last_poll: None,
         gates,
-        sleep_secs: None,
+        reported: Reported::default(),
     };
 
     // Read once at startup so a UI connecting immediately has a value.
@@ -174,11 +239,19 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             // Refresh before answering: a client asking for the state directly
             // should not be told a reading that is up to POLL_INTERVAL old.
             poll_if_stale(state, event_tx);
+            let reported = if state.power_on() {
+                state.reported.clone()
+            } else {
+                Reported::default()
+            };
             let _ = reply.send(Ok(MouseState {
                 connected: gg_device_mouse::is_connected(&state.api),
                 battery: state.battery,
                 applied: state.applied.clone(),
-                sleep_secs: state.sleep_secs.filter(|_| state.power_on()),
+                sleep_secs: reported.sleep_secs,
+                radio: reported.radio,
+                reported_dpi: reported.dpi,
+                reported_polling_hz: reported.polling_hz,
             }));
             return;
         }
@@ -201,10 +274,15 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 Ok(())
             });
             if result.is_ok() {
-                written(&mut state.applied).dpi = Some(MouseDpi {
+                let dpi = MouseDpi {
                     stages: as_written(&stages),
                     active,
-                });
+                };
+                // What the mouse would now report, until it's next asked.
+                if state.reported.dpi.is_some() {
+                    state.reported.dpi = Some(dpi.clone());
+                }
+                written(&mut state.applied).dpi = Some(dpi);
             }
             let _ = reply.send(result);
         }
@@ -223,6 +301,9 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
                 });
             if result.is_ok() {
                 written(&mut state.applied).polling_hz = Some(hz);
+                if state.reported.polling_hz.is_some() {
+                    state.reported.polling_hz = Some(hz);
+                }
             }
             let _ = reply.send(result);
         }
@@ -265,8 +346,27 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             };
             let result = result.map(|read| {
                 written(&mut state.applied).sleep_minutes = Some(minutes);
-                state.sleep_secs = read.or(Some(u16::from(minutes) * 60));
+                state.reported.sleep_secs = read.or(Some(u16::from(minutes) * 60));
             });
+            let _ = reply.send(result);
+        }
+
+        Command::SetRadio { radio, save, reply } => {
+            let refusal = state.gates.borrow().refusal(Feature::MousePower);
+            let result = match refusal {
+                Some(why) => Err(why),
+                None => with_mouse(state, |mouse| {
+                    mouse.set_radio(to_device(radio))?;
+                    if save {
+                        mouse.save()?;
+                    }
+                    Ok(())
+                }),
+            };
+            if result.is_ok() {
+                written(&mut state.applied).radio = Some(radio);
+                state.reported.radio = Some(radio);
+            }
             let _ = reply.send(result);
         }
     }
@@ -313,7 +413,7 @@ fn poll_battery(state: &mut State, event_tx: &broadcast::Sender<Event>) {
     let reading = match opened {
         Ok(mouse) => {
             if power {
-                read_sleep(&mouse, &mut state.sleep_secs);
+                read_reported(&mouse, &mut state.reported);
             }
             match mouse.battery() {
                 Ok(battery) => battery,
@@ -325,12 +425,12 @@ fn poll_battery(state: &mut State, event_tx: &broadcast::Sender<Event>) {
         }
         // Not connected at all — report unknown rather than a stale value.
         Err(_) => {
-            state.sleep_secs = None;
+            state.reported = Reported::default();
             None
         }
     };
     if !power {
-        state.sleep_secs = None;
+        state.reported = Reported::default();
     }
     let reading = reading.map(|b| BatteryState {
         level: b.level,
@@ -344,13 +444,28 @@ fn poll_battery(state: &mut State, event_tx: &broadcast::Sender<Event>) {
     }
 }
 
-/// Read the sleep timer into `sleep_secs`. An asleep mouse answers nothing, and the
-/// reading it gave before stands: the timer doesn't change while it sleeps.
-fn read_sleep(mouse: &Mouse, sleep_secs: &mut Option<u16>) {
-    match mouse.sleep_timer() {
-        Ok(Some(secs)) => *sleep_secs = Some(secs),
-        Ok(None) => {}
-        Err(e) => warn!(error = %format!("{e:#}"), "sleep timer read failed"),
+/// Ask the mouse for its own settings and take them into `reported` (see
+/// [`Reported::take`]). The polling rate and radio mode are only asked for when the DPI
+/// stages answered: without them they wouldn't be believed anyway.
+fn read_reported(mouse: &Mouse, reported: &mut Reported) {
+    let ask = || -> anyhow::Result<Answers> {
+        let sleep_secs = mouse.sleep_timer()?;
+        let Some(dpi) = mouse.dpi()? else {
+            return Ok(Answers {
+                sleep_secs,
+                ..Answers::default()
+            });
+        };
+        Ok(Answers {
+            dpi: Some(dpi),
+            polling: mouse.polling_rate()?,
+            radio: mouse.radio()?,
+            sleep_secs,
+        })
+    };
+    match ask() {
+        Ok(answers) => reported.take(answers),
+        Err(e) => warn!(error = %format!("{e:#}"), "reading the mouse's settings failed"),
     }
 }
 
@@ -436,6 +551,46 @@ mod tests {
         for minutes in [0, 21] {
             let why = sleep_refusal(&gates, minutes).unwrap();
             assert!(why.contains("1 to 20 minutes"), "{minutes}: {why}");
+        }
+    }
+
+    #[test]
+    fn a_mouse_that_isnt_answering_isnt_read_as_1000_hz_high_efficiency() {
+        use gg_device_mouse::DpiStage as Hw;
+        let mut r = Reported::default();
+        // All zeros decode as 1000 Hz and High-Efficiency Mode, with no DPI stages.
+        r.take(Answers {
+            polling: Some(PollingRate::Hz1000),
+            radio: Some(Radio::HighEfficiency),
+            ..Answers::default()
+        });
+        assert_eq!(r, Reported::default());
+        // A mouse that answers: everything is taken.
+        r.take(Answers {
+            dpi: Some((vec![Hw::uniform(400), Hw { x: 800, y: 1600 }], 1)),
+            polling: Some(PollingRate::Hz125),
+            radio: Some(Radio::Stable),
+            sleep_secs: Some(1200),
+        });
+        let awake = r.clone();
+        assert_eq!(
+            (r.polling_hz, r.radio, r.sleep_secs),
+            (Some(125), Some(MouseRadio::Stable), Some(1200))
+        );
+        let dpi = r.dpi.clone().unwrap();
+        assert_eq!(
+            (dpi.stages[1], dpi.active),
+            (DpiStage { x: 800, y: 1600 }, 1)
+        );
+        // Asleep again: the readings it gave stand.
+        r.take(Answers {
+            polling: Some(PollingRate::Hz1000),
+            radio: Some(Radio::HighEfficiency),
+            ..Answers::default()
+        });
+        assert_eq!(r, awake);
+        for radio in MouseRadio::ALL {
+            assert_eq!(from_device(to_device(radio)), radio);
         }
     }
 

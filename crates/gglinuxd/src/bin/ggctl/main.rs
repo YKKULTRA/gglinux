@@ -40,6 +40,7 @@ ggctl mouse polling 1000 [--save]
 ggctl mouse buttons button1,button2,button3,button4,button5,dpi [--save]
 ggctl mouse save                        # commit whatever is applied to onboard memory
 ggctl mouse sleep 20                    # sleep timer, 1 to 20 min; saved (needs mouse_power)
+ggctl mouse radio normal|stable|efficient [--save]   # Wireless Stability, High-Efficiency Mode
 ggctl clip save                         # save the instant replay (bind this to a key)
 ggctl profile list                      # saved lighting profiles
 ggctl profile apply <name>

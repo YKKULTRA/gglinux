@@ -461,6 +461,17 @@ async fn dispatch(
                 .await,
         ),
         Request::SaveMouse => outcome(workers.mouse.send(MouseCommand::Save).await),
+        Request::SetMouseRadio { radio, save } => {
+            match workers.experimental.current().refusal(Feature::MousePower) {
+                Some(message) => ResponseData::Error { message },
+                None => outcome(
+                    workers
+                        .mouse
+                        .send::<()>(|reply| MouseCommand::SetRadio { radio, save, reply })
+                        .await,
+                ),
+            }
+        }
         // Refused here too, so the gate holds before the worker is even asked.
         Request::SetMouseSleep { minutes } => {
             match workers.experimental.current().refusal(Feature::MousePower) {
@@ -1286,10 +1297,16 @@ mod tests {
         // The mouse's sleep timer has its own gate, off here: refused before the worker.
         match ask("set_mouse_sleep", r#"{"minutes":20}"#).await {
             ResponseData::Error { message } => assert!(
-                message.starts_with("Mouse: sleep timer") && message.contains("Experimental"),
+                message.contains("Mouse: sleep timer") && message.contains("Experimental"),
                 "{message}"
             ),
             other => panic!("set_mouse_sleep: {other:?}"),
+        }
+        match ask("set_mouse_radio", r#"{"radio":"stable"}"#).await {
+            ResponseData::Error { message } => {
+                assert!(message.contains("Settings → Experimental"), "{message}")
+            }
+            other => panic!("set_mouse_radio: {other:?}"),
         }
         // The onboard slots are built: with the gate on (above), a read reaches the keyboard,
         // whose unscripted answers aren't a slot image, and says so.
