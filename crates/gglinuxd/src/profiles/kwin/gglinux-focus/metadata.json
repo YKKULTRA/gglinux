@@ -1,0 +1,18 @@
+{
+  "KPlugin": {
+    "Id": "gglinux-focus",
+    "Name": "gglinux focus",
+    "Description": "Tells gglinux which window has the focus, so its profiles can follow it.",
+    "Version": "1.0",
+    "License": "GPL-3.0-or-later",
+    "Website": "https://github.com/YKKULTRA/gglinux",
+    "Authors": [
+      {
+        "Name": "gglinux"
+      }
+    ]
+  },
+  "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "code/main.js",
+  "KPackageStructure": "KWin/Script"
+}

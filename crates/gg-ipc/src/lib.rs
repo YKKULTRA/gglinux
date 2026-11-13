@@ -15,6 +15,7 @@ mod lighting;
 mod macros;
 pub mod mouse_keys;
 mod onboard;
+mod profiles;
 
 pub use actions::{validate as validate_actions, Action, ActionBinding, ActionsState};
 pub use bindings::{Bindings, BindingsState, KeyAction, KeyBinding, Layer};
@@ -23,6 +24,10 @@ pub use gamesense::{Draws, HandlerInfo};
 pub use lighting::{IdleLighting, ReflectStatus, Zone, ZoneEffect, ZoneKeys, ZonePreset};
 pub use macros::{Macro, MacroBinding, MacroEvent, MacroLibrary, MacroMode, MacrosState};
 pub use onboard::{check_slot, OnboardSlot, OnboardSource, OnboardState, SLOTS as ONBOARD_SLOTS};
+pub use profiles::{
+    Applied, FocusStatus, FocusedWindow, GameRule, PresetInfo, Profile, ProfileBindings,
+    ProfileFile, ProfilesState, RuleMatch, RuleWhen, Section,
+};
 
 /// Broad device category, used by the UI to pick the right panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1280,30 +1285,6 @@ pub struct GameSenseState {
     pub games: Vec<GameInfo>,
 }
 
-/// A saved keyboard look.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Profile {
-    pub name: String,
-    pub lighting: Lighting,
-}
-
-/// While a process with this name runs, use this profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GameRule {
-    pub process: String,
-    pub profile: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ProfilesState {
-    pub profiles: Vec<String>,
-    pub rules: Vec<GameRule>,
-    /// The rule applied right now, if a game from the list is running.
-    pub active: Option<GameRule>,
-    /// Process names running now, for picking rules. Only in answers, not in events.
-    pub running: Vec<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipQuality {
@@ -1567,18 +1548,48 @@ pub enum Request {
     /// Show the built-in test game's short sequence on the keyboard's screen.
     GamesenseTestScreen,
     GetProfiles,
-    /// Save the current lighting under this name.
+    /// Save the current settings of `sections` under this name, replacing a profile of that
+    /// name. Without `sections`: those of the profile it replaces, else every section that can
+    /// be read now.
     SaveProfile {
         name: String,
+        #[serde(default)]
+        sections: Option<Vec<Section>>,
     },
+    /// Apply a saved profile, or with `preset` one of gglinux's own presets. Each section goes
+    /// through its own request, gated as that request is; what was skipped or failed is in
+    /// [`ProfilesState::applied`].
     ApplyProfile {
         name: String,
+        #[serde(default)]
+        preset: bool,
     },
     DeleteProfile {
         name: String,
     },
     SetGameRules {
         rules: Vec<GameRule>,
+    },
+    /// A saved profile, or a preset, as a file to share.
+    GetProfile {
+        name: String,
+        #[serde(default)]
+        preset: bool,
+    },
+    /// Save a profile from a file; `replace` saves over one of the same name.
+    ImportProfile {
+        profile: Box<Profile>,
+        #[serde(default)]
+        replace: bool,
+    },
+    /// Copy a saved profile, or a preset, into a new saved profile: named `to`, or else after
+    /// it ("Typing", "Typing 2", ...).
+    CopyProfile {
+        from: String,
+        #[serde(default)]
+        preset: bool,
+        #[serde(default)]
+        to: Option<String>,
     },
     GetClipsState,
     SetClipsSettings {
@@ -1709,7 +1720,10 @@ impl Request {
             | R::SaveProfile { .. }
             | R::ApplyProfile { .. }
             | R::DeleteProfile { .. }
-            | R::SetGameRules { .. } => Part::Profiles,
+            | R::SetGameRules { .. }
+            | R::GetProfile { .. }
+            | R::ImportProfile { .. }
+            | R::CopyProfile { .. } => Part::Profiles,
             R::GetClipsState | R::SetClipsSettings { .. } | R::SaveClip | R::DeleteClip { .. } => {
                 Part::Clips
             }
@@ -1864,6 +1878,10 @@ pub enum ResponseData {
     },
     Profiles {
         state: ProfilesState,
+    },
+    /// One profile as a file, for `get_profile`.
+    Profile {
+        file: ProfileFile,
     },
     Clips {
         state: ClipsState,
@@ -2967,16 +2985,75 @@ mod tests {
         }
         let state = ProfilesState {
             profiles: vec!["Night".into()],
-            rules: vec![GameRule {
-                process: "RDR2.exe".into(),
-                profile: "Night".into(),
-            }],
-            active: None,
-            running: vec![],
+            rules: vec![GameRule::running("RDR2.exe", "Night")],
+            ..ProfilesState::default()
         };
         let v = serde_json::to_value(Event::ProfilesChanged { state }).unwrap();
         assert_eq!(v["event"], "profiles_changed");
         assert_eq!(v["data"]["state"]["rules"][0]["process"], "RDR2.exe");
+    }
+
+    #[test]
+    fn profiles_v2_requests_read_with_and_without_their_new_fields() {
+        let req = |json: &str| {
+            serde_json::from_str::<RequestFrame>(&format!(r#"{{"id":1,"req":{json}}}"#))
+                .unwrap_or_else(|e| panic!("{json}: {e}"))
+                .req
+        };
+        assert!(matches!(
+            req(r#"{"method":"save_profile","params":{"name":"Night"}}"#),
+            Request::SaveProfile { sections: None, .. }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"save_profile","params":{"name":"FPS","sections":["switches","mouse"]}}"#),
+            Request::SaveProfile { sections: Some(s), .. } if s == [Section::Switches, Section::Mouse]
+        ));
+        assert!(matches!(
+            req(r#"{"method":"apply_profile","params":{"name":"Typing","preset":true}}"#),
+            Request::ApplyProfile { preset: true, .. }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"get_profile","params":{"name":"Night"}}"#),
+            Request::GetProfile { preset: false, .. }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"import_profile","params":{"profile":{"name":"N","lighting":{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}}}}"#),
+            Request::ImportProfile { replace: false, profile } if profile.sections() == [Section::Lighting]
+        ));
+        assert!(matches!(
+            req(r#"{"method":"copy_profile","params":{"from":"Typing","preset":true}}"#),
+            Request::CopyProfile {
+                preset: true,
+                to: None,
+                ..
+            }
+        ));
+        for r in [
+            Request::GetProfile {
+                name: "x".into(),
+                preset: false,
+            },
+            Request::CopyProfile {
+                from: "x".into(),
+                preset: false,
+                to: None,
+            },
+        ] {
+            assert_eq!(r.part(), Some(Part::Profiles), "{r:?}");
+        }
+        let mut p = Profile::named("Night");
+        p.lighting = Some(Lighting::default());
+        let answer = ResponseData::Profile {
+            file: ProfileFile::new(p, ""),
+        };
+        let v = serde_json::to_value(&answer).unwrap();
+        assert_eq!(v["type"], "profile");
+        assert_eq!(v["file"]["format"], "gglinux-profile");
+        // A state from a daemon before v2 still reads.
+        let old: ProfilesState =
+            serde_json::from_str(r#"{"profiles":["Night"],"rules":[],"active":null,"running":[]}"#)
+                .unwrap();
+        assert!(old.sections.is_empty() && old.applied.is_none());
     }
 
     #[test]

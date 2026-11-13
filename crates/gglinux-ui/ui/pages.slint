@@ -295,15 +295,45 @@ export component PartsPanel inherits Card {
 
 // --- Settings: profiles --------------------------------------------------------
 
+export struct ProfileRow {
+    name: string,
+    /// What it holds: "Lighting · Keyboard switches".
+    parts: string,
+}
+
+export struct PresetRow {
+    name: string,
+    about: string,
+}
+
 export struct RuleRow {
+    /// What it matches, as shown: a program, or "window class …".
     process: string,
     profile: string,
+    /// "on focus" or "while it runs".
+    when: string,
+}
+
+/// A part of the device settings to save, ticked or not.
+export struct SectionTick {
+    label: string,
+    on: bool,
 }
 
 export global ProfilesUi {
     in property <bool> known;
     in property <string> now;
+    /// How rules on focus follow the focused window, or why they can't.
+    in property <string> focus;
+    /// Which of your own settings are kept to put back.
+    in property <string> kept;
+    /// The last apply, and what it skipped or couldn't send.
+    in property <string> applied;
+    in property <bool> applied-notes;
+    /// The names, for the rule's list box.
     in property <[string]> profiles;
+    in property <[ProfileRow]> rows;
+    in property <[PresetRow]> presets;
     in property <[RuleRow]> rules;
     /// The running programs that fit what's typed, after a line that says so.
     in property <[string]> running;
@@ -313,10 +343,23 @@ export global ProfilesUi {
     in-out property <string> new-name;
     /// The name typed is a saved profile's: saving replaces it.
     in property <bool> name-taken;
+    /// The parts saving takes, in the order they're applied.
+    in property <[SectionTick]> ticks;
     in-out property <string> new-process;
     in-out property <int> new-profile: -1;
+    /// 0 a program, 1 a window class.
+    in-out property <int> new-by;
+    /// 0 on focus, 1 while it runs.
+    in-out property <int> new-when;
     /// The profile whose Delete was clicked, waiting for a yes.
     in-out property <string> confirm;
+    /// Where the last export went.
+    in property <string> exported;
+    /// The desktop's file chooser didn't open, so a path can be typed instead.
+    in property <bool> typing;
+    in-out property <string> typed-path;
+    /// A file read whose profile has a saved one's name, waiting for a yes to replace it.
+    in property <string> replace-name;
     in property <bool> busy;
     in property <string> error;
     callback apply(int);
@@ -327,6 +370,23 @@ export global ProfilesUi {
     callback remove-rule(int);
     callback add-rule();
     callback refresh();
+    callback tick(int, bool);
+    callback apply-preset(int);
+    callback copy-preset(int);
+    callback export(int);
+    callback import();
+    callback import-typed();
+    callback replace();
+    callback cancel-replace();
+}
+
+/// One of the parts to save, as a tick box.
+component Tick inherits Toggle {
+    in property <int> index;
+    text: ProfilesUi.ticks[root.index].label;
+    checked: ProfilesUi.ticks[root.index].on;
+    enabled: !ProfilesUi.busy;
+    toggled(v) => { ProfilesUi.tick(root.index, v); }
 }
 
 export component ProfilesPanel inherits Card {
@@ -335,26 +395,93 @@ export component ProfilesPanel inherits Card {
         if !ProfilesUi.known : Waiting { text: "Asking gglinuxd about profiles…"; }
         Shown { shown: ProfilesUi.known; gap: 0; VerticalLayout {
             spacing: 10px;
-            if ProfilesUi.now != "" : Text { text: ProfilesUi.now; color: Theme.accent; font-size: Theme.small; overflow: elide; }
-            Head { text: "PROFILES"; }
-            if ProfilesUi.profiles.length == 0 : Text { text: "No profiles yet. Set up the keyboard lighting, then save it here."; color: Theme.text-dim; font-size: Theme.small; }
-            for name[i] in ProfilesUi.profiles : HorizontalLayout {
+            // The status lines, then the head: one piece, so no gap is left while there's no status.
+            VerticalLayout {
+                spacing: 0;
+                if ProfilesUi.now != "" : Text { text: ProfilesUi.now; color: Theme.accent; font-size: Theme.small; overflow: elide; }
+                Opt { shown: ProfilesUi.focus != ""; gap: ProfilesUi.now != "" ? 4px : 0; Hint { text: ProfilesUi.focus; } }
+                Opt { shown: ProfilesUi.kept != ""; gap: ProfilesUi.now != "" || ProfilesUi.focus != "" ? 4px : 0; Hint { text: ProfilesUi.kept; } }
+                Opt { shown: ProfilesUi.applied != ""; gap: ProfilesUi.now != "" || ProfilesUi.focus != "" || ProfilesUi.kept != "" ? 4px : 0; Hint { text: ProfilesUi.applied; color: ProfilesUi.applied-notes ? Theme.danger : Theme.text-dim; } }
+                VerticalLayout {
+                    padding-top: ProfilesUi.now != "" || ProfilesUi.focus != "" || ProfilesUi.kept != "" || ProfilesUi.applied != "" ? 10px : 0;
+                    Head {
+                        text: "PROFILES";
+                        Button { text: "Import a profile file…"; small: true; enabled: !ProfilesUi.busy && ProfilesUi.replace-name == ""; clicked => { ProfilesUi.import(); } }
+                    }
+                }
+            }
+            if ProfilesUi.rows.length == 0 : Text { text: "No profiles yet: save your current settings below."; color: Theme.text-dim; font-size: Theme.small; overflow: elide; }
+            for r[i] in ProfilesUi.rows : HorizontalLayout {
                 spacing: 8px;
-                Text { text: name; color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                if name != ProfilesUi.confirm : Button { text: "Apply"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.apply(i); } }
-                if name != ProfilesUi.confirm : Button { text: "Delete"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.confirm = name; } }
-                if name == ProfilesUi.confirm : Text { text: "Delete this profile?"; color: Theme.danger; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 0; }
-                if name == ProfilesUi.confirm : Button { text: "Delete"; small: true; primary: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.delete(name); } }
-                if name == ProfilesUi.confirm : Button { text: "Keep"; small: true; clicked => { ProfilesUi.confirm = ""; } }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    min-width: 0;
+                    Text { text: r.name; color: Theme.text; overflow: elide; min-width: 0; }
+                    Text { text: r.parts; color: Theme.text-dim; font-size: Theme.small; overflow: elide; min-width: 0; }
+                }
+                if r.name != ProfilesUi.confirm : VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Apply"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.apply(i); } } }
+                if r.name != ProfilesUi.confirm : VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Export"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.export(i); } } }
+                if r.name != ProfilesUi.confirm : VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Delete"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.confirm = r.name; } } }
+                if r.name == ProfilesUi.confirm : Text { text: "Delete this profile?"; color: Theme.danger; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 0; }
+                if r.name == ProfilesUi.confirm : VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Delete"; small: true; primary: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.delete(r.name); } } }
+                if r.name == ProfilesUi.confirm : VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Keep"; small: true; clicked => { ProfilesUi.confirm = ""; } } }
             }
             VerticalLayout {
                 spacing: 0;
-                HorizontalLayout {
+                Opt { shown: ProfilesUi.exported != ""; gap: 0; Hint { text: "Saved to " + ProfilesUi.exported; } }
+                Opt { shown: ProfilesUi.typing && ProfilesUi.replace-name == ""; gap: ProfilesUi.exported != "" ? 8px : 0; VerticalLayout {
                     spacing: 8px;
-                    LineEdit { placeholder-text: "Profile name"; text <=> ProfilesUi.new-name; edited(t) => { ProfilesUi.name-edited(t); } accepted => { if !ProfilesUi.busy { ProfilesUi.save(); } } }
-                    Button { text: ProfilesUi.name-taken ? "Replace saved lighting" : "Save current lighting"; enabled: !ProfilesUi.busy && ProfilesUi.new-name != ""; clicked => { ProfilesUi.save(); } }
+                    Hint { text: "Without the desktop's file chooser, type where the profile file is instead:"; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit { placeholder-text: "~/Documents/gglinux-profile-….json"; text <=> ProfilesUi.typed-path; accepted => { if !ProfilesUi.busy { ProfilesUi.import-typed(); } } }
+                        Button { text: "Import"; enabled: !ProfilesUi.busy && ProfilesUi.typed-path != ""; clicked => { ProfilesUi.import-typed(); } }
+                    }
+                } }
+                // A profile of the same name is saved already: replacing it asks first.
+                Opt { shown: ProfilesUi.replace-name != ""; gap: 8px; Notice {
+                    Hint { text: "The file's profile is called \"" + ProfilesUi.replace-name + "\", like one you have saved. Replace yours with it?"; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Button { text: "Replace"; primary: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.replace(); } }
+                        Button { text: "Cancel"; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.cancel-replace(); } }
+                    }
+                } }
+            }
+            VerticalLayout {
+                spacing: 8px;
+                padding-top: 4px;
+                Text { text: "Save the current settings of:"; color: Theme.text-dim; font-size: Theme.small; }
+                HorizontalLayout { spacing: 18px; alignment: start; Tick { index: 0; } Tick { index: 1; } Tick { index: 2; } }
+                HorizontalLayout { spacing: 18px; alignment: start; Tick { index: 3; } Tick { index: 4; } Tick { index: 5; } }
+                VerticalLayout {
+                    spacing: 0;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit { placeholder-text: "Profile name"; text <=> ProfilesUi.new-name; edited(t) => { ProfilesUi.name-edited(t); } accepted => { if !ProfilesUi.busy { ProfilesUi.save(); } } }
+                        Button { text: ProfilesUi.name-taken ? "Replace saved profile" : "Save as a profile"; enabled: !ProfilesUi.busy && ProfilesUi.new-name != ""; clicked => { ProfilesUi.save(); } }
+                    }
+                    Opt { shown: ProfilesUi.name-taken; gap: 6px; Hint { text: "A profile by this name is saved already: saving replaces it with the current settings of the parts ticked."; } }
                 }
-                Opt { shown: ProfilesUi.name-taken; gap: 6px; Hint { text: "A profile by this name is saved already: saving replaces its lighting with the current one."; } }
+            }
+            Divider { }
+            Head { text: "PRESETS"; }
+            Hint { text: "gglinux's own starting points for the keyboard's switches, not SteelSeries' presets. Apply one as it is, or copy it into your profiles to change it. They leave everything else as it is."; }
+            for p[i] in ProfilesUi.presets : HorizontalLayout {
+                spacing: 8px;
+                VerticalLayout {
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    min-width: 0;
+                    Text { text: p.name; color: Theme.text; font-weight: 600; overflow: elide; min-width: 0; }
+                    // Kept on one line: wrapped, a row would come out shorter than it is.
+                    Text { text: p.about; color: Theme.text-dim; font-size: Theme.small; overflow: elide; min-width: 0; }
+                }
+                VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Apply"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.apply-preset(i); } } }
+                VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Copy"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.copy-preset(i); } } }
             }
             Divider { }
             Head {
@@ -364,16 +491,28 @@ export component ProfilesPanel inherits Card {
             if ProfilesUi.rules.length == 0 : Text { text: "No game rules yet."; color: Theme.text-dim; font-size: Theme.small; }
             for r[i] in ProfilesUi.rules : HorizontalLayout {
                 spacing: 8px;
-                Text { text: r.process; color: Theme.text; font-family: Theme.mono; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-                Text { text: "→ " + r.profile; color: Theme.text-dim; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
-                Button { text: "Remove"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.remove-rule(i); } }
+                Text { text: r.process; color: Theme.text; font-family: Theme.mono; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; min-width: 0; }
+                Text { text: "→ " + r.profile + " · " + r.when; color: Theme.text-dim; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
+                VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Remove"; small: true; enabled: !ProfilesUi.busy; clicked => { ProfilesUi.remove-rule(i); } } }
             }
             Row {
-                label: "Program";
+                label: "Match";
                 label-width: 70px;
-                LineEdit { placeholder-text: "e.g. RDR2.exe"; text <=> ProfilesUi.new-process; edited(t) => { ProfilesUi.process-edited(t); } }
+                Segmented {
+                    options: ["Program", "Window class"];
+                    current: ProfilesUi.new-by;
+                    enabled: !ProfilesUi.busy;
+                    // A class belongs to a window, so its rule acts on focus.
+                    picked(i) => { ProfilesUi.new-by = i; if i == 1 { ProfilesUi.new-when = 0; } }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Row {
+                label: ProfilesUi.new-by == 0 ? "Program" : "Class";
+                label-width: 70px;
+                LineEdit { placeholder-text: ProfilesUi.new-by == 0 ? "e.g. RDR2.exe" : "e.g. steam_app_1174180"; text <=> ProfilesUi.new-process; edited(t) => { ProfilesUi.process-edited(t); } }
                 // Picks a running program into the box; narrowed down by what's typed there.
-                ComboBox {
+                if ProfilesUi.new-by == 0 : ComboBox {
                     width: 220px;
                     model: ProfilesUi.running;
                     current-index <=> ProfilesUi.running-pick;
@@ -387,6 +526,12 @@ export component ProfilesPanel inherits Card {
                 }
             }
             Row {
+                label: "When";
+                label-width: 70px;
+                Segmented { options: ["On focus", "While it runs"]; current: ProfilesUi.new-when; enabled: !ProfilesUi.busy && ProfilesUi.new-by == 0; picked(i) => { ProfilesUi.new-when = i; } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Row {
                 label: "Profile";
                 label-width: 70px;
                 ComboBox {
@@ -398,7 +543,7 @@ export component ProfilesPanel inherits Card {
                 VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Add rule"; enabled: !ProfilesUi.busy && ProfilesUi.new-process != "" && ProfilesUi.new-profile >= 0 && ProfilesUi.profiles.length > 0; clicked => { ProfilesUi.add-rule(); } } }
                 Rectangle { horizontal-stretch: 1; }
             }
-            Hint { text: "While a listed program runs, its profile replaces the lighting; when it exits, the lighting goes back."; }
+            Hint { text: "On focus: the profile is on while the program's window has the focus, and your own settings come back when you switch to another window, as GG does. That needs Hyprland, or KDE Plasma with gglinux's KWin script; elsewhere such a rule acts while the program runs. While it runs: the profile is on as long as the program runs."; }
         } }
         Opt { shown: ProfilesUi.error != ""; gap: ProfilesUi.known ? 10px : 0; ErrorLine { text: ProfilesUi.error; } }
     }

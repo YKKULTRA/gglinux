@@ -55,8 +55,17 @@ ggctl headset line-out speakers|stream  # and stream-mix MAIN,AUX,MIC (0-100 eac
 ggctl headset home-screen detailed|simple
 ggctl headset screen-dim never|1|5|10|15|30|60   # minutes before the base-station screen dims
 ggctl clip save                         # save the instant replay (bind this to a key)
-ggctl profile list                      # saved lighting profiles
-ggctl profile apply <name>
+ggctl profile list                      # saved profiles and what each holds, presets, rules
+ggctl profile save all|lighting,mouse,… <name>   # the current settings of those parts (headset,
+                                        #   mouse, switches, bindings, screen, lighting)
+ggctl profile apply <name>              # also: preset <name> (one of gglinux's own presets)
+ggctl profile copy <name>               # or copy-preset <name>: a saved copy to change
+ggctl profile delete <name>
+ggctl profile export <name> > f.json    # a profile as a file to share (export-preset too)
+ggctl profile import f.json [replace]
+ggctl profile rule add focus|running program|class <match> <profile>   # on focus: while its
+                                        #   window has the focus (Hyprland, or KDE's KWin script)
+ggctl profile rule rm <n>               # n as `ggctl profile list` numbers the rules
 ggctl gamesense test|on|off
 ggctl gamesense                         # the games, and what each event draws: keys, screen, every key
 ggctl gamesense test screen             # a short test on the keyboard's screen (3.6 s), as a game would
@@ -208,6 +217,7 @@ fn main() -> Result<()> {
         ResponseData::Keyboard { state } => keyboard::print(&state),
         ResponseData::Parts { parts } => parts::print(&parts),
         ResponseData::Profiles { state } => profile::print(&state),
+        ResponseData::Profile { file } => profile::print_file(&file),
         ResponseData::Experimental { experimental } => experimental::print(&experimental),
         ResponseData::Actions { state } => actions::print(&state),
         ResponseData::Bindings { state } => bind::print(&state),
@@ -231,6 +241,7 @@ fn main() -> Result<()> {
             if matches!(positional(&args)?.as_slice(), ["parts", ..]) {
                 println!("the daemon is starting again with that change");
             }
+            profile::after_success(&positional(&args)?)?;
         }
         other => println!("{other:?}"),
     }
@@ -275,7 +286,7 @@ fn parse(args: &[String]) -> Result<Action> {
         None => return Ok(Action::Watch),
         Some((&"mouse", rest)) => mouse::request(rest, args, save)?,
         Some((&"clip", rest)) => clip::request(rest)?,
-        Some((&"profile", rest)) => profile::request(rest)?,
+        Some((&"profile", rest)) => return profile::action(rest),
         Some((&"gamesense", rest)) => gamesense::request(rest)?,
         Some((&"headset", rest)) => headset::request(rest)?,
         Some((&"macro", rest)) => macros::request(rest)?,

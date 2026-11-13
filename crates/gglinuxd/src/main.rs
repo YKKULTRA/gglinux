@@ -185,6 +185,9 @@ async fn main() -> Result<()> {
         parts,
         restart: Arc::new(Notify::new()),
     };
+    // Profiles apply their sections through `dispatch`: they get the workers at start, so
+    // automatic switching works before the first profiles request.
+    profiles::connect(&workers);
 
     let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
 
@@ -687,34 +690,22 @@ async fn dispatch(
                 .send(GamesenseCommand::RunTestScreen)
                 .await,
         ),
-        Request::GetProfiles => match workers.profiles.send(ProfilesCommand::GetState).await {
-            Ok(state) => ResponseData::Profiles { state },
-            Err(message) => ResponseData::Error { message },
-        },
-        Request::SaveProfile { name } => outcome(
-            workers
-                .profiles
-                .send::<()>(|reply| ProfilesCommand::Save { name, reply })
-                .await,
-        ),
-        Request::ApplyProfile { name } => outcome(
-            workers
-                .profiles
-                .send::<()>(|reply| ProfilesCommand::Apply { name, reply })
-                .await,
-        ),
-        Request::DeleteProfile { name } => outcome(
-            workers
-                .profiles
-                .send::<()>(|reply| ProfilesCommand::Delete { name, reply })
-                .await,
-        ),
-        Request::SetGameRules { rules } => outcome(
-            workers
-                .profiles
-                .send::<()>(|reply| ProfilesCommand::SetRules { rules, reply })
-                .await,
-        ),
+        // Profiles apply their sections through `dispatch` too: each request hands them the
+        // workers (only the first one sends them).
+        Request::GetProfiles => {
+            profiles::connect(workers);
+            match workers.profiles.send(ProfilesCommand::GetState).await {
+                Ok(state) => ResponseData::Profiles { state },
+                Err(message) => ResponseData::Error { message },
+            }
+        }
+        req @ (Request::SaveProfile { .. }
+        | Request::ApplyProfile { .. }
+        | Request::DeleteProfile { .. }
+        | Request::SetGameRules { .. }
+        | Request::GetProfile { .. }
+        | Request::ImportProfile { .. }
+        | Request::CopyProfile { .. }) => profiles::serve(req, workers).await,
         Request::GetClipsState => match workers.clips.send(ClipsCommand::GetState).await {
             Ok(state) => ResponseData::Clips { state },
             Err(message) => ResponseData::Error { message },
