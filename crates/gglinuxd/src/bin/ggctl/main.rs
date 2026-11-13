@@ -43,6 +43,16 @@ ggctl mouse buttons button1,button2,button3,button4,button5,dpi [--save]
 ggctl mouse save                        # commit whatever is applied to onboard memory
 ggctl mouse sleep 20                    # sleep timer, 1 to 20 min; saved (needs mouse_power)
 ggctl mouse radio normal|stable|efficient [--save]   # Wireless Stability, High-Efficiency Mode
+ggctl headset                           # the headset and base station: battery and every setting
+ggctl headset anc off|transparency|on   # also: transparency 1-10, sidetone off|low|medium|high,
+                                        #   mic-volume 1-10, mic-led 1-10, auto-off never|1|5|10|15|30|60,
+                                        #   radio speed|range, eq flat|bass|focus|smiley, eq-custom 0,…,1.5
+ggctl headset gain low|high             # the base station's own settings (need headset_extras):
+ggctl headset bluetooth-at-power-on on|off   # Bluetooth on when the headset powers on
+ggctl headset bluetooth-call nothing|lower|mute   # what a call does to the game sound
+ggctl headset line-out speakers|stream  # and stream-mix MAIN,AUX,MIC (0-100 each)
+ggctl headset home-screen detailed|simple
+ggctl headset screen-dim never|1|5|10|15|30   # minutes before the base-station screen dims
 ggctl clip save                         # save the instant replay (bind this to a key)
 ggctl profile list                      # saved lighting profiles
 ggctl profile apply <name>
@@ -155,6 +165,7 @@ fn main() -> Result<()> {
 
     match send(connect()?, request)? {
         ResponseData::Mouse { state } => mouse::print(&state),
+        ResponseData::Headset { state } => headset::print(&state),
         ResponseData::Keyboard { state } => keyboard::print(&state),
         ResponseData::Parts { parts } => parts::print(&parts),
         ResponseData::Profiles { state } => profile::print(&state),
