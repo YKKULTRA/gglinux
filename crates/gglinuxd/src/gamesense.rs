@@ -949,4 +949,120 @@ mod tests {
         );
         assert!(!game_infos(&r, 4.0)[0].on_screen, "its frames are over");
     }
+
+    /// Writes the screen pictures of the SDK doc's examples and of the test game, and the
+    /// bitmap grid cell of every key, into `$GG_SCREEN_PICTURES` as text (`#` lit, `.`
+    /// dark), for the pictures in the design note and report. With
+    /// `GG_SDK_IMAGE_128X36` (the doc's 576-byte example picture, comma-separated) it's
+    /// drawn too, in a 128x40 frame. Run by hand:
+    /// `GG_SCREEN_PICTURES=<dir> cargo test -p gglinuxd --bin gglinuxd -- --ignored screen_pictures`
+    #[test]
+    #[ignore = "writes files: run by hand for pictures"]
+    fn screen_pictures() {
+        use gg_gamesense::screen::{draw, Data, ScreenSpec};
+        use serde_json::json;
+        let Some(dir) = std::env::var_os("GG_SCREEN_PICTURES").map(PathBuf::from) else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = |name: &str, b: &Bitmap| {
+            std::fs::write(dir.join(format!("{name}.txt")), format!("{b:?}")).unwrap();
+        };
+        let frame = json!({ "first-line": "this is some text that wraps", "second-line": "hi",
+            "textvalue": "this is some text", "numericalvalue": 88 });
+        let data = |value: i64| Data {
+            value: Some(value),
+            frame: frame.as_object().unwrap().clone(),
+            image: None,
+        };
+        let mut examples = vec![
+            ("sdk-value", json!([{ "has-text": true }]), 15),
+            (
+                "sdk-prefix-suffix",
+                json!([{ "has-text": true, "prefix": "Got ", "suffix": " kills" }]),
+                15,
+            ),
+            ("sdk-bold", json!([{ "has-text": true, "bold": true }]), 15),
+            (
+                "sdk-progress-bar",
+                json!([{ "lines": [{ "arg": "", "prefix": "Progress" }, { "has-progress-bar": true }] }]),
+                60,
+            ),
+            (
+                "sdk-wrap",
+                json!([{ "lines": [
+                { "has-text": true, "context-frame-key": "first-line", "wrap": 1 },
+                { "has-text": true, "context-frame-key": "second-line" }] }]),
+                1,
+            ),
+            (
+                "sdk-arg",
+                json!([{ "lines": [
+                { "has-text": true, "arg": "(string-upcase (textvalue: (context-frame: self)))", "wrap": 1 },
+                { "has-text": true, "arg": "(/ (numericalvalue: (context-frame: self)) 44)" }] }]),
+                56,
+            ),
+            (
+                "sdk-icon",
+                json!([{ "has-text": true, "suffix": "stuff", "icon-id": 16 }]),
+                15,
+            ),
+            (
+                "sdk-headshot-1",
+                json!([{ "has-text": true, "suffix": "Headshot!", "arg": "", "icon-id": 7 }]),
+                15,
+            ),
+            (
+                "sdk-headshot-2",
+                json!([{ "has-text": true, "suffix": " kills", "icon-id": 6 }]),
+                15,
+            ),
+        ];
+        if let Ok(list) = std::env::var("GG_SDK_IMAGE_128X36") {
+            let mut rows: Vec<u8> = list.split(',').map(|n| n.trim().parse().unwrap()).collect();
+            rows.resize(640, 0);
+            examples.push((
+                "sdk-raw-picture",
+                json!([{ "has-text": false, "image-data": rows }]),
+                0,
+            ));
+        }
+        for (name, datas, value) in examples {
+            let h = json!({ "device-type": "screened-128x40", "zone": "one", "mode": "screen", "datas": datas });
+            let spec = ScreenSpec::parse("screened-128x40", h.as_object().unwrap())
+                .unwrap()
+                .unwrap();
+            save(name, &draw(&spec.frames(value).unwrap()[0], &data(value)));
+        }
+        let start = Instant::now();
+        let at = |s: f64| start + Duration::from_secs_f64(s);
+        let (registry, overlay) = overlay_from(start);
+        {
+            let mut r = registry.lock().unwrap();
+            define_test_game(&mut r).unwrap();
+            send_test_value(&mut r, 73, 0.0).unwrap();
+        }
+        save("test-health-73", &overlay.screen(at(0.5)).unwrap().picture);
+        {
+            let mut r = registry.lock().unwrap();
+            define_test_screen(&mut r).unwrap();
+            send_test_screen(&mut r, 1.0).unwrap();
+        }
+        for (i, t) in [1.5, 2.7, 3.9].into_iter().enumerate() {
+            save(
+                &format!("test-screen-{}", i + 1),
+                &overlay.screen(at(t)).unwrap().picture,
+            );
+        }
+        let cells: String = gg_gamesense::bitmap::cells()
+            .iter()
+            .filter_map(|&(cell, code)| {
+                let k = gg_device_keyboard::layout::US
+                    .iter()
+                    .find(|k| k.0 == code)?;
+                Some(format!("{cell}\t{}\t{}\t{}\t{}\n", k.1, k.2, k.3, k.4))
+            })
+            .collect();
+        std::fs::write(dir.join("bitmap-cells.txt"), cells).unwrap();
+    }
 }

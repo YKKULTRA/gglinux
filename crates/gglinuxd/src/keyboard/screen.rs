@@ -54,6 +54,9 @@ mod sysmon;
 pub const SCREEN_REFRESH: Duration = Duration::from_secs(10);
 /// How long the picture stays put before it moves a pixel, with screen care's shift on.
 pub const SHIFT_EVERY: u64 = 120;
+/// The least time between two of an overlay's pictures sent to the keyboard. A game can
+/// send events far faster; ten pictures a second is the floor an animation has too.
+pub const OVERLAY_GAP: Duration = Duration::from_millis(100);
 
 /// A picture an overlay shows over the screen setting.
 #[derive(Debug, Clone, PartialEq)]
@@ -208,6 +211,8 @@ pub struct ScreenState {
     away: bool,
     /// The screen is dark for that right now.
     resting: bool,
+    /// An overlay's changed picture waits out [`OVERLAY_GAP`] after the last one sent.
+    held: bool,
 }
 
 impl ScreenState {
@@ -229,6 +234,7 @@ impl ScreenState {
             care_path,
             away: false,
             resting: false,
+            held: false,
         }
     }
 
@@ -273,15 +279,26 @@ impl ScreenState {
     }
 
     /// How long the loop may sleep before the picture changes by itself: an overlay's next
-    /// change while there is one (the setting's picture is hidden), else the source's.
-    /// Resting, it doesn't: the dark screen changes only with a command (somebody's back).
+    /// change while there is one (the setting's picture is hidden), else the source's; and
+    /// sooner if an overlay's picture is waiting out [`OVERLAY_GAP`]. Resting, it doesn't:
+    /// the dark screen changes only with a command (somebody's back).
     pub fn wait(&self, connected: bool) -> Option<Duration> {
         if !connected || resting(self.own_screen(), &self.care, self.away) {
             return None;
         }
-        match &self.overlay {
+        let due = match &self.overlay {
             Some(o) => o.until.map(|t| t.saturating_duration_since(Instant::now())),
-            None => self.source.as_ref()?.next_due(&Now::current()),
+            None => self
+                .source
+                .as_ref()
+                .and_then(|s| s.next_due(&Now::current())),
+        };
+        let held = self
+            .held
+            .then(|| OVERLAY_GAP.saturating_sub(self.last.map_or(OVERLAY_GAP, |t| t.elapsed())));
+        match (due, held) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
@@ -297,6 +314,14 @@ impl ScreenState {
             return;
         };
         if self.shown.as_ref() == Some(&picture) && !is_older_than(self.last, SCREEN_REFRESH) {
+            self.held = false;
+            return;
+        }
+        // A game's pictures go out OVERLAY_GAP apart at most; the newest goes when it's up.
+        // Going dark for nobody being there never waits.
+        self.held =
+            self.overlay.is_some() && !self.resting && !is_older_than(self.last, OVERLAY_GAP);
+        if self.held {
             return;
         }
         match device.show_screen(&picture) {
@@ -476,6 +501,7 @@ mod tests {
             care_path: PathBuf::new(),
             away: false,
             resting: false,
+            held: false,
         }
     }
 

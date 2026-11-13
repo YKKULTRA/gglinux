@@ -21,6 +21,7 @@ fn bare(setting: Screen) -> ScreenState {
         care_path: PathBuf::new(),
         away: false,
         resting: false,
+        held: false,
     }
 }
 
@@ -142,4 +143,44 @@ fn screen_care_moves_a_games_picture_and_rests_it_even_over_the_keyboards_own_sc
         None,
         "the keyboard's own screen, left alone as before"
     );
+}
+
+#[test]
+fn a_game_sending_fast_gets_ten_pictures_a_second_and_the_last_one_is_never_lost() {
+    let fake = FakeTransport::new();
+    let kb = fake.keyboard();
+    let mut s = bare(Screen::Keyboard);
+    s.care.shift = false;
+    s.set_overlay(game(&lit(10, 10), None));
+    s.render(Some(&kb));
+    assert_eq!(fake.sent().len(), 1);
+    // A new picture straight after: it waits out the gap, and the loop wakes for it.
+    s.set_overlay(game(&lit(11, 10), None));
+    s.render(Some(&kb));
+    assert_eq!(fake.sent().len(), 1, "not yet");
+    let wait = s.wait(true).unwrap();
+    assert!(wait <= OVERLAY_GAP, "{wait:?}");
+    s.set_overlay(game(&lit(12, 10), None));
+    s.render(Some(&kb));
+    assert_eq!(fake.sent().len(), 1, "still within the gap");
+    std::thread::sleep(OVERLAY_GAP);
+    s.render(Some(&kb));
+    let sent = fake.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        sent[1].report[3..643],
+        lit(12, 10).packed()[..],
+        "the newest one"
+    );
+    assert_eq!(s.wait(true), None, "nothing waits any more");
+    s.set_overlay(game(&lit(13, 10), None));
+    s.set_away(true);
+    s.render(Some(&kb));
+    let sent = fake.sent();
+    assert_eq!(
+        sent.len(),
+        3,
+        "going dark for nobody being there doesn't wait"
+    );
+    assert!(sent[2].report[3..643].iter().all(|&b| b == 0));
 }
