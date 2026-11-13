@@ -6,13 +6,16 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gg_ipc::{ClipQuality, ClipsSettings, GameRule, Part, Parts, Request};
+use gg_ipc::{
+    Applied, ClipQuality, ClipsSettings, FocusStatus, FocusedWindow, GameRule, Part, Parts,
+    Profile, ProfileFile, Request, ResponseData, RuleMatch, RuleWhen, Section,
+};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::client::{Client, State, SLOW, TIMEOUT};
 use crate::{
     act, act_then, refresh, sync_rows, system, AppWindow, Clip, Game, GamesUi, MomentsUi, PartRow,
-    PartsUi, ProfilesUi, RuleRow, SettingsUi,
+    PartsUi, PresetRow, ProfileRow, ProfilesUi, RuleRow, SectionTick, SettingsUi,
 };
 
 fn strings(v: impl IntoIterator<Item = String>) -> ModelRc<SharedString> {
@@ -451,6 +454,113 @@ pub fn taken(profiles: &[String], name: &str) -> bool {
     !name.is_empty() && profiles.iter().any(|p| p == name)
 }
 
+/// A preset's sentence without its "gglinux's own preset…:" opening, which the
+/// section's hint says once for all of them.
+pub fn preset_about(about: &str) -> String {
+    match about.split_once(": ") {
+        Some((head, rest)) if head.starts_with("gglinux's own") => rest.to_string(),
+        _ => about.to_string(),
+    }
+}
+
+/// The parts a profile holds, as a row says them.
+pub fn parts_text(sections: &[Section]) -> String {
+    if sections.is_empty() {
+        return "Nothing saved".into();
+    }
+    let labels: Vec<&str> = sections.iter().map(|s| s.label()).collect();
+    labels.join(" · ")
+}
+
+/// A list of parts in a sentence: "Lighting and Mouse".
+fn and_list(sections: &[Section]) -> String {
+    let labels: Vec<&str> = sections.iter().map(|s| s.label()).collect();
+    match labels.split_last() {
+        None => String::new(),
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+pub fn rule_row(r: &GameRule) -> RuleRow {
+    RuleRow {
+        process: match r.by {
+            RuleMatch::Program => r.process.clone(),
+            RuleMatch::Class => format!("window class {}", r.process),
+        }
+        .into(),
+        profile: r.profile.clone().into(),
+        when: match r.when {
+            RuleWhen::Focused => "on focus",
+            RuleWhen::Running => "while it runs",
+        }
+        .into(),
+    }
+}
+
+/// The line about the focused window: whose desktop reports it and which it is, or why
+/// rules on focus act while their program runs instead. Empty while no rule acts on focus.
+pub fn focus_line(f: &FocusStatus) -> String {
+    match (&f.source, &f.note) {
+        (Some(source), _) => {
+            let window = match &f.window {
+                Some(FocusedWindow {
+                    class,
+                    program: Some(p),
+                }) => format!(" Focused now: {class} ({p})."),
+                Some(w) => format!(" Focused now: {}.", w.class),
+                None => " No window has the focus.".into(),
+            };
+            format!("Rules on focus follow the focused window, as {source} reports it.{window}")
+        }
+        (None, Some(note)) => note.clone(),
+        (None, None) => String::new(),
+    }
+}
+
+/// What the last apply did, and whether that has notes to heed.
+pub fn applied_line(a: &Applied) -> (String, bool) {
+    let what = if a.profile == "Default" {
+        "Your own settings came back".to_string()
+    } else {
+        format!("Applied {}", a.profile)
+    };
+    if a.notes.is_empty() {
+        return (format!("{what}."), false);
+    }
+    (format!("{what}, except:\n{}", a.notes.join("\n")), true)
+}
+
+/// The parts saving takes, in the order they're applied: all of them until changed.
+fn ticks(chosen: &[Section]) -> Vec<SectionTick> {
+    Section::ALL
+        .iter()
+        .map(|s| SectionTick {
+            label: s.label().into(),
+            on: chosen.contains(s),
+        })
+        .collect()
+}
+
+fn chosen(g: &ProfilesUi<'_>) -> Vec<Section> {
+    g.get_ticks()
+        .iter()
+        .zip(Section::ALL)
+        .filter(|(t, _)| t.on)
+        .map(|(_, s)| s)
+        .collect()
+}
+
+/// Where a profile is exported to: `gglinux-profile-<name>.json` in `dir`, the name's
+/// characters a file name can't hold made dashes.
+pub fn export_path(dir: &Path, name: &str) -> PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || "-_ .".contains(c) { c } else { '-' })
+        .collect();
+    dir.join(format!("gglinux-profile-{}.json", safe.trim()))
+}
+
 fn show_picks(g: &ProfilesUi<'_>, running: &[String], typed: &str) {
     let (list, any) = picks(running, typed);
     g.set_running(strings(list));
@@ -469,20 +579,49 @@ pub fn show_profiles(ui: &AppWindow, s: &State) {
     g.set_now(
         st.active
             .as_ref()
-            .map(|a| format!("Now: {}, because {} is running", a.profile, a.process))
+            .map(|a| format!("Now: {}, because {}", a.profile, a.reason()))
             .unwrap_or_default()
             .into(),
     );
+    g.set_focus(focus_line(&st.focus).into());
+    g.set_kept(if st.default_sections.is_empty() {
+        SharedString::new()
+    } else {
+        format!(
+            "Your own {} settings are kept, and come back when no rule holds.",
+            and_list(&st.default_sections)
+        )
+        .into()
+    });
+    let (applied, notes) = st.applied.as_ref().map(applied_line).unwrap_or_default();
+    g.set_applied(applied.into());
+    g.set_applied_notes(notes);
     g.set_profiles(strings(st.profiles.iter().cloned()));
-    let rules: Vec<RuleRow> = st
-        .rules
+    let rows: Vec<ProfileRow> = st
+        .profiles
         .iter()
-        .map(|r| RuleRow {
-            process: r.process.clone().into(),
-            profile: r.profile.clone().into(),
+        .enumerate()
+        .map(|(i, name)| ProfileRow {
+            name: name.clone().into(),
+            parts: parts_text(st.sections.get(i).map_or(&[][..], Vec::as_slice)).into(),
         })
         .collect();
+    sync_rows(g.get_rows(), rows, |m| g.set_rows(m));
+    let presets: Vec<PresetRow> = st
+        .presets
+        .iter()
+        .map(|p| PresetRow {
+            name: p.name.clone().into(),
+            about: preset_about(&p.about).into(),
+        })
+        .collect();
+    sync_rows(g.get_presets(), presets, |m| g.set_presets(m));
+    let rules: Vec<RuleRow> = st.rules.iter().map(rule_row).collect();
     sync_rows(g.get_rules(), rules, |m| g.set_rules(m));
+    // The ticks are the user's; they start with every part.
+    if g.get_ticks().row_count() == 0 {
+        g.set_ticks(ModelRc::new(VecModel::from(ticks(&Section::ALL))));
+    }
     show_picks(&g, &st.running, &g.get_new_process());
     g.set_name_taken(taken(&st.profiles, &g.get_new_name()));
     // A rule needs a profile: the first is picked until another is.
@@ -502,24 +641,81 @@ fn mark_profiles(ui: &AppWindow, busy: bool, error: SharedString) {
     g.set_error(error);
 }
 
+thread_local! {
+    /// A profile read from a file whose name is saved already, waiting for a yes.
+    static TO_REPLACE: RefCell<Option<Profile>> = const { RefCell::new(None) };
+}
+
+/// A profile file was picked or typed: import it, or ask before replacing one.
+fn import_file(ui: &AppWindow, client: &Client, path: &Path) {
+    let g = ui.global::<ProfilesUi>();
+    let read = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {e}", path.display()))
+        .and_then(|text| ProfileFile::parse(&text));
+    let profile = match read {
+        Ok(file) => file.profile,
+        Err(e) => return mark_profiles(ui, false, e.into()),
+    };
+    g.set_typing(false);
+    let saved = client.state().profiles.map(|s| s.profiles).unwrap_or_default();
+    if taken(&saved, &profile.name) {
+        g.set_replace_name(profile.name.trim().into());
+        TO_REPLACE.with(|t| *t.borrow_mut() = Some(profile));
+        return mark_profiles(ui, false, SharedString::new());
+    }
+    act(
+        ui,
+        client,
+        Request::ImportProfile {
+            profile: Box::new(profile),
+            replace: false,
+        },
+        TIMEOUT,
+        mark_profiles,
+    );
+}
+
 pub fn bind_profiles(ui: &AppWindow, client: &Client) {
     let g = ui.global::<ProfilesUi>();
-    let weak = ui.as_weak();
-    let c = client.clone();
-    g.on_apply(move |i| {
-        let (Some(ui), Some(st)) = (weak.upgrade(), c.state().profiles) else {
-            return;
-        };
-        if let Some(name) = st.profiles.get(i as usize).cloned() {
-            act(
-                &ui,
-                &c,
-                Request::ApplyProfile { name },
-                TIMEOUT,
-                mark_profiles,
-            );
+    // A request built from the state by `make`, with the row or tick it's about.
+    let send = |make: fn(&gg_ipc::ProfilesState, i32) -> Option<Request>| {
+        let weak = ui.as_weak();
+        let c = client.clone();
+        move |i: i32| {
+            let (Some(ui), Some(st)) = (weak.upgrade(), c.state().profiles) else {
+                return;
+            };
+            if let Some(req) = make(&st, i) {
+                act(&ui, &c, req, TIMEOUT, mark_profiles);
+            }
         }
-    });
+    };
+    g.on_apply(send(|st, i| {
+        st.profiles.get(i as usize).map(|name| Request::ApplyProfile {
+            name: name.clone(),
+            preset: false,
+        })
+    }));
+    g.on_apply_preset(send(|st, i| {
+        st.presets.get(i as usize).map(|p| Request::ApplyProfile {
+            name: p.name.clone(),
+            preset: true,
+        })
+    }));
+    g.on_copy_preset(send(|st, i| {
+        st.presets.get(i as usize).map(|p| Request::CopyProfile {
+            from: p.name.clone(),
+            preset: true,
+            to: None,
+        })
+    }));
+    g.on_remove_rule(send(|st, i| {
+        let mut rules = st.rules.clone();
+        ((i as usize) < rules.len()).then(|| {
+            rules.remove(i as usize);
+            Request::SetGameRules { rules }
+        })
+    }));
     let weak = ui.as_weak();
     let c = client.clone();
     // By name: the profile asked about, whatever moved in the list meanwhile.
@@ -527,13 +723,7 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
         let Some(ui) = weak.upgrade() else { return };
         ui.global::<ProfilesUi>().set_confirm(SharedString::new());
         let name = name.to_string();
-        act(
-            &ui,
-            &c,
-            Request::DeleteProfile { name },
-            TIMEOUT,
-            mark_profiles,
-        );
+        act(&ui, &c, Request::DeleteProfile { name }, TIMEOUT, mark_profiles);
     });
     let weak = ui.as_weak();
     let c = client.clone();
@@ -553,15 +743,32 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
         show_picks(&ui.global::<ProfilesUi>(), &st.running, &typed);
     });
     let weak = ui.as_weak();
+    g.on_tick(move |i, on| {
+        let Some(ui) = weak.upgrade() else { return };
+        let ticks = ui.global::<ProfilesUi>().get_ticks();
+        if let Some(mut t) = ticks.row_data(i as usize) {
+            t.on = on;
+            ticks.set_row_data(i as usize, t);
+        }
+    });
+    let weak = ui.as_weak();
     let c = client.clone();
     g.on_save(move || {
         let Some(ui) = weak.upgrade() else { return };
+        let g = ui.global::<ProfilesUi>();
         // A blank or too long name is the daemon's to refuse, in its words.
-        let name = ui.global::<ProfilesUi>().get_new_name().trim().to_string();
+        let name = g.get_new_name().trim().to_string();
+        let sections = chosen(&g);
+        if sections.is_empty() {
+            return g.set_error("Tick at least one part to save.".into());
+        }
         act_then(
             &ui,
             &c,
-            Request::SaveProfile { name },
+            Request::SaveProfile {
+                name,
+                sections: Some(sections),
+            },
             TIMEOUT,
             mark_profiles,
             |ui, _| {
@@ -570,24 +777,6 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
                 g.set_name_taken(false);
             },
         );
-    });
-    let weak = ui.as_weak();
-    let c = client.clone();
-    g.on_remove_rule(move |i| {
-        let (Some(ui), Some(st)) = (weak.upgrade(), c.state().profiles) else {
-            return;
-        };
-        let mut rules = st.rules.clone();
-        if (i as usize) < rules.len() {
-            rules.remove(i as usize);
-            act(
-                &ui,
-                &c,
-                Request::SetGameRules { rules },
-                TIMEOUT,
-                mark_profiles,
-            );
-        }
     });
     let weak = ui.as_weak();
     let c = client.clone();
@@ -606,8 +795,23 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
         if process.is_empty() {
             return;
         }
+        let by = if g.get_new_by() == 1 {
+            RuleMatch::Class
+        } else {
+            RuleMatch::Program
+        };
+        let when = if g.get_new_when() == 1 && by == RuleMatch::Program {
+            RuleWhen::Running
+        } else {
+            RuleWhen::Focused
+        };
         let mut rules = st.rules.clone();
-        rules.push(GameRule { process, profile });
+        rules.push(GameRule {
+            process,
+            profile,
+            by,
+            when,
+        });
         act_then(
             &ui,
             &c,
@@ -619,6 +823,98 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
                     .set_new_process(SharedString::new());
             },
         );
+    });
+    let weak = ui.as_weak();
+    let c = client.clone();
+    g.on_export(move |i| {
+        let (Some(ui), Some(st)) = (weak.upgrade(), c.state().profiles) else {
+            return;
+        };
+        let Some(name) = st.profiles.get(i as usize).cloned() else {
+            return;
+        };
+        mark_profiles(&ui, true, SharedString::new());
+        let weak = ui.as_weak();
+        let req = Request::GetProfile {
+            name: name.clone(),
+            preset: false,
+        };
+        c.request(req, TIMEOUT, move |answer| {
+            let written = match answer {
+                Ok(ResponseData::Profile { file }) => {
+                    let path = export_path(&system::export_dir(&system::home()), &name);
+                    std::fs::write(&path, file.to_json())
+                        .map(|()| path.display().to_string())
+                        .map_err(|e| format!("{}: {e}", path.display()))
+                }
+                Ok(_) => Err("gglinuxd answered something else".into()),
+                Err(e) => Err(e),
+            };
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                let g = ui.global::<ProfilesUi>();
+                match written {
+                    Ok(path) => {
+                        g.set_exported(path.into());
+                        mark_profiles(&ui, false, SharedString::new());
+                    }
+                    Err(e) => mark_profiles(&ui, false, e.into()),
+                }
+            });
+        });
+    });
+    let weak = ui.as_weak();
+    let c = client.clone();
+    g.on_import(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        mark_profiles(&ui, true, SharedString::new());
+        let weak = ui.as_weak();
+        let c2 = c.clone();
+        c.spawn(async move {
+            let filter: (&str, &[&str]) = ("Profiles", &["application/json", "*.json"]);
+            let picked = system::pick_file("A gglinux profile", filter).await;
+            let _ = weak.upgrade_in_event_loop(move |ui| match picked {
+                Ok(Some(path)) => import_file(&ui, &c2, &path),
+                Ok(None) => mark_profiles(&ui, false, SharedString::new()),
+                Err(e) => {
+                    let g = ui.global::<ProfilesUi>();
+                    mark_profiles(&ui, false, e.into());
+                    g.set_typing(true);
+                    if g.get_typed_path().is_empty() {
+                        let docs = system::export_dir(&system::home());
+                        g.set_typed_path(format!("{}/", docs.display()).into());
+                    }
+                }
+            });
+        });
+    });
+    let weak = ui.as_weak();
+    let c = client.clone();
+    g.on_import_typed(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let typed = ui.global::<ProfilesUi>().get_typed_path();
+        match system::typed_path(&typed, &system::home()) {
+            Ok(path) => import_file(&ui, &c, &path),
+            Err(e) => mark_profiles(&ui, false, e.into()),
+        }
+    });
+    let weak = ui.as_weak();
+    let c = client.clone();
+    g.on_replace(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.global::<ProfilesUi>().set_replace_name(SharedString::new());
+        if let Some(profile) = TO_REPLACE.with(|t| t.borrow_mut().take()) {
+            let req = Request::ImportProfile {
+                profile: Box::new(profile),
+                replace: true,
+            };
+            act(&ui, &c, req, TIMEOUT, mark_profiles);
+        }
+    });
+    let weak = ui.as_weak();
+    g.on_cancel_replace(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.global::<ProfilesUi>().set_replace_name(SharedString::new());
+        TO_REPLACE.with(|t| t.borrow_mut().take());
     });
     let c = client.clone();
     // Notifications carry no list of running programs; a read does.
@@ -879,16 +1175,39 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
             profiles.set_new_name("Evening".into());
             profiles.invoke_save();
         }
+        // Untick part n of what saving takes.
+        "profiles.untick" => profiles.invoke_tick(n, false),
         "profiles.rule" => {
             profiles.set_new_process("RDR2.exe".into());
             profiles.set_new_profile(n);
             profiles.invoke_add_rule();
         }
+        // A rule on a window class, on focus.
+        "profiles.class-rule" => {
+            profiles.set_new_by(1);
+            profiles.set_new_when(0);
+            profiles.set_new_process("steam_app_1174180".into());
+            profiles.set_new_profile(n);
+            profiles.invoke_add_rule();
+        }
+        "profiles.by" => profiles.set_new_by(n),
+        "profiles.when" => profiles.set_new_when(n),
         "profiles.ask-delete" => {
             if let Some(p) = profiles.get_profiles().row_data(i) {
                 profiles.set_confirm(p);
             }
         }
+        "profiles.preset" => profiles.invoke_apply_preset(n),
+        "profiles.copy" => profiles.invoke_copy_preset(n),
+        "profiles.apply" => profiles.invoke_apply(n),
+        "profiles.refresh" => profiles.invoke_refresh(),
+        // Headless there's no session bus, so the file chooser fails and the path box shows.
+        "profiles.import" => profiles.invoke_import(),
+        // As after an export (writing a file would touch the real Documents folder).
+        "profiles.exported" => profiles
+            .set_exported("/home/you/Documents/gglinux-profile-Evening.json".into()),
+        // As after reading a file whose profile has a saved one's name.
+        "profiles.replace" => profiles.set_replace_name("Evening".into()),
         "settings.hyprland" => {
             settings.set_desktop("Hyprland".into());
             settings.set_reads_autostart(false);
@@ -962,6 +1281,96 @@ mod tests {
         assert!(taken(&saved, "  Work "), "the daemon trims the name");
         assert!(!taken(&saved, "evening"), "names are exact");
         assert!(!taken(&saved, "   "));
+    }
+
+    #[test]
+    fn a_profile_row_says_what_it_holds_and_a_rule_row_when_it_acts() {
+        assert_eq!(
+            parts_text(&[Section::Mouse, Section::Lighting]),
+            "Mouse · Lighting"
+        );
+        assert_eq!(parts_text(&[]), "Nothing saved");
+        assert_eq!(
+            preset_about("gglinux's own preset, not SteelSeries': 2.0 mm, no Rapid Trigger."),
+            "2.0 mm, no Rapid Trigger."
+        );
+        assert_eq!(preset_about("Shared by a friend: FPS"), "Shared by a friend: FPS");
+        assert_eq!(and_list(&[Section::Mouse]), "Mouse");
+        assert_eq!(
+            and_list(&[Section::Headset, Section::Mouse, Section::Lighting]),
+            "Headset, Mouse and Lighting"
+        );
+        let class = GameRule {
+            by: RuleMatch::Class,
+            when: RuleWhen::Focused,
+            ..GameRule::running("steam_app_1174180", "FPS")
+        };
+        let row = rule_row(&class);
+        assert_eq!(
+            (row.process.as_str(), row.profile.as_str(), row.when.as_str()),
+            ("window class steam_app_1174180", "FPS", "on focus")
+        );
+        assert_eq!(rule_row(&GameRule::running("obs", "Quiet")).when, "while it runs");
+    }
+
+    #[test]
+    fn the_focus_line_names_the_desktop_and_the_window_or_says_why_not() {
+        assert_eq!(focus_line(&FocusStatus::default()), "");
+        let followed = FocusStatus {
+            source: Some("Hyprland".into()),
+            window: Some(FocusedWindow {
+                class: "steam_app_1174180".into(),
+                program: Some("rdr2.exe".into()),
+            }),
+            note: None,
+        };
+        assert_eq!(
+            focus_line(&followed),
+            "Rules on focus follow the focused window, as Hyprland reports it. Focused now: steam_app_1174180 (rdr2.exe)."
+        );
+        let none = FocusStatus {
+            window: None,
+            ..followed
+        };
+        assert!(focus_line(&none).ends_with("No window has the focus."));
+        let note = FocusStatus {
+            note: Some("No desktop here reports it.".into()),
+            ..FocusStatus::default()
+        };
+        assert_eq!(focus_line(&note), "No desktop here reports it.");
+    }
+
+    #[test]
+    fn the_last_apply_lists_what_it_skipped() {
+        let clean = Applied {
+            profile: "FPS".into(),
+            notes: vec![],
+        };
+        assert_eq!(applied_line(&clean), ("Applied FPS.".into(), false));
+        let skipped = Applied {
+            profile: "Default".into(),
+            notes: vec!["Mouse: skipped. why".into(), "Lighting: no keyboard".into()],
+        };
+        assert_eq!(
+            applied_line(&skipped),
+            (
+                "Your own settings came back, except:\nMouse: skipped. why\nLighting: no keyboard".into(),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn saving_starts_with_every_part_ticked_and_exports_get_a_file_name() {
+        let t = ticks(&Section::ALL);
+        assert_eq!(t.len(), 6);
+        assert!(t.iter().all(|t| t.on));
+        assert_eq!(t[0].label, "Headset");
+        assert_eq!(t[5].label, "Lighting");
+        assert_eq!(
+            export_path(Path::new("/home/you/Documents"), "Late/Night: FPS"),
+            PathBuf::from("/home/you/Documents/gglinux-profile-Late-Night- FPS.json")
+        );
     }
 
     #[test]

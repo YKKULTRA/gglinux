@@ -1,0 +1,52 @@
+{
+  "format": "gglinux-profile",
+  "version": 2,
+  "about": "gglinux's own preset, not SteelSeries': 1.0 mm on Q W E R D F, 1.5 mm on the other keys, no Rapid Trigger.",
+  "profile": {
+    "name": "MOBA",
+    "switches": {
+      "enabled": true,
+      "actuation": 15,
+      "keys": [
+        {
+          "code": 20,
+          "actuation": 10
+        },
+        {
+          "code": 26,
+          "actuation": 10
+        },
+        {
+          "code": 8,
+          "actuation": 10
+        },
+        {
+          "code": 21,
+          "actuation": 10
+        },
+        {
+          "code": 7,
+          "actuation": 10
+        },
+        {
+          "code": 9,
+          "actuation": 10
+        }
+      ],
+      "rapid_trigger": {
+        "enabled": false,
+        "keys": [],
+        "sensitivity": 2
+      },
+      "rapid_tap": {
+        "enabled": false,
+        "pairs": []
+      },
+      "protection": {
+        "enabled": false,
+        "keys": []
+      },
+      "second": []
+    }
+  }
+}

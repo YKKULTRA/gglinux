@@ -158,7 +158,10 @@ impl State {
                 self.macros = Some(state.clone());
                 Changed::Macros
             }
-            ResponseData::Pong | ResponseData::Success | ResponseData::Error { .. } => return None,
+            ResponseData::Pong
+            | ResponseData::Success
+            | ResponseData::Profile { .. }
+            | ResponseData::Error { .. } => return None,
         })
     }
 
