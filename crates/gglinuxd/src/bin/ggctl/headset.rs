@@ -104,10 +104,7 @@ fn change(setting: &str, values: &[&str]) -> Result<HeadsetChange> {
         "screen-dim" => {
             let m = minutes(value, &["never", "off"])?;
             if !SCREEN_DIM_MINUTES.contains(&m) {
-                bail!(
-                    "the screen dims after never, 1, 5, 10, 15 or 30 minutes (GG's 60 was never \
-                     captured, so it isn't offered)"
-                );
+                bail!("the screen dims after never, 1, 5, 10, 15, 30 or 60 minutes");
             }
             HeadsetChange::ScreenDimMinutes(m)
         }
@@ -200,25 +197,21 @@ fn lines(state: &HeadsetState) -> Vec<(&'static str, String)> {
         }),
     ));
     out.push(("line out", line_out(c)));
-    let not_read = " (not read back: what was set here)";
     out.push((
         "home screen",
         c.home_screen.map_or_else(unknown, |h| {
-            let home = match h {
+            match h {
                 HomeScreen::Detailed => "detailed",
                 HomeScreen::Simple => "simple",
-            };
-            format!("{home}{not_read}")
+            }
+            .to_string()
         }),
     ));
     out.push((
         "screen dim",
-        c.screen_dim_minutes.map_or_else(unknown, |m| {
-            let when = match m {
-                0 => "never".to_string(),
-                m => format!("after {m} min"),
-            };
-            when + not_read
+        c.screen_dim_minutes.map_or_else(unknown, |m| match m {
+            0 => "never".to_string(),
+            m => format!("after {m} min"),
         }),
     ));
     out
@@ -388,6 +381,7 @@ mod tests {
         assert_eq!(set("screen-dim 5"), HeadsetChange::ScreenDimMinutes(5));
         assert_eq!(set("screen-dim off"), HeadsetChange::ScreenDimMinutes(0));
         assert_eq!(set("screen-dim 30min"), HeadsetChange::ScreenDimMinutes(30));
+        assert_eq!(set("screen-dim 60"), HeadsetChange::ScreenDimMinutes(60));
     }
 
     #[test]
@@ -426,8 +420,8 @@ mod tests {
             "stream-mix 100,100,300",
             "line-out headphones",
             "screen-dim soon",
-            "screen-dim 60",
             "screen-dim 2",
+            "screen-dim 45",
             "bluetooth-call maybe",
             "anc max",
             "eq custom",
@@ -512,7 +506,7 @@ mod tests {
         assert_eq!(line(&s, "line out"), "stream (main 50, aux 100, mic 0)");
         assert_eq!(line(&s, "gain"), "low");
         assert_eq!(line(&s, "equalizer"), "flat");
-        assert!(line(&s, "screen dim").starts_with("after 5 min (not read back"));
+        assert_eq!(line(&s, "screen dim"), "after 5 min");
     }
 
     #[test]

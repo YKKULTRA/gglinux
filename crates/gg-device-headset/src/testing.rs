@@ -8,7 +8,8 @@
 //! - answers the queries `b0`, `20` and `80` with a whole 64-byte reply on report
 //!   `0x06`, laid out as Arctis Sound Manager reads them. It starts on GG's
 //!   defaults, the settings the owner's base station has had since the captures:
-//!   the `b0` reply is the one GG got in `arctis-1` (headset off);
+//!   the `b0` reply is the one GG got in `arctis-1` (headset off), the `20` and `80`
+//!   replies the ones it got in `arctis-5`;
 //! - takes the setters it knows into those replies, but **lags** like a real
 //!   device: a change shows only from the second read of the reply that holds it.
 //!   The first read after the command still gets the old value, so code that reads
@@ -70,19 +71,16 @@ impl FakeBase {
             0x04, 0x01,
         ]);
         let mut audio = [0u8; REPORT];
-        // Volume 6, gain low, EQ Flat with a flat Custom slot, mic volume 10,
-        // sidetone off, line out to speakers, stream mix 100/100/100.
-        audio[..4].copy_from_slice(&[0x06, 0x20, 0x00, 0x06]);
-        audio[4] = 0x01;
-        audio[7..17].fill(0x14);
-        audio[0x11] = 0x0a;
-        audio[0x13] = 0x01;
-        audio[0x16] = 0x64;
-        audio[0x18] = 0x64;
-        audio[0x19] = 0x64;
+        // GG's read in arctis-5: volume 3, gain low, EQ Flat with a flat Custom
+        // slot, mic volume 10, sidetone off, line out to speakers, stream mix
+        // 100/100/100.
+        audio[..26].copy_from_slice(&[
+            0x06, 0x20, 0x00, 0x03, 0x01, 0x00, 0x00, 0x14, 0x14, 0x14, 0x14, 0x14, 0x14, 0x14,
+            0x14, 0x14, 0x14, 0x0a, 0x00, 0x01, 0x64, 0x64, 0x64, 0x00, 0x64, 0x64,
+        ]);
         let mut ux = [0u8; REPORT];
-        // Dim after 1 min, brightness 10, home screen detailed.
-        ux[..6].copy_from_slice(&[0x06, 0x80, 0x01, 0x0a, 0x0a, 0x00]);
+        // GG's read in arctis-5: dim after 1 min, brightness 10, home screen detailed.
+        ux[..6].copy_from_slice(&[0x06, 0x80, 0x01, 0x0a, 0x01, 0x00]);
         FakeBase(Arc::new(Mutex::new(Inner {
             reports: Vec::new(),
             features: Vec::new(),

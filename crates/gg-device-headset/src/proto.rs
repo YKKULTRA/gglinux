@@ -722,14 +722,33 @@ mod tests {
         assert_eq!(s.bluetooth_on, Some(false));
         assert_eq!(s.bluetooth_link, Some(BluetoothLink::Off));
         assert_eq!(s.pairing, Some(Pairing::PairedOffline));
-        // Docked and on (docs/PROTOCOLS.md, 2026-08-12): the link is up.
+        // Headset on, in arctis-5: the link is up, the rest as before. Its battery
+        // byte, 1 of 8, matches the `07 b7 01 08 08` event in the same capture.
+        let on = [
+            0x06, 0xb0, 0x00, 0x00, 0x01, 0x00, 0x01, 0x08, 0x08, 0x00, 0x02, 0x0a, 0x05, 0x00,
+            0x08, 0x08,
+        ];
+        let s = Status::decode(&on).unwrap();
+        assert_eq!(s.power, PowerStatus::Online);
+        assert_eq!(s.headset_battery, Some(12));
+        assert_eq!(s.spare_battery, Some(100));
+        assert_eq!(s.pairing, Some(Pairing::Connected));
+        assert_eq!(
+            (s.bluetooth_at_power_on, s.bluetooth_call),
+            (Some(false), Some(BluetoothCall::Nothing))
+        );
+        assert_eq!(
+            (s.bluetooth_on, s.bluetooth_link),
+            (Some(false), Some(BluetoothLink::Off))
+        );
+        assert_eq!(s.auto_off, Some(AutoOff::Min30));
+        assert_eq!(s.noise_mode(), Some(NoiseMode::Anc));
+        // Docked and on (docs/PROTOCOLS.md, 2026-08-12): the link is up too.
         let docked = [
             0x06, 0xb0, 0x00, 0x00, 0x01, 0x00, 0x08, 0x08, 0x08, 0x00, 0x02, 0x0a, 0x05, 0x00,
             0x08, 0x08,
         ];
-        let s = Status::decode(&docked).unwrap();
-        assert_eq!(s.power, PowerStatus::Online);
-        assert_eq!(s.pairing, Some(Pairing::Connected));
+        assert_eq!(Status::decode(&docked).unwrap().pairing, Some(Pairing::Connected));
     }
 
     #[test]
@@ -928,6 +947,7 @@ mod tests {
             ),
             (Setting::HomeScreen(HomeScreen::Simple), vec![0x89, 1]),
             (Setting::ScreenDim(DimTimeout::Min5), vec![0x83, 2]),
+            (Setting::ScreenDim(DimTimeout::Min60), vec![0x83, 6]),
         ];
         for (setting, expected) in cases {
             assert_eq!(setting.packets().unwrap(), vec![expected], "{setting:?}");

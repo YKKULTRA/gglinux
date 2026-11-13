@@ -7,7 +7,7 @@
 use gg_device_headset::{
     AudioSettings, AutoOff, BluetoothCall as DevCall, BluetoothLink as DevLink, DimTimeout,
     Gain as DevGain, Headset, HomeScreen as DevHome, LineOut as DevLineOut, NoiseMode as DevNoise,
-    Pairing as DevPairing, Port, Setting, Status, StreamMix, WirelessMode,
+    Pairing as DevPairing, Port, Setting, Status, StreamMix, UxSettings, WirelessMode,
 };
 use gg_ipc::{
     BluetoothCall, BluetoothLink, Experimental, HeadsetChange, HeadsetControls, HeadsetGain,
@@ -101,8 +101,9 @@ pub fn send_change<P: Port>(
         .map_err(|e| Failed::Write(format!("{e:#}")))
 }
 
-/// What gglinux wrote this session. Shown where the base station reports nothing
-/// (not yet, or never, as the home screen and the dim timeout).
+/// What gglinux wrote this session. Shown where the base station reports nothing:
+/// not yet, or (the home screen and the dim timeout) while `headset_extras` is off,
+/// as their `80` reply is asked for only while it is on.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Written {
     pub sidetone: Option<u8>,
@@ -150,6 +151,7 @@ pub fn record(written: &mut Written, change: &HeadsetChange) {
 pub fn merged(
     status: Option<&Status>,
     audio: Option<&AudioSettings>,
+    ux: Option<&UxSettings>,
     written: &Written,
 ) -> HeadsetControls {
     let read = |pick: fn(&AudioSettings) -> Option<u8>| audio.and_then(pick);
@@ -200,8 +202,17 @@ pub fn merged(
                 mic: m.mic,
             })
             .or(written.line_out_mix),
-        home_screen: written.home_screen,
-        screen_dim_minutes: written.screen_dim_minutes,
+        home_screen: ux
+            .and_then(|u| u.home_screen)
+            .map(|h| match h {
+                DevHome::Detailed => HomeScreen::Detailed,
+                DevHome::Simple => HomeScreen::Simple,
+            })
+            .or(written.home_screen),
+        screen_dim_minutes: ux
+            .and_then(|u| u.dim_timeout)
+            .map(|d| d.minutes())
+            .or(written.screen_dim_minutes),
     }
 }
 
@@ -290,7 +301,7 @@ mod tests {
             HeadsetChange::MicLed(0),
             HeadsetChange::Transparency(11),
             HeadsetChange::EqBands(vec![0.0; 3]),
-            HeadsetChange::ScreenDimMinutes(60),
+            HeadsetChange::ScreenDimMinutes(45),
             HeadsetChange::LineOutMix(LineOutMix {
                 main: 101,
                 aux: 0,
@@ -369,6 +380,7 @@ mod tests {
             (HeadsetChange::ScreenDimMinutes(10), vec![0x06, 0x83, 0x03]),
             (HeadsetChange::ScreenDimMinutes(15), vec![0x06, 0x83, 0x04]),
             (HeadsetChange::ScreenDimMinutes(30), vec![0x06, 0x83, 0x05]),
+            (HeadsetChange::ScreenDimMinutes(60), vec![0x06, 0x83, 0x06]),
         ]
     }
 
@@ -431,7 +443,7 @@ mod tests {
         let fake = FakeBase::new();
         let device = Headset::with_port(fake.clone());
         for change in [
-            HeadsetChange::ScreenDimMinutes(60),
+            HeadsetChange::ScreenDimMinutes(2),
             HeadsetChange::LineOutMix(LineOutMix {
                 main: 100,
                 aux: 120,
@@ -469,18 +481,22 @@ mod tests {
         );
     }
 
-    /// What the fake base station answers to a poll: GG's defaults.
-    fn read() -> (Status, AudioSettings) {
+    /// What the fake base station answers to a poll and an `80` query: GG's
+    /// defaults, as GG read them in the captures.
+    fn read() -> (Status, AudioSettings, UxSettings) {
         let device = Headset::with_port(FakeBase::new());
         let p = device.poll().unwrap();
-        (p.status.unwrap(), p.audio.unwrap())
+        let ux = device.ux_settings().unwrap().decoded.unwrap();
+        (p.status.unwrap(), p.audio.unwrap(), ux)
     }
 
     #[test]
     fn what_the_base_station_reports_wins_over_what_was_written() {
-        let (status, audio) = read();
+        let (status, audio, ux) = read();
         let mut w = Written::default();
         for change in [
+            HeadsetChange::HomeScreen(HomeScreen::Simple),
+            HeadsetChange::ScreenDimMinutes(30),
             HeadsetChange::Gain(HeadsetGain::High),
             HeadsetChange::LineOut(LineOut::Stream),
             HeadsetChange::Sidetone(3),
@@ -489,7 +505,9 @@ mod tests {
         ] {
             record(&mut w, &change);
         }
-        let c = merged(Some(&status), Some(&audio), &w);
+        let c = merged(Some(&status), Some(&audio), Some(&ux), &w);
+        assert_eq!(c.home_screen, Some(HomeScreen::Detailed));
+        assert_eq!(c.screen_dim_minutes, Some(1));
         assert_eq!(c.gain, Some(HeadsetGain::Low));
         assert_eq!(c.line_out, Some(LineOut::Speakers));
         assert_eq!(c.sidetone, Some(0));
@@ -518,18 +536,18 @@ mod tests {
         record(&mut w, &HeadsetChange::Gain(HeadsetGain::High));
         record(&mut w, &HeadsetChange::HomeScreen(HomeScreen::Simple));
         record(&mut w, &HeadsetChange::ScreenDimMinutes(10));
-        let unread = merged(None, None, &w);
+        let unread = merged(None, None, None, &w);
         assert_eq!(unread.gain, Some(HeadsetGain::High));
         assert_eq!(unread.pairing, None, "read only: never written");
-        let (status, audio) = read();
-        let c = merged(Some(&status), Some(&audio), &w);
+        let (status, audio, _) = read();
+        let c = merged(Some(&status), Some(&audio), None, &w);
         assert_eq!(
             (c.home_screen, c.screen_dim_minutes),
             (Some(HomeScreen::Simple), Some(10)),
-            "the screen settings are never read back"
+            "without an 80 reply (gate off), the screen settings are what was written"
         );
         assert_eq!(
-            merged(None, None, &Written::default()),
+            merged(None, None, None, &Written::default()),
             HeadsetControls::default()
         );
     }

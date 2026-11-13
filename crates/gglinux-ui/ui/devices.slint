@@ -255,8 +255,7 @@ export global HeadsetUi {
     in property <int> home-screen: -1;
     in property <int> dim: -1;
     out property <[string]> auto-off-names: ["Never", "1 min", "5 min", "10 min", "15 min", "30 min", "60 min"];
-    /// 60 min isn't offered: GG's byte for it was never captured.
-    out property <[string]> dim-names: ["Never", "1 min", "5 min", "10 min", "15 min", "30 min"];
+    out property <[string]> dim-names: ["Never", "1 min", "5 min", "10 min", "15 min", "30 min", "60 min"];
     out property <[string]> band-names: ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
     callback set-protect(bool);
     callback set-lit-seconds(int);
@@ -483,8 +482,8 @@ export component HeadsetPanel inherits Card {
                     label: "Dim after";
                     Pick {
                         width: 160px;
-                        // "unknown" is a choice only until one is set here.
-                        model: HeadsetUi.dim < 0 ? ["unknown", "Never", "1 min", "5 min", "10 min", "15 min", "30 min"] : HeadsetUi.dim-names;
+                        // "unknown" is a choice only until the base station says, or one is set here.
+                        model: HeadsetUi.dim < 0 ? ["unknown", "Never", "1 min", "5 min", "10 min", "15 min", "30 min", "60 min"] : HeadsetUi.dim-names;
                         index: HeadsetUi.dim < 0 ? 0 : HeadsetUi.dim;
                         enabled: !HeadsetUi.busy && HeadsetUi.extras-gated;
                         busy: HeadsetUi.busy;
@@ -498,7 +497,7 @@ export component HeadsetPanel inherits Card {
                     }
                     Rectangle { horizontal-stretch: 1; }
                 }
-                Hint { text: "The base station doesn't report its home screen or dim time to gglinux yet, so these two show what was last set here."; }
+                Hint { text: "gglinux asks the base station for its home screen and dim time every 30 seconds while these settings are on."; }
             }
         }
     } }

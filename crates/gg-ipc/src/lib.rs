@@ -293,9 +293,8 @@ pub enum HomeScreen {
     Simple,
 }
 
-/// The base station screen's dim timeout choices, in minutes; 0 never dims. GG
-/// also lists 60, but that choice was never captured, so it isn't offered.
-pub const SCREEN_DIM_MINUTES: [u16; 6] = [0, 1, 5, 10, 15, 30];
+/// The base station screen's dim timeout choices, in minutes; 0 never dims.
+pub const SCREEN_DIM_MINUTES: [u16; 7] = [0, 1, 5, 10, 15, 30, 60];
 
 /// Bluetooth's link to a phone, as the base station reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,10 +375,10 @@ impl HeadsetChange {
     }
 }
 
-/// Headset settings, as the base station reports them each second where it does
-/// (its `b0` and `20` replies), else as gglinux wrote them this session. The home
-/// screen and the dim timeout are only ever what gglinux wrote: their read-back
-/// isn't checked on hardware yet. `None` means not known.
+/// Headset settings, as the base station reports them where it does (its `b0` and
+/// `20` replies each second; the home screen and the dim timeout from its `80`
+/// reply, asked only while [`Feature::HeadsetExtras`] is on), else as gglinux wrote
+/// them this session. `None` means not known.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HeadsetControls {
     pub noise_mode: Option<NoiseMode>,
@@ -2290,8 +2289,8 @@ mod tests {
             assert_eq!(change.feature(), None, "{change:?}");
         }
         assert!(
-            !SCREEN_DIM_MINUTES.contains(&60),
-            "60 min was never captured"
+            SCREEN_DIM_MINUTES.contains(&60),
+            "captured in arctis-5 (83 06)"
         );
     }
 

@@ -52,7 +52,7 @@ ggctl headset bluetooth-at-power-on on|off   # Bluetooth on when the headset pow
 ggctl headset bluetooth-call nothing|lower|mute   # what a call does to the game sound
 ggctl headset line-out speakers|stream  # and stream-mix MAIN,AUX,MIC (0-100 each)
 ggctl headset home-screen detailed|simple
-ggctl headset screen-dim never|1|5|10|15|30   # minutes before the base-station screen dims
+ggctl headset screen-dim never|1|5|10|15|30|60   # minutes before the base-station screen dims
 ggctl clip save                         # save the instant replay (bind this to a key)
 ggctl profile list                      # saved lighting profiles
 ggctl profile apply <name>

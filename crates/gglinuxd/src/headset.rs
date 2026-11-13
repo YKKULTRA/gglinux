@@ -13,12 +13,12 @@
 //! The base station's own settings (Bluetooth, gain, line out, home screen, dim
 //! timeout) need the `headset_extras` gate, which the worker follows on the event
 //! bus ([`gates`]). While it is on, the worker also asks for the screen settings
-//! (`06 80`) now and then, and logs the reply: its offsets aren't checked on
-//! hardware yet, so nothing from it is shown.
+//! (`06 80`) now and then ([`ux`]), for the home screen and the dim timeout.
 
 mod controls;
 mod gates;
 mod screen;
+mod ux;
 mod wake;
 
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -41,14 +41,6 @@ const REOPEN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Longest one loop iteration waits for an interrupt. Bounds command latency.
 const EVENT_WAIT_MS: i32 = 100;
-
-/// How often to ask for the screen settings while `headset_extras` is on: they
-/// change only when someone changes them.
-const UX_INTERVAL: Duration = Duration::from_secs(30);
-
-/// How soon after a screen setting is changed here to ask again, so the log
-/// shows whether the reply follows (after the read that may still be stale).
-const UX_AFTER_CHANGE: Duration = Duration::from_secs(5);
 
 /// Reply channel for a command. `Err` carries a message meant for the user.
 type Reply<T> = oneshot::Sender<Result<T, String>>;
@@ -123,10 +115,8 @@ struct State {
     /// Settings as last written here, shown where the base station reports nothing.
     written: controls::Written,
     gates: gates::Gates,
-    /// When the screen settings were last asked for, and the last reply, so only a
-    /// changed one is logged.
-    last_ux: Option<Instant>,
-    ux_reply: Option<Vec<u8>>,
+    /// The screen settings reply: when to ask, and what was read.
+    ux: ux::UxRead,
     /// Last state sent to clients, so unchanged iterations stay quiet.
     published: Option<HeadsetState>,
 }
@@ -154,8 +144,7 @@ fn worker(rx: Receiver<Command>, event_tx: broadcast::Sender<Event>, gates: gate
         screen: Screen::new(&settings, Instant::now()),
         written: controls::Written::default(),
         gates,
-        last_ux: None,
-        ux_reply: None,
+        ux: ux::UxRead::default(),
         published: None,
     };
 
@@ -254,7 +243,7 @@ fn set_control(state: &mut State, change: &HeadsetChange) -> Result<(), String> 
         change,
         HeadsetChange::HomeScreen(_) | HeadsetChange::ScreenDimMinutes(_)
     ) {
-        state.last_ux = Instant::now().checked_sub(UX_INTERVAL - UX_AFTER_CHANGE);
+        state.ux.changed_here(Instant::now());
     }
     Ok(())
 }
@@ -339,20 +328,18 @@ fn poll(state: &mut State) {
         }
         state.volume = Some(volume);
     }
-    if ux_due(state.gates.now().on(Feature::HeadsetExtras), state.last_ux) {
+    let extras = state.gates.now().on(Feature::HeadsetExtras);
+    if !extras {
+        // Not asked for any more, so what was read would only grow old.
+        state.ux.forget();
+    } else if state.ux.due(extras, Instant::now()) {
         poll_ux(state);
     }
 }
 
-/// Whether to ask for the screen settings now: only with `headset_extras` on, and
-/// at most every [`UX_INTERVAL`].
-fn ux_due(extras: bool, last: Option<Instant>) -> bool {
-    extras && is_older_than(last, UX_INTERVAL)
-}
-
-/// Ask for the screen settings and log a reply that differs from the last one.
+/// Ask for the screen settings, and take the reply.
 fn poll_ux(state: &mut State) {
-    state.last_ux = Some(Instant::now());
+    state.ux.asked(Instant::now());
     let Some(device) = state.device.as_ref() else {
         return;
     };
@@ -367,14 +354,13 @@ fn poll_ux(state: &mut State) {
     for report in &reply.events {
         on_report(state, report);
     }
-    if reply.raw.is_some() && reply.raw != state.ux_reply {
+    if state.ux.took(&reply, Instant::now()) {
         let raw = reply.raw.as_deref().unwrap_or_default();
-        info!(
+        debug!(
             decoded = ?reply.decoded,
             raw = %hex(&raw[..raw.len().min(8)]),
-            "base station screen settings (06 80; offsets not checked on hardware yet)"
+            "base station screen settings (06 80)"
         );
-        state.ux_reply = reply.raw;
     }
 }
 
@@ -438,7 +424,7 @@ fn drop_device(state: &mut State) {
     state.status = None;
     state.volume = None;
     state.audio = None;
-    state.ux_reply = None;
+    state.ux.forget();
 }
 
 fn shutdown(state: &mut State) {
@@ -451,6 +437,7 @@ fn snapshot(state: &State) -> HeadsetState {
     let connected = state.device.is_some();
     let status = state.status.filter(|_| connected);
     let audio = state.audio.as_ref().filter(|_| connected);
+    let ux = state.ux.settings.as_ref().filter(|_| connected);
     HeadsetState {
         connected,
         power: status.map_or(HeadsetPower::Unknown, |s| power(s.power)),
@@ -458,7 +445,7 @@ fn snapshot(state: &State) -> HeadsetState {
         spare_battery: status.and_then(|s| s.spare_battery),
         screen: state.settings,
         screen_dark: connected && state.screen.is_dark(),
-        controls: controls::merged(status.as_ref(), audio, &state.written),
+        controls: controls::merged(status.as_ref(), audio, ux, &state.written),
     }
 }
 
@@ -480,20 +467,3 @@ fn publish(state: &mut State, event_tx: &broadcast::Sender<Event>) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_screen_settings_are_asked_for_only_with_the_gate_on_and_slowly() {
-        let now = Instant::now();
-        assert!(!ux_due(false, None), "gate off: never");
-        assert!(!ux_due(false, now.checked_sub(Duration::from_secs(3600))));
-        assert!(ux_due(true, None));
-        assert!(!ux_due(true, Some(now)));
-        assert!(ux_due(true, now.checked_sub(UX_INTERVAL)));
-        // After a screen setting changes here, the next ask is a few seconds off.
-        let soon = now.checked_sub(UX_INTERVAL - UX_AFTER_CHANGE);
-        assert!(!ux_due(true, soon));
-    }
-}

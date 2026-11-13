@@ -7,13 +7,15 @@
 //! shows from the second read after it: the first still gets the settings from
 //! before, as a real base station's first reply after a write may. With
 //! `--reported` the base station reports GG's defaults (the owner's settings since
-//! the captures) for everything its replies carry.
+//! the captures) for everything its replies carry; the home screen and the dim
+//! timeout only while `headset_extras` is on, as the daemon asks for them only then.
 
 use std::sync::Mutex;
 
 use gg_ipc::{
-    BluetoothCall, BluetoothLink, HeadsetChange, HeadsetControls, HeadsetGain, HeadsetPairing,
-    HeadsetPower, HeadsetState, LineOut, LineOutMix, Request, ResponseData,
+    BluetoothCall, BluetoothLink, Feature, HeadsetChange, HeadsetControls, HeadsetGain,
+    HeadsetPairing, HeadsetPower, HeadsetState, HomeScreen, LineOut, LineOutMix, Request,
+    ResponseData,
 };
 
 use crate::log::method_name;
@@ -62,7 +64,8 @@ fn headset_state(s: &Fake, controls: &HeadsetControls) -> HeadsetState {
     let mut state = s.looks.headset_state(listed, s.screen, controls);
     if state.connected {
         if reported() {
-            reported_defaults(&mut state.controls, state.power);
+            let extras = s.experimental.on(Feature::HeadsetExtras);
+            reported_defaults(&mut state.controls, state.power, extras);
         }
     } else {
         // As the daemon: with no base station, what was written still shows.
@@ -79,8 +82,9 @@ fn headset_state(s: &Fake, controls: &HeadsetControls) -> HeadsetState {
 }
 
 /// What a base station on GG's defaults reports, where nothing was set here. The
-/// home screen and the dim timeout aren't read back, so they stay unknown.
-fn reported_defaults(c: &mut HeadsetControls, power: HeadsetPower) {
+/// home screen and the dim timeout come from the `80` reply, read only with
+/// `headset_extras` on.
+fn reported_defaults(c: &mut HeadsetControls, power: HeadsetPower, extras: bool) {
     c.sidetone.get_or_insert(0);
     c.mic_volume.get_or_insert(10);
     c.eq_preset.get_or_insert(0);
@@ -100,6 +104,10 @@ fn reported_defaults(c: &mut HeadsetControls, power: HeadsetPower) {
         aux: 100,
         mic: 100,
     });
+    if extras {
+        c.home_screen.get_or_insert(HomeScreen::Detailed);
+        c.screen_dim_minutes.get_or_insert(1);
+    }
 }
 
 /// Echo a change into the fake's controls, as the real device would report it.
@@ -157,10 +165,15 @@ mod tests {
             gain: Some(HeadsetGain::High),
             ..HeadsetControls::default()
         };
-        reported_defaults(&mut c, HeadsetPower::Offline);
+        reported_defaults(&mut c, HeadsetPower::Offline, false);
         assert_eq!(c.gain, Some(HeadsetGain::High));
         assert_eq!(c.line_out, Some(LineOut::Speakers));
         assert_eq!(c.pairing, Some(HeadsetPairing::PairedOffline));
         assert_eq!((c.home_screen, c.screen_dim_minutes), (None, None));
+        reported_defaults(&mut c, HeadsetPower::Offline, true);
+        assert_eq!(
+            (c.home_screen, c.screen_dim_minutes),
+            (Some(HomeScreen::Detailed), Some(1))
+        );
     }
 }

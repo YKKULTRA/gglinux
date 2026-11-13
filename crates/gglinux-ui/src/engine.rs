@@ -718,7 +718,8 @@ mod tests {
         assert_eq!(dim_index(None), -1);
         assert_eq!(dim_index(Some(0)), 0);
         assert_eq!(dim_index(Some(30)), 5);
-        assert_eq!(dim_index(Some(60)), -1, "never captured, never offered");
+        assert_eq!(dim_index(Some(60)), 6);
+        assert_eq!(dim_index(Some(45)), -1);
     }
 
     #[test]

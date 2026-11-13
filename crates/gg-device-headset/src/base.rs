@@ -4,13 +4,15 @@
 //! the home screen, the screen's dim timeout), and the replies that report them.
 //!
 //! Every write here was seen going out from GG 123, both ways, in our captures
-//! `arctis-1` … `arctis-3` (2026-11-13, `GG-CAPTURES-2026-11-13.md`), and matches
-//! Arctis Sound Manager's device file (ea410e0, `settings` and `device_init`); the
-//! dim timeout only the captures name. GG sends each one alone: no save (`09`)
-//! follows it, so neither do we.
+//! `arctis-1` … `arctis-3` and `arctis-5` (60 min dim) of 2026-11-13
+//! (`GG-CAPTURES-2026-11-13.md`), and matches Arctis Sound Manager's device file
+//! (ea410e0, `settings` and `device_init`); the dim timeout only the captures name.
+//! GG sends each one alone: no save (`09`) follows it, so neither do we.
 //!
 //! Reply offsets count the report id as byte 0, as [`crate::proto`] does. They are
-//! Arctis Sound Manager's (`settings_readback`, `probe_queries`, `status`).
+//! Arctis Sound Manager's (`settings_readback`, `probe_queries`, `status`), checked
+//! against the `20`, `80` and `b0` replies GG got in `arctis-5` (headset on), whose
+//! values match the settings GG pushed right after.
 
 use anyhow::{bail, ensure, Result};
 
@@ -141,8 +143,7 @@ impl HomeScreen {
     }
 }
 
-/// How long the base station's screen stays bright before it dims. GG also lists
-/// 60 minutes, but that choice was never captured, so it isn't offered.
+/// How long the base station's screen stays bright before it dims.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DimTimeout {
     Never,
@@ -151,16 +152,19 @@ pub enum DimTimeout {
     Min10,
     Min15,
     Min30,
+    /// Captured in `arctis-5` (`83 06`).
+    Min60,
 }
 
 impl DimTimeout {
-    const ALL: [DimTimeout; 6] = [
+    const ALL: [DimTimeout; 7] = [
         DimTimeout::Never,
         DimTimeout::Min1,
         DimTimeout::Min5,
         DimTimeout::Min10,
         DimTimeout::Min15,
         DimTimeout::Min30,
+        DimTimeout::Min60,
     ];
 
     pub fn code(self) -> u8 {
@@ -171,6 +175,7 @@ impl DimTimeout {
             DimTimeout::Min10 => 3,
             DimTimeout::Min15 => 4,
             DimTimeout::Min30 => 5,
+            DimTimeout::Min60 => 6,
         }
     }
 
@@ -186,18 +191,15 @@ impl DimTimeout {
             DimTimeout::Min10 => 10,
             DimTimeout::Min15 => 15,
             DimTimeout::Min30 => 30,
+            DimTimeout::Min60 => 60,
         }
     }
 
     pub fn from_minutes(minutes: u16) -> Result<Self> {
         match Self::ALL.into_iter().find(|d| d.minutes() == minutes) {
             Some(dim) => Ok(dim),
-            None if minutes == 60 => bail!(
-                "a 60 min dim timeout isn't offered: GG's byte for it was never captured \
-                 (want 0 for never, 1, 5, 10, 15 or 30)"
-            ),
             None => bail!(
-                "unsupported dim timeout {minutes} min (want 0 for never, 1, 5, 10, 15 or 30)"
+                "unsupported dim timeout {minutes} min (want 0 for never, 1, 5, 10, 15, 30 or 60)"
             ),
         }
     }
@@ -368,8 +370,9 @@ mod ux_at {
 }
 
 /// A decoded `06 80` reply: the screen settings, per Arctis Sound Manager's
-/// `probe_queries.ux_settings`. **No capture of ours holds an `80` reply**, so none
-/// of these offsets has been checked against a value we wrote.
+/// `probe_queries.ux_settings`. GG's one read in `arctis-5`, `06 80 01 0a 01 00`,
+/// says dim after 1 min, brightness 10, home screen detailed: what GG pushed right
+/// after (`83 01`, `85 0a`, `89 00`). No capture shows a changed value coming back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UxSettings {
     pub dim_timeout: Option<DimTimeout>,
@@ -428,6 +431,7 @@ mod tests {
             (DimTimeout::Min10, 0x03),
             (DimTimeout::Min15, 0x04),
             (DimTimeout::Min30, 0x05),
+            (DimTimeout::Min60, 0x06),
         ];
         for (dim, code) in dims {
             assert_eq!(screen_dim_packet(dim), vec![0x83, code], "{dim:?}");
@@ -488,15 +492,16 @@ mod tests {
             (10, DimTimeout::Min10),
             (15, DimTimeout::Min15),
             (30, DimTimeout::Min30),
+            (60, DimTimeout::Min60),
         ] {
             assert_eq!(DimTimeout::from_minutes(minutes).unwrap(), dim);
             assert_eq!(dim.minutes(), minutes);
             assert_eq!(DimTimeout::from_code(dim.code()), Some(dim));
         }
-        let sixty = DimTimeout::from_minutes(60).unwrap_err().to_string();
-        assert!(sixty.contains("60"), "{sixty}");
-        assert!(DimTimeout::from_minutes(2).is_err());
-        assert_eq!(DimTimeout::from_code(0x06), None, "60 min: never captured");
+        let two = DimTimeout::from_minutes(2).unwrap_err().to_string();
+        assert!(two.contains("1, 5, 10, 15, 30 or 60"), "{two}");
+        assert!(DimTimeout::from_minutes(45).is_err());
+        assert_eq!(DimTimeout::from_code(0x07), None);
     }
 
     #[test]
@@ -538,26 +543,22 @@ mod tests {
         assert_eq!(Pairing::from_code(0), None);
     }
 
-    /// A whole `06 20` reply laid out as Arctis Sound Manager reads it, with GG's
-    /// defaults (the base station's settings since the captures) and its first nine
-    /// bytes as read on this unit on 2026-09-27: `06 20 00 06 01 00 00 14 14`.
+    /// The `06 20` reply GG got in arctis-5 (headset on), zero-padded to 64 bytes.
+    /// GG then pushed gain `01`, preset `00`, bands `14`, mic volume `0a`, sidetone
+    /// `00`, line out `01` and stream `64 00 64 64`: the same values.
     fn audio_reply() -> Vec<u8> {
         let mut r = vec![0u8; 64];
-        r[..9].copy_from_slice(&[0x06, 0x20, 0x00, 0x06, 0x01, 0x00, 0x00, 0x14, 0x14]);
-        r[9..17].fill(0x14);
-        r[0x11] = 0x0a; // mic volume 10
-        r[0x12] = 0x00; // sidetone off
-        r[0x13] = 0x01; // line out: speakers
-        r[0x16] = 0x64; // stream main
-        r[0x18] = 0x64; // stream aux
-        r[0x19] = 0x64; // stream mic
+        r[..26].copy_from_slice(&[
+            0x06, 0x20, 0x00, 0x03, 0x01, 0x00, 0x00, 0x14, 0x14, 0x14, 0x14, 0x14, 0x14, 0x14,
+            0x14, 0x14, 0x14, 0x0a, 0x00, 0x01, 0x64, 0x64, 0x64, 0x00, 0x64, 0x64,
+        ]);
         r
     }
 
     #[test]
-    fn the_audio_reply_decodes_at_arctis_sound_managers_offsets() {
+    fn the_captured_audio_reply_decodes_at_arctis_sound_managers_offsets() {
         let a = AudioSettings::decode(&audio_reply()).unwrap();
-        assert_eq!(a.volume, Some(6));
+        assert_eq!(a.volume, Some(3));
         assert_eq!(a.gain, Some(Gain::Low));
         assert_eq!(a.eq_preset, Some(0));
         assert_eq!(a.eq_bands, Some(vec![0.0; 10]));
@@ -639,15 +640,22 @@ mod tests {
         assert_eq!(AudioSettings::decode(&[0x06]), None);
     }
 
+    /// GG's read in arctis-5: dim after 1 min, brightness 10, home screen detailed,
+    /// as GG pushed right after (`83 01`, `85 0a`, `89 00`).
     #[test]
-    fn the_ux_reply_decodes_at_arctis_sound_managers_offsets() {
+    fn the_captured_ux_reply_decodes_at_arctis_sound_managers_offsets() {
         let mut r = vec![0u8; 64];
+        r[..6].copy_from_slice(&[0x06, 0x80, 0x01, 0x0a, 0x01, 0x00]);
+        let ux = UxSettings::decode(&r).unwrap();
+        assert_eq!(ux.dim_timeout, Some(DimTimeout::Min1));
+        assert_eq!(ux.brightness, Some(10));
+        assert_eq!(ux.home_screen, Some(HomeScreen::Detailed));
         r[..6].copy_from_slice(&[0x06, 0x80, 0x02, 0x0a, 0x03, 0x01]);
         let ux = UxSettings::decode(&r).unwrap();
         assert_eq!(ux.dim_timeout, Some(DimTimeout::Min5));
         assert_eq!(ux.brightness, Some(10));
         assert_eq!(ux.home_screen, Some(HomeScreen::Simple));
-        r[ux_at::DIM_TIMEOUT] = 0x06;
+        r[ux_at::DIM_TIMEOUT] = 0x07;
         r[ux_at::BRIGHTNESS] = 0;
         r[ux_at::HOME_SCREEN] = 9;
         let odd = UxSettings::decode(&r).unwrap();
