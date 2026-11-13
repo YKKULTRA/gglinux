@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 use gg_ipc::{
     BluetoothCall, BluetoothLink, HeadsetChange, HeadsetControls, HeadsetGain, HeadsetPairing,
     HeadsetPower, HeadsetState, HomeScreen, LineOut, LineOutMix, NoiseMode, RadioMode, Request,
+    SCREEN_DIM_MINUTES,
 };
 
 /// The EQ presets by name, in the base station's order (`4` is Custom).
@@ -100,7 +101,16 @@ fn change(setting: &str, values: &[&str]) -> Result<HeadsetChange> {
         "home-screen" => HeadsetChange::HomeScreen(
             [HomeScreen::Detailed, HomeScreen::Simple][pick(&["detailed", "simple"])?],
         ),
-        "screen-dim" => HeadsetChange::ScreenDimMinutes(minutes(value, &["never", "off"])?),
+        "screen-dim" => {
+            let m = minutes(value, &["never", "off"])?;
+            if !SCREEN_DIM_MINUTES.contains(&m) {
+                bail!(
+                    "the screen dims after never, 1, 5, 10, 15 or 30 minutes (GG's 60 was never \
+                     captured, so it isn't offered)"
+                );
+            }
+            HeadsetChange::ScreenDimMinutes(m)
+        }
         other => bail!(
             "unknown headset setting '{other}' (try: anc, transparency, sidetone, mic-volume, \
              mic-led, auto-off, radio, eq, eq-custom, bluetooth-at-power-on, bluetooth-call, gain, \
@@ -416,6 +426,8 @@ mod tests {
             "stream-mix 100,100,300",
             "line-out headphones",
             "screen-dim soon",
+            "screen-dim 60",
+            "screen-dim 2",
             "bluetooth-call maybe",
             "anc max",
             "eq custom",
