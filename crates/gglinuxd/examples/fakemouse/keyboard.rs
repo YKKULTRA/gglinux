@@ -20,8 +20,7 @@ pub fn handle(req: Request, s: &mut Fake) -> ResponseData {
             state: s.keyboard.clone(),
         },
         Request::SetLighting { lighting } => {
-            if let Err(message) = check_lighting(&lighting, &s.keyboard.lighting, &s.experimental)
-            {
+            if let Err(message) = check_lighting(&lighting, &s.keyboard.lighting, &s.experimental) {
                 return ResponseData::Error { message };
             }
             // Like a machine without the optional udev rule, so the UI's hint shows.

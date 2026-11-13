@@ -194,7 +194,11 @@ mod tests {
         let p = effects::positions(&US);
         let zones = [
             Zone::new("base", ZoneKeys::All, ZoneEffect::Static { color: BLUE }),
-            Zone::new("wasd", ZonePreset::Wasd.keys(), ZoneEffect::Static { color: RED }),
+            Zone::new(
+                "wasd",
+                ZonePreset::Wasd.keys(),
+                ZoneEffect::Static { color: RED },
+            ),
         ];
         let scene = Scene::new(&zones, &[], &p);
         assert_eq!(scene.color(0x1A, &at(0.0)), dev(RED), "W: the WASD zone");
@@ -204,7 +208,11 @@ mod tests {
         assert_eq!(scene.color(0x29, &at(0.0)), Rgb::default(), "in no zone");
         let swapped = [zones[1].clone(), zones[0].clone()];
         let scene = Scene::new(&swapped, &[], &p);
-        assert_eq!(scene.color(0x1A, &at(0.0)), dev(BLUE), "the order is the stack");
+        assert_eq!(
+            scene.color(0x1A, &at(0.0)),
+            dev(BLUE),
+            "the order is the stack"
+        );
     }
 
     #[test]
@@ -229,20 +237,32 @@ mod tests {
     #[test]
     fn a_wave_in_a_small_zone_runs_the_whole_rainbow_across_it() {
         let p = effects::positions(&US);
-        let wasd = Zone::new("w", ZonePreset::Wasd.keys(), ZoneEffect::Wave { period_s: 4.0 });
+        let wasd = Zone::new(
+            "w",
+            ZonePreset::Wasd.keys(),
+            ZoneEffect::Wave { period_s: 4.0 },
+        );
         let zones = [wasd];
         let scene = Scene::new(&zones, &[], &p);
         // A is the leftmost key of WASD, D the rightmost: the two ends of one rainbow.
         assert_eq!(scene.color(0x04, &at(0.0)), effects::hsv(0.0));
         assert_eq!(scene.color(0x07, &at(0.0)), effects::hsv(1.0));
         assert_ne!(scene.color(0x16, &at(0.0)), scene.color(0x04, &at(0.0)));
-        assert_ne!(scene.color(0x04, &at(1.0)), scene.color(0x04, &at(0.0)), "and it moves");
+        assert_ne!(
+            scene.color(0x04, &at(1.0)),
+            scene.color(0x04, &at(0.0)),
+            "and it moves"
+        );
     }
 
     #[test]
     fn the_one_zone_of_old_lighting_draws_exactly_what_the_effect_drew() {
         let p = effects::positions(&US);
-        let zones = [Zone::new("all", ZoneKeys::All, ZoneEffect::Wave { period_s: 4.0 })];
+        let zones = [Zone::new(
+            "all",
+            ZoneKeys::All,
+            ZoneEffect::Wave { period_s: 4.0 },
+        )];
         let scene = Scene::new(&zones, &[], &p);
         for &(code, ..) in US.iter() {
             let x = p[&code].x / WIDTH;
@@ -267,7 +287,11 @@ mod tests {
         ];
         let scene = Scene::new(&zones, &painted, &p);
         assert_eq!(scene.color(0x04, &at(0.0)), dev(GREEN));
-        assert_eq!(scene.color(0x05, &at(0.0)), Rgb::default(), "in the zone, unpainted");
+        assert_eq!(
+            scene.color(0x05, &at(0.0)),
+            Rgb::default(),
+            "in the zone, unpainted"
+        );
         assert_eq!(scene.color(0x06, &at(0.0)), dev(BLUE));
     }
 
@@ -297,9 +321,21 @@ mod tests {
             screen: &none,
         };
         let half = scene.color(0x1A, &with(&w));
-        assert_eq!((half.r, half.g, half.b), (128, 0, 128), "half faded over blue");
-        assert_eq!(scene.color(0x14, &with(&q)), dev(BLUE), "Q is in no reactive zone");
-        assert_eq!(scene.color(0x1A, &with(&[])), dev(BLUE), "no press: the base");
+        assert_eq!(
+            (half.r, half.g, half.b),
+            (128, 0, 128),
+            "half faded over blue"
+        );
+        assert_eq!(
+            scene.color(0x14, &with(&q)),
+            dev(BLUE),
+            "Q is in no reactive zone"
+        );
+        assert_eq!(
+            scene.color(0x1A, &with(&[])),
+            dev(BLUE),
+            "no press: the base"
+        );
     }
 
     #[test]
@@ -319,12 +355,20 @@ mod tests {
             screen: &screen,
         };
         assert_eq!(scene.color(0x04, &inputs), dev(RED));
-        assert_eq!(scene.color(0x05, &inputs), dev(BLUE), "a key without a colour");
+        assert_eq!(
+            scene.color(0x05, &inputs),
+            dev(BLUE),
+            "a key without a colour"
+        );
     }
 
     #[test]
     fn the_stack_says_what_it_needs() {
-        let still = [Zone::new("a", ZoneKeys::All, ZoneEffect::Static { color: RED })];
+        let still = [Zone::new(
+            "a",
+            ZoneKeys::All,
+            ZoneEffect::Static { color: RED },
+        )];
         assert!(!animated(&still) && !reactive(&still) && !listens(&still) && !reflects(&still));
         let press = ZoneEffect::Reactive {
             mode: ReactiveMode::Ripple,
@@ -332,7 +376,11 @@ mod tests {
             duration_s: 2.0,
         };
         let busy = [
-            Zone::new("a", ZoneKeys::All, ZoneEffect::Visualizer { sensitivity: 1.0 }),
+            Zone::new(
+                "a",
+                ZoneKeys::All,
+                ZoneEffect::Visualizer { sensitivity: 1.0 },
+            ),
             Zone::new("b", ZoneKeys::All, press),
             Zone::new("c", ZoneKeys::All, ZoneEffect::Reflect),
         ];

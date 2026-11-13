@@ -2724,12 +2724,13 @@ mod tests {
             serde_json::from_str(&serde_json::to_string_pretty(&l).unwrap()).unwrap();
         let mut was: serde_json::Value = serde_json::from_str(SAVED_BEFORE_ZONES).unwrap();
         was["idle"] = serde_json::to_value(IdleLighting::default()).unwrap();
-        assert_eq!(again, was, "nothing lost, nothing but the idle defaults added");
-
-        let wave = SAVED_BEFORE_ZONES.replace(
-            r#""kind": "static""#,
-            r#""kind": "wave", "period_s": 3.0"#,
+        assert_eq!(
+            again, was,
+            "nothing lost, nothing but the idle defaults added"
         );
+
+        let wave =
+            SAVED_BEFORE_ZONES.replace(r#""kind": "static""#, r#""kind": "wave", "period_s": 3.0"#);
         let l: Lighting = serde_json::from_str(&wave).unwrap();
         assert_eq!(
             l.stack()[0].effect,
@@ -2772,7 +2773,11 @@ mod tests {
         ));
         let zones = l.zones.as_ref().unwrap();
         assert_eq!(zones.len(), 2);
-        assert_eq!(zones[0].effect, ZoneEffect::PerKey, "the base stays at the bottom");
+        assert_eq!(
+            zones[0].effect,
+            ZoneEffect::PerKey,
+            "the base stays at the bottom"
+        );
         assert!(l.validate().is_ok());
         let json = serde_json::to_value(&l).unwrap();
         assert_eq!(json["zones"][1]["keys"]["kind"], "keys");
@@ -2783,7 +2788,10 @@ mod tests {
         assert_eq!(back, l);
         let mut dark = Lighting::default();
         dark.zones_mut().clear();
-        assert!(dark.stack().is_empty(), "an empty stack stays empty: every key dark");
+        assert!(
+            dark.stack().is_empty(),
+            "an empty stack stays empty: every key dark"
+        );
     }
 
     #[test]
@@ -2807,7 +2815,10 @@ mod tests {
             "zone 'a' has no keys"
         );
         let slow = zone("a", ZoneEffect::Wave { period_s: 0.1 });
-        assert!(with(vec![slow]).validate().unwrap_err().starts_with("zone 'a': effect period"));
+        assert!(with(vec![slow])
+            .validate()
+            .unwrap_err()
+            .starts_with("zone 'a': effect period"));
         let quick = ZoneEffect::Reactive {
             mode: ReactiveMode::Fade,
             color: red,
@@ -2860,7 +2871,11 @@ mod tests {
         assert!(!l.uses_reflect());
         l.reflect_on();
         let names: Vec<String> = l.stack().iter().map(|z| z.name.clone()).collect();
-        assert_eq!(names, ["all", "Screen", "WASD"], "WASD still shows over the screen");
+        assert_eq!(
+            names,
+            ["all", "Screen", "WASD"],
+            "WASD still shows over the screen"
+        );
         assert!(l.uses_reflect());
         l.reflect_on();
         assert_eq!(l.stack().len(), 3, "once");
@@ -2879,7 +2894,11 @@ mod tests {
             ..Lighting::default()
         };
         fresh.reflect_on();
-        assert_eq!(fresh.stack()[0].name, "Screen", "an empty stack: at the bottom");
+        assert_eq!(
+            fresh.stack()[0].name,
+            "Screen",
+            "an empty stack: at the bottom"
+        );
     }
 
     #[test]

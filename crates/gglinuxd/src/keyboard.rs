@@ -739,9 +739,8 @@ fn sync_mic(state: &mut State) {
 
 /// Look at the screen exactly while a Reflect zone is drawn, and only with its gate on.
 fn sync_reflect(state: &mut State) {
-    let drawn = state.device.is_some()
-        && state.lighting.enabled
-        && zones::reflects(&active_stack(state));
+    let drawn =
+        state.device.is_some() && state.lighting.enabled && zones::reflects(&active_stack(state));
     let wanted = match state.experimental.refusal(Feature::LightingReflect) {
         _ if !drawn => Ok(false),
         Some(why) => Err(why),
@@ -1091,7 +1090,8 @@ fn render(state: &mut State) {
             bands: &bands,
             screen: state.reflect.colors(),
         };
-        let lit = |code| effects::frame_color(&state.lighting, &scene, &state.positions, code, &inputs);
+        let lit =
+            |code| effects::frame_color(&state.lighting, &scene, &state.positions, code, &inputs);
         if state.taken { Ok(()) } else { device.init() }.and_then(|()| {
             device.show(
                 |code| match mic_color(mic, code).or_else(|| overlay_color(layers, code)) {
@@ -1840,7 +1840,15 @@ mod tests {
   "brightness": 60
 }"#;
         std::fs::write(d.0.join("lighting.json"), old).unwrap();
-        let fresh = || State::new(None, &d.0, mpsc::channel().0, Vec::new(), Experimental::default());
+        let fresh = || {
+            State::new(
+                None,
+                &d.0,
+                mpsc::channel().0,
+                Vec::new(),
+                Experimental::default(),
+            )
+        };
         let mut state = fresh();
         assert_eq!(state.lighting.brightness, 60);
         let wave = gg_ipc::ZoneEffect::Wave { period_s: 3.0 };
@@ -1873,7 +1881,12 @@ mod tests {
         let d = Scratch::new("keyboard-idle");
         let fake = FakeTransport::new();
         let (event_tx, _) = broadcast::channel(8);
-        let kb = spawn_fake(fake.keyboard(), d.0.clone(), event_tx, Experimental::default());
+        let kb = spawn_fake(
+            fake.keyboard(),
+            d.0.clone(),
+            event_tx,
+            Experimental::default(),
+        );
         let mut lit = Lighting {
             enabled: true,
             ..Lighting::default()
@@ -1902,13 +1915,21 @@ mod tests {
             .await
             .unwrap();
         assert!(kb.send(Command::GetState).await.unwrap().lighting_idle);
-        assert_eq!(last_color(&fake, 0x04), Rgb::default(), "the idle scene: off");
+        assert_eq!(
+            last_color(&fake, 0x04),
+            Rgb::default(),
+            "the idle scene: off"
+        );
 
         kb.send(|reply| Command::SetAway { away: false, reply })
             .await
             .unwrap();
         assert!(!kb.send(Command::GetState).await.unwrap().lighting_idle);
-        assert_eq!(last_color(&fake, 0x04), RED, "back: the usual zones at once");
+        assert_eq!(
+            last_color(&fake, 0x04),
+            RED,
+            "back: the usual zones at once"
+        );
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 
@@ -1916,7 +1937,13 @@ mod tests {
     fn reflect_is_refused_while_its_gate_is_off_and_draws_the_screen_once_it_is_on() {
         let d = Scratch::new("keyboard-reflect");
         let (event_tx, _) = broadcast::channel(8);
-        let mut state = State::new(None, &d.0, mpsc::channel().0, Vec::new(), Experimental::default());
+        let mut state = State::new(
+            None,
+            &d.0,
+            mpsc::channel().0,
+            Vec::new(),
+            Experimental::default(),
+        );
         let fake = FakeTransport::new();
         connected(&mut state, fake.keyboard());
         state.reflect = reflect::tests::on_fake(vec![reflect::tests::solid(RED)]).0;
@@ -1957,7 +1984,11 @@ mod tests {
             render(state);
             last_color(&fake, 0x04)
         };
-        assert_eq!(frame(&mut state), BLUE, "no screen frame yet: the base shows");
+        assert_eq!(
+            frame(&mut state),
+            BLUE,
+            "no screen frame yet: the base shows"
+        );
         assert_eq!(snapshot(&state).reflect, gg_ipc::ReflectStatus::Running);
         std::thread::sleep(Duration::from_millis(70)); // past the frame cap
         assert_eq!(frame(&mut state), RED, "the screen's colour");
@@ -1967,7 +1998,11 @@ mod tests {
             &mut state,
             &event_tx,
         );
-        assert_eq!(frame(&mut state), BLUE, "the gate went off: see-through again");
+        assert_eq!(
+            frame(&mut state),
+            BLUE,
+            "the gate went off: see-through again"
+        );
         assert!(matches!(
             snapshot(&state).reflect,
             gg_ipc::ReflectStatus::Stopped { .. }

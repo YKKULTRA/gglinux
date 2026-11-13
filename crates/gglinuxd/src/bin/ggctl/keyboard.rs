@@ -4,8 +4,8 @@
 
 use anyhow::{bail, Context, Result};
 use gg_ipc::{
-    IdleLighting, KeyboardState, Lighting, MacroBinding, ReactiveMode, ReflectStatus, Request,
-    Rgb, Switches, Zone, ZoneEffect, ZoneKeys, ZonePreset,
+    KeyboardState, Lighting, MacroBinding, ReactiveMode, ReflectStatus, Request, Rgb, Switches,
+    Zone, ZoneEffect, ZoneKeys, ZonePreset,
 };
 
 use crate::Action;
@@ -266,11 +266,12 @@ fn print_lighting(state: &KeyboardState) {
     print_zones(&l.stack(), "           ");
     let i = &l.idle;
     if i.enabled {
-        let now = if state.lighting_idle { " (drawn now)" } else { "" };
-        println!(
-            "idle:      {} min after you're away{now}:",
-            i.after_minutes
-        );
+        let now = if state.lighting_idle {
+            " (drawn now)"
+        } else {
+            ""
+        };
+        println!("idle:      {} min after you're away{now}:", i.after_minutes);
         print_zones(&i.zones, "           ");
     } else {
         println!("idle:      off");
@@ -529,6 +530,7 @@ pub fn lighting_action(rest: &[&str]) -> Result<Action> {
 mod lighting_tests {
     use super::*;
     use crate::{args, parse, sends};
+    use gg_ipc::IdleLighting;
 
     fn edits(line: &str) -> LightingEdit {
         match parse(&args(line)).unwrap() {
@@ -608,7 +610,10 @@ mod lighting_tests {
                 minutes: Some(10)
             }
         );
-        assert_eq!(edits("lighting idle scene off"), LightingEdit::IdleScene(None));
+        assert_eq!(
+            edits("lighting idle scene off"),
+            LightingEdit::IdleScene(None)
+        );
         assert_eq!(
             edits("lighting idle scene breathing 0000ff 6"),
             LightingEdit::IdleScene(Some(ZoneEffect::Breathing {
@@ -640,15 +645,22 @@ mod lighting_tests {
             .apply(&mut l)
             .unwrap();
         assert!(l.enabled, "adding a zone turns gglinux's lighting on");
-        let names = |l: &Lighting| -> Vec<String> { l.stack().iter().map(|z| z.name.clone()).collect() };
-        assert_eq!(names(&l), ["all", "WASD"], "the old effect stays at the bottom");
+        let names =
+            |l: &Lighting| -> Vec<String> { l.stack().iter().map(|z| z.name.clone()).collect() };
+        assert_eq!(
+            names(&l),
+            ["all", "WASD"],
+            "the old effect stays at the bottom"
+        );
         let again = edits("lighting zones add WASD arrows wave").apply(&mut l);
         assert!(again.unwrap_err().to_string().contains("already"));
         edits("lighting zones down WASD").apply(&mut l).unwrap();
         assert_eq!(names(&l), ["WASD", "all"]);
         let low = edits("lighting zones down WASD").apply(&mut l);
         assert!(low.unwrap_err().to_string().contains("bottom"));
-        edits("lighting zones keys WASD arrows").apply(&mut l).unwrap();
+        edits("lighting zones keys WASD arrows")
+            .apply(&mut l)
+            .unwrap();
         assert_eq!(l.stack()[0].keys, ZonePreset::Arrows.keys());
         let missing = edits("lighting zones rm nope").apply(&mut l).unwrap_err();
         assert_eq!(

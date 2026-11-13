@@ -107,7 +107,10 @@ impl KeyboardForm {
         if self.light_selected.is_empty() {
             return None;
         }
-        let all = kb.layout.iter().all(|k| self.light_selected.contains(&k.code));
+        let all = kb
+            .layout
+            .iter()
+            .all(|k| self.light_selected.contains(&k.code));
         Some(if all {
             ZoneKeys::All
         } else {
@@ -466,7 +469,9 @@ fn show_idle_and_reflect(g: &KeyboardUi, s: &State, kb: &KeyboardState) {
         .iter()
         .any(|z| z.effect == ZoneEffect::Reflect);
     g.set_reflect(reflect);
-    let allowed = s.experimental.is_some_and(|e| e.on(Feature::LightingReflect));
+    let allowed = s
+        .experimental
+        .is_some_and(|e| e.on(Feature::LightingReflect));
     g.set_reflect_allowed(allowed);
     g.set_reflect_refusal(
         Experimental::default()
@@ -855,10 +860,7 @@ fn bind_zone_list(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
             let keys = f
                 .picked_keys(kb)
                 .ok_or("Pick keys on the keyboard picture first.")?;
-            let z = l
-                .zones_mut()
-                .get_mut(f.zone)
-                .ok_or("No zone is picked.")?;
+            let z = l.zones_mut().get_mut(f.zone).ok_or("No zone is picked.")?;
             z.keys = keys;
             Ok(())
         },
@@ -1073,7 +1075,11 @@ pub(crate) mod tests {
             w.clone(),
         ];
         let applied = f.painted_lighting(&l);
-        assert_eq!(applied.stack()[0].effect, ZoneEffect::PerKey, "the every-key zone");
+        assert_eq!(
+            applied.stack()[0].effect,
+            ZoneEffect::PerKey,
+            "the every-key zone"
+        );
         assert_eq!(applied.stack()[1], w, "the others as they were");
         *l.zones_mut() = vec![w];
         let applied = f.painted_lighting(&l);

@@ -393,7 +393,15 @@ pub(crate) mod tests {
         for i in 0..3 {
             r.sample(&US, t0 + SAMPLE_EVERY * i);
         }
-        assert_eq!(r.colors()[&0x04], Rgb { r: 128, g: 0, b: 128 }, "a cut, smoothed");
+        assert_eq!(
+            r.colors()[&0x04],
+            Rgb {
+                r: 128,
+                g: 0,
+                b: 128
+            },
+            "a cut, smoothed"
+        );
         for i in 3..20 {
             r.sample(&US, t0 + SAMPLE_EVERY * i);
         }
@@ -420,7 +428,12 @@ pub(crate) mod tests {
         r.sample(&US, t0 + SAMPLE_EVERY);
         assert!(!r.colors().is_empty());
         r.sync(Err("gate off".into()), t0);
-        assert_eq!(r.status(), ReflectStatus::Stopped { why: "gate off".into() });
+        assert_eq!(
+            r.status(),
+            ReflectStatus::Stopped {
+                why: "gate off".into()
+            }
+        );
         assert!(r.colors().is_empty());
         r.sample(&US, t0 + SAMPLE_EVERY * 2);
         assert_eq!(asked.load(Ordering::SeqCst), 2, "not asked any more");

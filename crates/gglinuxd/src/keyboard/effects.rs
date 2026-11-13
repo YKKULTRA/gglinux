@@ -51,10 +51,11 @@ pub fn positions(board: &[Key]) -> HashMap<u8, Pos> {
 }
 
 /// The colour of the LED with HID code `code`, `t` seconds into the effect,
-/// with recent key presses drawn over it.
+/// with recent key presses drawn over it: one key outside a frame, for tests.
 ///
 /// `t` is `f64` because the daemon runs for weeks: as `f32`, seconds since
 /// start lose frame precision after about six days.
+#[cfg(test)]
 pub fn color(
     lighting: &Lighting,
     positions: &HashMap<u8, Pos>,
@@ -518,8 +519,15 @@ mod tests {
             gg_ipc::ZonePreset::Wasd.keys(),
             gg_ipc::ZoneEffect::Static { color: RED },
         ));
-        assert_eq!(color(&l, &p, 0x1A, 0.0, &[], &[]), Rgb { r: 128, g: 0, b: 0 });
-        assert_eq!(color(&l, &p, 0x29, 0.0, &[], &[]), Rgb::default(), "the old static base");
+        assert_eq!(
+            color(&l, &p, 0x1A, 0.0, &[], &[]),
+            Rgb { r: 128, g: 0, b: 0 }
+        );
+        assert_eq!(
+            color(&l, &p, 0x29, 0.0, &[], &[]),
+            Rgb::default(),
+            "the old static base"
+        );
         let hits = [Hit { code: 0x1A, t: 0.0 }];
         assert_eq!(
             color(&l, &p, 0x1A, 0.5, &hits, &[]),
