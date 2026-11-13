@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gg_device_keyboard::layout::{self, Key, US};
+use gg_device_keyboard::layout::{Key, US};
 use gg_device_keyboard::proto::{self, ANALOG_KEYS};
 use gg_device_keyboard::{Keyboard, SentSwitches, SwitchReports};
 use gg_ipc::{Switches, TapMode};
@@ -88,7 +88,7 @@ impl SwitchesState {
     /// isn't known. The worker passes the board; tests use this.
     #[cfg(test)]
     pub fn sync(&mut self, device: Option<&Keyboard>) {
-        self.sync_board(device, layout::for_region(None));
+        self.sync_board(device, gg_device_keyboard::layout::for_region(None));
     }
 
     /// Send the switch settings to a keyboard that hasn't had them since it connected or
@@ -298,6 +298,7 @@ fn device_tap_mode(mode: TapMode) -> gg_device_keyboard::TapMode {
 
 #[cfg(test)]
 mod tests {
+    use gg_device_keyboard::layout;
     use super::*;
     use crate::scratch::Scratch;
     use gg_device_keyboard::testing::{FakeTransport, Kind};
