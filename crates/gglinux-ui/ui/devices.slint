@@ -237,7 +237,25 @@ export global HeadsetUi {
     in property <[float]> bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     in property <bool> busy;
     in property <string> error;
+    /// What the base station reports of Bluetooth and the 2.4 GHz link; "" not known.
+    in property <string> bt-now;
+    in property <string> link;
+    /// The base station's own settings: `headset_extras` is on, or why not.
+    in property <bool> extras-gated;
+    in property <string> extras-refusal;
+    /// Indexes into the choices below; -1 for not known.
+    in property <int> bt-at-power-on: -1;
+    in property <int> bt-call: -1;
+    in property <int> gain: -1;
+    in property <int> line-out: -1;
+    /// Stream mix levels, 0–100; -1 for not known.
+    in property <int> mix-main: -1;
+    in property <int> mix-aux: -1;
+    in property <int> mix-mic: -1;
+    in property <int> home-screen: -1;
+    in property <int> dim: -1;
     out property <[string]> auto-off-names: ["Never", "1 min", "5 min", "10 min", "15 min", "30 min", "60 min"];
+    out property <[string]> dim-names: ["Never", "1 min", "5 min", "10 min", "15 min", "30 min", "60 min"];
     out property <[string]> band-names: ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
     callback set-protect(bool);
     callback set-lit-seconds(int);
@@ -252,6 +270,35 @@ export global HeadsetUi {
     callback pick-preset(int);
     callback set-band(int, float);
     callback apply-bands();
+    callback set-bt-at-power-on(bool);
+    callback set-bt-call(int);
+    callback set-gain(int);
+    callback set-line-out(int);
+    /// One stream-mix level: 0 main, 1 aux, 2 mic.
+    callback set-mix(int, int);
+    callback set-home-screen(int);
+    callback set-dim(int);
+}
+
+/// One stream-mix level, while the line out carries the stream.
+component MixRow {
+    in property <string> label;
+    in property <int> level;
+    in property <bool> enabled;
+    callback released(int);
+    VerticalLayout {
+        Row {
+            label: root.label;
+            AccentSlider {
+                minimum: 0;
+                maximum: 100;
+                value: max(0, root.level);
+                enabled: root.enabled && root.level >= 0;
+                released(v) => { root.released(v); }
+            }
+            Unit { text: root.level < 0 ? "unknown" : root.level + "%"; }
+        }
+    }
 }
 
 export component HeadsetPanel inherits Card {
@@ -334,9 +381,9 @@ export component HeadsetPanel inherits Card {
             AccentSlider { minimum: 1; maximum: 10; value: HeadsetUi.mic-led < 0 ? 10 : HeadsetUi.mic-led; enabled: !HeadsetUi.busy; released(v) => { HeadsetUi.set-mic-led(v); } }
             Unit { text: HeadsetUi.mic-led < 0 ? "–" : HeadsetUi.mic-led; }
         }
-        Hint { text: "The headset can't report sidetone or mic volume, so those show what was last set here (\"unknown\" until then)."; }
+        Hint { text: "Sidetone and mic volume show what the base station reports, or what was last set here until it does."; }
         Divider { }
-        Head { text: "POWER & RADIO"; }
+        Head { text: "POWER & RADIO"; state: HeadsetUi.link; }
         Row {
             label: "Auto-off";
             Pick {
@@ -385,7 +432,74 @@ export component HeadsetPanel inherits Card {
                 Button { text: "Apply custom EQ"; enabled: !HeadsetUi.busy; clicked => { HeadsetUi.apply-bands(); } }
             }
         }
-        Hint { text: "The base station can't report its EQ, so the preset shows what was last set here."; }
+        Hint { text: "The preset shows what the base station reports, or what was last set here until it does."; }
+        Divider { }
+        VerticalLayout {
+            spacing: 0;
+            // Greyed with the refusal while `headset_extras` is off. Segmented has no
+            // look of its own for that, so those are dimmed here.
+            Shown { shown: !HeadsetUi.extras-gated; gap: 10px; Hint { text: HeadsetUi.extras-refusal; color: Theme.accent; } }
+            VerticalLayout {
+                spacing: 10px;
+                Head { text: "BLUETOOTH"; state: HeadsetUi.bt-now; }
+                Toggle {
+                    text: "Turn Bluetooth on when the headset powers on";
+                    checked: HeadsetUi.bt-at-power-on == 1;
+                    enabled: !HeadsetUi.busy && HeadsetUi.extras-gated;
+                    toggled(v) => { HeadsetUi.set-bt-at-power-on(v); }
+                }
+                Row {
+                    label: "During a call";
+                    Segmented { options: ["Nothing", "Game -12 dB", "Mute game"]; current: HeadsetUi.bt-call; enabled: !HeadsetUi.busy && HeadsetUi.extras-gated; opacity: HeadsetUi.extras-gated ? 1 : 0.45; picked(i) => { HeadsetUi.set-bt-call(i); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Divider { }
+                Head { text: "OUTPUT"; }
+                Row {
+                    label: "Gain";
+                    Segmented { options: ["Low", "High"]; current: HeadsetUi.gain; enabled: !HeadsetUi.busy && HeadsetUi.extras-gated; opacity: HeadsetUi.extras-gated ? 1 : 0.45; picked(i) => { HeadsetUi.set-gain(i); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Row {
+                    label: "Line out";
+                    Segmented { options: ["Speakers", "Stream"]; current: HeadsetUi.line-out; enabled: !HeadsetUi.busy && HeadsetUi.extras-gated; opacity: HeadsetUi.extras-gated ? 1 : 0.45; picked(i) => { HeadsetUi.set-line-out(i); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if HeadsetUi.line-out == 1 : VerticalLayout {
+                    spacing: 6px;
+                    MixRow { label: "Stream: main"; level: HeadsetUi.mix-main; enabled: !HeadsetUi.busy && HeadsetUi.extras-gated; released(v) => { HeadsetUi.set-mix(0, v); } }
+                    MixRow { label: "Stream: aux"; level: HeadsetUi.mix-aux; enabled: !HeadsetUi.busy && HeadsetUi.extras-gated; released(v) => { HeadsetUi.set-mix(1, v); } }
+                    MixRow { label: "Stream: mic"; level: HeadsetUi.mix-mic; enabled: !HeadsetUi.busy && HeadsetUi.extras-gated; released(v) => { HeadsetUi.set-mix(2, v); } }
+                }
+                Divider { }
+                Head { text: "BASE-STATION SCREEN"; }
+                Row {
+                    label: "Home screen";
+                    Segmented { options: ["Detailed", "Simple"]; current: HeadsetUi.home-screen; enabled: !HeadsetUi.busy && HeadsetUi.extras-gated; opacity: HeadsetUi.extras-gated ? 1 : 0.45; picked(i) => { HeadsetUi.set-home-screen(i); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Row {
+                    label: "Dim after";
+                    Pick {
+                        width: 160px;
+                        // "unknown" is a choice only until the base station says, or one is set here.
+                        model: HeadsetUi.dim < 0 ? ["unknown", "Never", "1 min", "5 min", "10 min", "15 min", "30 min", "60 min"] : HeadsetUi.dim-names;
+                        index: HeadsetUi.dim < 0 ? 0 : HeadsetUi.dim;
+                        enabled: !HeadsetUi.busy && HeadsetUi.extras-gated;
+                        busy: HeadsetUi.busy;
+                        picked(i) => {
+                            if HeadsetUi.dim < 0 {
+                                if i > 0 { HeadsetUi.set-dim(i - 1); }
+                            } else {
+                                HeadsetUi.set-dim(i);
+                            }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Hint { text: "gglinux asks the base station for its home screen and dim time every 30 seconds while these settings are on."; }
+            }
+        }
     } }
     ErrorLine { text: HeadsetUi.error; }
 }

@@ -1,18 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The Engine page: the device list and the headset. The mouse panel is in
 //! [`crate::mouse`], the keyboard card in [`crate::keyboard`].
+//!
+//! The headset card's base-station settings (Bluetooth, output, the base
+//! station's screen) are greyed while `headset_extras` is off. A change there
+//! shows what was sent until the daemon shows it too ([`Pending`]): the base
+//! station may still report the old value on the first read after a write.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use gg_ipc::{
-    DeviceInfo, HeadsetChange, HeadsetControls, HeadsetPower, NoiseMode, RadioMode, Request,
+    BluetoothCall, BluetoothLink, DeviceInfo, Experimental, Feature, HeadsetChange,
+    HeadsetControls, HeadsetGain, HeadsetPairing, HeadsetPower, HomeScreen, LineOut, LineOutMix,
+    NoiseMode, RadioMode, Request, ResponseData, SCREEN_DIM_MINUTES,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-use crate::client::{Client, State, TIMEOUT};
-use crate::{act, sync_rows, AppWindow, Device, EngineUi, Forms, HeadsetUi, Iface};
+use crate::client::{self, Client, State, TIMEOUT};
+use crate::experimental::{panel_error, read_back, Pending};
+use crate::{act, sync_rows, with_forms, AppWindow, Device, EngineUi, Forms, HeadsetUi, Iface};
 
 pub const RIVAL3: u16 = 0x1872;
 pub const NOVA_PRO: u16 = 0x12e0;
@@ -127,13 +135,70 @@ pub fn bind_devices(ui: &AppWindow, client: &Client) {
 
 // --- the headset -------------------------------------------------------------
 
-/// The custom EQ curve being edited, seeded once from what was last applied;
-/// gone with the daemon, like the mouse's form ([`crate::mouse::MouseForm`]).
+/// The base station's own settings, the ones `headset_extras` gates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Extras {
+    pub bluetooth_at_power_on: Option<bool>,
+    pub bluetooth_call: Option<BluetoothCall>,
+    pub gain: Option<HeadsetGain>,
+    pub line_out: Option<LineOut>,
+    pub line_out_mix: Option<LineOutMix>,
+    pub home_screen: Option<HomeScreen>,
+    pub screen_dim_minutes: Option<u16>,
+}
+
+impl Extras {
+    pub fn of(c: &HeadsetControls) -> Extras {
+        Extras {
+            bluetooth_at_power_on: c.bluetooth_at_power_on,
+            bluetooth_call: c.bluetooth_call,
+            gain: c.gain,
+            line_out: c.line_out,
+            line_out_mix: c.line_out_mix,
+            home_screen: c.home_screen,
+            screen_dim_minutes: c.screen_dim_minutes,
+        }
+    }
+
+    /// These settings once `change` is made.
+    pub fn with(mut self, change: &HeadsetChange) -> Extras {
+        match change {
+            HeadsetChange::BluetoothAtPowerOn(on) => self.bluetooth_at_power_on = Some(*on),
+            HeadsetChange::BluetoothCall(call) => self.bluetooth_call = Some(*call),
+            HeadsetChange::Gain(gain) => self.gain = Some(*gain),
+            HeadsetChange::LineOut(line_out) => self.line_out = Some(*line_out),
+            HeadsetChange::LineOutMix(mix) => self.line_out_mix = Some(*mix),
+            HeadsetChange::HomeScreen(home) => self.home_screen = Some(*home),
+            HeadsetChange::ScreenDimMinutes(m) => self.screen_dim_minutes = Some(*m),
+            _ => {}
+        }
+        self
+    }
+
+    /// The stream mix with one level changed (0 main, 1 aux, 2 mic); `None`
+    /// while the mix isn't known, so a guess for the other two is never sent.
+    pub fn mix_with(&self, which: i32, level: i32) -> Option<HeadsetChange> {
+        let mut mix = self.line_out_mix?;
+        let level = level.clamp(0, i32::from(gg_ipc::LINE_OUT_LEVEL_MAX)) as u8;
+        match which {
+            0 => mix.main = level,
+            1 => mix.aux = level,
+            2 => mix.mic = level,
+            _ => return None,
+        }
+        Some(HeadsetChange::LineOutMix(mix))
+    }
+}
+
+/// The custom EQ curve being edited, seeded once from what was last applied, and
+/// the base-station settings sent and not shown by the daemon yet; gone with the
+/// daemon, like the mouse's form ([`crate::mouse::MouseForm`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadsetForm {
     pub bands: Vec<f32>,
     pub editing_custom: bool,
     seeded: bool,
+    pub extras: Pending<Extras>,
 }
 
 impl Default for HeadsetForm {
@@ -142,6 +207,7 @@ impl Default for HeadsetForm {
             bands: vec![0.0; EQ_BANDS],
             editing_custom: false,
             seeded: false,
+            extras: Pending::default(),
         }
     }
 }
@@ -184,6 +250,74 @@ fn auto_off_index(minutes: Option<u16>) -> i32 {
     minutes
         .and_then(|m| AUTO_OFF.iter().position(|a| *a == m))
         .map_or(-1, |i| i as i32)
+}
+
+/// The dim-timeout choice shown (`HeadsetUi.dim-names`), or -1 for not known.
+fn dim_index(minutes: Option<u16>) -> i32 {
+    minutes
+        .and_then(|m| SCREEN_DIM_MINUTES.iter().position(|d| *d == m))
+        .map_or(-1, |i| i as i32)
+}
+
+/// What Bluetooth is doing now, as the base station says; "" while not known.
+pub fn bluetooth_now(c: &HeadsetControls) -> &'static str {
+    match (c.bluetooth_on, c.bluetooth_link) {
+        (_, Some(BluetoothLink::Connected)) => "a phone is connected",
+        (_, Some(BluetoothLink::NotConnected)) => "on, nothing connected",
+        (Some(false), _) | (_, Some(BluetoothLink::Off)) => "Bluetooth off",
+        (Some(true), None) => "Bluetooth on",
+        (None, None) => "",
+    }
+}
+
+/// The 2.4 GHz link to the headset, as the base station says; "" while not known.
+pub fn link_now(pairing: Option<HeadsetPairing>) -> &'static str {
+    match pairing {
+        Some(HeadsetPairing::Connected) => "headset linked",
+        Some(HeadsetPairing::PairedOffline) => "paired, headset off or away",
+        Some(HeadsetPairing::NotPaired) => "headset not paired",
+        None => "",
+    }
+}
+
+/// An optional setting as the index of its choice, -1 for not known.
+fn index<T>(value: Option<T>, of: impl Fn(T) -> i32) -> i32 {
+    value.map_or(-1, of)
+}
+
+fn show_extras(ui: &AppWindow, s: &State, x: &Extras) {
+    let g = ui.global::<HeadsetUi>();
+    let gated = s.experimental.is_some_and(|e| e.on(Feature::HeadsetExtras));
+    g.set_extras_gated(gated);
+    g.set_extras_refusal(
+        Experimental::default()
+            .refusal(Feature::HeadsetExtras)
+            .unwrap_or_default()
+            .into(),
+    );
+    g.set_bt_at_power_on(index(x.bluetooth_at_power_on, i32::from));
+    g.set_bt_call(index(x.bluetooth_call, |c| match c {
+        BluetoothCall::Nothing => 0,
+        BluetoothCall::LowerGame => 1,
+        BluetoothCall::MuteGame => 2,
+    }));
+    g.set_gain(index(x.gain, |v| match v {
+        HeadsetGain::Low => 0,
+        HeadsetGain::High => 1,
+    }));
+    g.set_line_out(index(x.line_out, |v| match v {
+        LineOut::Speakers => 0,
+        LineOut::Stream => 1,
+    }));
+    let mix = x.line_out_mix;
+    g.set_mix_main(index(mix, |m| i32::from(m.main)));
+    g.set_mix_aux(index(mix, |m| i32::from(m.aux)));
+    g.set_mix_mic(index(mix, |m| i32::from(m.mic)));
+    g.set_home_screen(index(x.home_screen, |v| match v {
+        HomeScreen::Detailed => 0,
+        HomeScreen::Simple => 1,
+    }));
+    g.set_dim(dim_index(x.screen_dim_minutes));
 }
 
 fn show_headset_form(ui: &AppWindow, f: &HeadsetForm) {
@@ -237,9 +371,124 @@ pub fn show_headset(ui: &AppWindow, s: &State, form: &RefCell<HeadsetForm>) {
         RadioMode::Range => 1,
     }));
     g.set_eq_preset(c.eq_preset.map_or(-1, i32::from));
+    g.set_bt_now(bluetooth_now(c).into());
+    g.set_link(link_now(c.pairing).into());
+    let extras = form.borrow_mut().extras.show(&Extras::of(c));
+    show_extras(ui, s, &extras);
+}
+
+/// Send one base-station setting: shown at once, then read back until the
+/// daemon shows it too (twice at most), as the base station may answer the first
+/// read after a write with the old value.
+fn send_extra(ui: &AppWindow, client: &Client, change: HeadsetChange) {
+    let Some(h) = client.state().headset else {
+        return;
+    };
+    let sent = with_forms(|f| {
+        let mut form = f.headset.borrow_mut();
+        let sent = form.extras.show(&Extras::of(&h.controls)).with(&change);
+        form.extras.sent(sent);
+        sent
+    });
+    let g = ui.global::<HeadsetUi>();
+    g.set_busy(true);
+    g.set_error(SharedString::new());
+    with_forms(|f| show_headset(ui, &client.state(), &f.headset));
+    let weak = ui.as_weak();
+    let reader = client.clone();
+    client.command(Request::SetHeadset { change }, TIMEOUT, move |result| {
+        let read = result.is_ok();
+        client::runtime().spawn(async move {
+            if read {
+                read_back(
+                    &reader,
+                    || Request::GetHeadsetState,
+                    |a| match a {
+                        ResponseData::Headset { state } => Some(Extras::of(&state.controls)),
+                        _ => None,
+                    },
+                    &sent,
+                )
+                .await;
+            }
+            let error = result.err().map(|e| panel_error(&e)).unwrap_or_default();
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                with_forms(|f| f.headset.borrow_mut().extras.settle());
+                let g = ui.global::<HeadsetUi>();
+                g.set_busy(false);
+                g.set_error(error);
+                crate::refresh(&ui);
+            });
+        });
+    });
+}
+
+/// The extras' callbacks: each sends its change through [`send_extra`].
+fn bind_extras(ui: &AppWindow, client: &Client) {
+    let g = ui.global::<HeadsetUi>();
+    let extra = |make: fn(i32) -> Option<HeadsetChange>| {
+        let weak = ui.as_weak();
+        let client = client.clone();
+        move |v: i32| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(change) = make(v) {
+                send_extra(&ui, &client, change);
+            }
+        }
+    };
+    let power_on = extra(|v| Some(HeadsetChange::BluetoothAtPowerOn(v != 0)));
+    g.on_set_bt_at_power_on(move |on| power_on(i32::from(on)));
+    g.on_set_bt_call(extra(|i| {
+        [
+            BluetoothCall::Nothing,
+            BluetoothCall::LowerGame,
+            BluetoothCall::MuteGame,
+        ]
+        .get(i as usize)
+        .map(|c| HeadsetChange::BluetoothCall(*c))
+    }));
+    g.on_set_gain(extra(|i| {
+        Some(HeadsetChange::Gain(if i == 0 {
+            HeadsetGain::Low
+        } else {
+            HeadsetGain::High
+        }))
+    }));
+    g.on_set_line_out(extra(|i| {
+        Some(HeadsetChange::LineOut(if i == 0 {
+            LineOut::Speakers
+        } else {
+            LineOut::Stream
+        }))
+    }));
+    g.on_set_home_screen(extra(|i| {
+        Some(HeadsetChange::HomeScreen(if i == 0 {
+            HomeScreen::Detailed
+        } else {
+            HomeScreen::Simple
+        }))
+    }));
+    g.on_set_dim(extra(|i| {
+        SCREEN_DIM_MINUTES
+            .get(i as usize)
+            .map(|m| HeadsetChange::ScreenDimMinutes(*m))
+    }));
+    let weak = ui.as_weak();
+    let client = client.clone();
+    g.on_set_mix(move |which, level| {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(h) = client.state().headset else {
+            return;
+        };
+        let shown = with_forms(|f| f.headset.borrow_mut().extras.show(&Extras::of(&h.controls)));
+        if let Some(change) = shown.mix_with(which, level) {
+            send_extra(&ui, &client, change);
+        }
+    });
 }
 
 pub fn bind_headset(ui: &AppWindow, client: &Client, form: Rc<RefCell<HeadsetForm>>) {
+    bind_extras(ui, client);
     let g = ui.global::<HeadsetUi>();
     let mark = |ui: &AppWindow, busy: bool, error: SharedString| {
         let g = ui.global::<HeadsetUi>();
@@ -385,6 +634,15 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
         "headset.set-radio" => h.invoke_set_radio(n),
         "headset.pick-preset" => h.invoke_pick_preset(n),
         "headset.apply-bands" => h.invoke_apply_bands(),
+        "headset.set-bt-at-power-on" => h.invoke_set_bt_at_power_on(n != 0),
+        "headset.set-bt-call" => h.invoke_set_bt_call(n),
+        "headset.set-gain" => h.invoke_set_gain(n),
+        "headset.set-line-out" => h.invoke_set_line_out(n),
+        "headset.set-mix-main" => h.invoke_set_mix(0, n),
+        "headset.set-mix-aux" => h.invoke_set_mix(1, n),
+        "headset.set-mix-mic" => h.invoke_set_mix(2, n),
+        "headset.set-home-screen" => h.invoke_set_home_screen(n),
+        "headset.set-dim" => h.invoke_set_dim(n),
         _ => return false,
     }
     true
@@ -453,6 +711,91 @@ mod tests {
         assert_eq!(auto_off_index(Some(0)), 0);
         assert_eq!(auto_off_index(Some(30)), 5);
         assert_eq!(auto_off_index(Some(7)), -1);
+    }
+
+    #[test]
+    fn the_dim_timeout_shows_only_the_captured_choices() {
+        assert_eq!(dim_index(None), -1);
+        assert_eq!(dim_index(Some(0)), 0);
+        assert_eq!(dim_index(Some(30)), 5);
+        assert_eq!(dim_index(Some(60)), 6);
+        assert_eq!(dim_index(Some(45)), -1);
+    }
+
+    #[test]
+    fn a_base_station_change_shows_until_the_daemon_shows_it() {
+        let daemon = HeadsetControls {
+            gain: Some(HeadsetGain::Low),
+            line_out: Some(LineOut::Speakers),
+            ..HeadsetControls::default()
+        };
+        let mut f = HeadsetForm::default();
+        let now = f.extras.show(&Extras::of(&daemon));
+        let sent = now.with(&HeadsetChange::Gain(HeadsetGain::High));
+        f.extras.sent(sent);
+        // The first read after the write may still say low.
+        assert_eq!(
+            f.extras.show(&Extras::of(&daemon)).gain,
+            Some(HeadsetGain::High)
+        );
+        let caught_up = HeadsetControls {
+            gain: Some(HeadsetGain::High),
+            ..daemon.clone()
+        };
+        assert_eq!(f.extras.show(&Extras::of(&caught_up)), sent);
+        assert!(!f.extras.waiting());
+        f.follow(None);
+        assert_eq!(f, HeadsetForm::default(), "gone with the daemon");
+    }
+
+    #[test]
+    fn a_stream_level_is_sent_only_with_the_whole_mix_known() {
+        let unknown = Extras::default();
+        assert_eq!(unknown.mix_with(0, 50), None, "no guess for aux and mic");
+        let known = Extras {
+            line_out_mix: Some(LineOutMix {
+                main: 100,
+                aux: 80,
+                mic: 60,
+            }),
+            ..Extras::default()
+        };
+        assert_eq!(
+            known.mix_with(0, 50),
+            Some(HeadsetChange::LineOutMix(LineOutMix {
+                main: 50,
+                aux: 80,
+                mic: 60
+            }))
+        );
+        assert_eq!(
+            known.mix_with(2, 140),
+            Some(HeadsetChange::LineOutMix(LineOutMix {
+                main: 100,
+                aux: 80,
+                mic: 100
+            }))
+        );
+        assert_eq!(known.mix_with(3, 10), None);
+    }
+
+    #[test]
+    fn bluetooth_and_the_headset_link_read_plainly() {
+        let mut c = HeadsetControls::default();
+        assert_eq!(bluetooth_now(&c), "");
+        c.bluetooth_on = Some(false);
+        c.bluetooth_link = Some(BluetoothLink::Off);
+        assert_eq!(bluetooth_now(&c), "Bluetooth off");
+        c.bluetooth_link = Some(BluetoothLink::NotConnected);
+        assert_eq!(bluetooth_now(&c), "on, nothing connected");
+        c.bluetooth_link = Some(BluetoothLink::Connected);
+        assert_eq!(bluetooth_now(&c), "a phone is connected");
+        assert_eq!(link_now(None), "");
+        assert_eq!(
+            link_now(Some(HeadsetPairing::PairedOffline)),
+            "paired, headset off or away"
+        );
+        assert_eq!(link_now(Some(HeadsetPairing::Connected)), "headset linked");
     }
 
     #[test]
