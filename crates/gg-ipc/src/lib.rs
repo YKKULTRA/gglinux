@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 mod actions;
 mod bindings;
 mod experimental;
+mod lighting;
 mod macros;
 pub mod mouse_keys;
 mod onboard;
@@ -17,6 +18,7 @@ mod onboard;
 pub use actions::{validate as validate_actions, Action, ActionBinding, ActionsState};
 pub use bindings::{Bindings, BindingsState, KeyAction, KeyBinding, Layer};
 pub use experimental::{Experimental, Feature};
+pub use lighting::{IdleLighting, ReflectStatus, Zone, ZoneEffect, ZoneKeys, ZonePreset};
 pub use macros::{Macro, MacroBinding, MacroEvent, MacroLibrary, MacroMode, MacrosState};
 pub use onboard::{check_slot, OnboardSlot, OnboardSource, OnboardState, SLOTS as ONBOARD_SLOTS};
 
@@ -746,6 +748,14 @@ pub struct Lighting {
     /// Absent in files saved before it existed.
     #[serde(default)]
     pub mic_mute: MicMuteLight,
+    /// The zone stack, bottom first. `None` in lighting saved before zones existed, which
+    /// [`Lighting::stack`] reads as `effect` over every key; `effect` counts only then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zones: Option<Vec<Zone>>,
+    /// The scene drawn while nobody is at the computer. Absent in files saved before it
+    /// existed.
+    #[serde(default)]
+    pub idle: IdleLighting,
 }
 
 impl Lighting {
@@ -783,7 +793,7 @@ impl Lighting {
         if !(d.is_finite() && Reactive::DURATION_S.contains(&d)) {
             return Err(format!("reactive duration {d} s out of range (0.1..=3)"));
         }
-        Ok(())
+        self.validate_zones()
     }
 }
 
@@ -796,6 +806,8 @@ impl Default for Lighting {
             brightness: 100,
             reactive: Reactive::default(),
             mic_mute: MicMuteLight::default(),
+            zones: None,
+            idle: IdleLighting::default(),
         }
     }
 }
@@ -1208,6 +1220,12 @@ pub struct KeyboardState {
     pub layout: Vec<KeyInfo>,
     pub lighting: Lighting,
     pub reactive: ReactiveStatus,
+    /// The idle scene is drawn now, as nobody has been at the computer for a while.
+    #[serde(default)]
+    pub lighting_idle: bool,
+    /// Whether Reflect is looking at the screen.
+    #[serde(default)]
+    pub reflect: ReflectStatus,
     /// The keys with adjustable switches, by HID code.
     #[serde(default)]
     pub analog_keys: Vec<u8>,
@@ -2649,6 +2667,256 @@ mod tests {
         );
         let old = r#"{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}"#;
         assert_eq!(serde_json::from_str::<Lighting>(old).unwrap().mic_mute, d);
+    }
+
+    /// `lighting.json` as the daemon saved it before zones: `serde_json::to_string_pretty`
+    /// of a `Lighting` with every field it had then.
+    const SAVED_BEFORE_ZONES: &str = r#"{
+  "enabled": true,
+  "effect": {
+    "kind": "static"
+  },
+  "keys": [
+    {
+      "code": 26,
+      "color": {
+        "r": 255,
+        "g": 0,
+        "b": 0
+      }
+    }
+  ],
+  "brightness": 80,
+  "reactive": {
+    "enabled": true,
+    "mode": "ripple",
+    "color": {
+      "r": 0,
+      "g": 0,
+      "b": 255
+    },
+    "duration_s": 0.6
+  },
+  "mic_mute": {
+    "enabled": false,
+    "key": 251,
+    "color": {
+      "r": 255,
+      "g": 0,
+      "b": 0
+    }
+  }
+}"#;
+
+    #[test]
+    fn lighting_saved_before_zones_reads_as_one_zone_over_every_key_and_saves_back_the_same() {
+        let l: Lighting = serde_json::from_str(SAVED_BEFORE_ZONES).unwrap();
+        assert_eq!(l.zones, None);
+        assert_eq!(
+            l.stack().into_owned(),
+            vec![Zone::new("all", ZoneKeys::All, ZoneEffect::PerKey)],
+            "the static colours, from the key list as before"
+        );
+        assert_eq!(l.keys.len(), 1);
+        assert_eq!(l.idle, IdleLighting::default());
+        assert!(!l.idle.enabled, "no idle scene until asked");
+        let again: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string_pretty(&l).unwrap()).unwrap();
+        let mut was: serde_json::Value = serde_json::from_str(SAVED_BEFORE_ZONES).unwrap();
+        was["idle"] = serde_json::to_value(IdleLighting::default()).unwrap();
+        assert_eq!(
+            again, was,
+            "nothing lost, nothing but the idle defaults added"
+        );
+
+        let wave =
+            SAVED_BEFORE_ZONES.replace(r#""kind": "static""#, r#""kind": "wave", "period_s": 3.0"#);
+        let l: Lighting = serde_json::from_str(&wave).unwrap();
+        assert_eq!(
+            l.stack()[0].effect,
+            ZoneEffect::Wave { period_s: 3.0 },
+            "every effect comes across"
+        );
+        for (old, new) in [
+            (
+                Effect::Breathing {
+                    color: Rgb { r: 1, g: 2, b: 3 },
+                    period_s: 2.0,
+                },
+                ZoneEffect::Breathing {
+                    color: Rgb { r: 1, g: 2, b: 3 },
+                    period_s: 2.0,
+                },
+            ),
+            (
+                Effect::Spectrum { period_s: 6.0 },
+                ZoneEffect::Spectrum { period_s: 6.0 },
+            ),
+            (
+                Effect::Visualizer { sensitivity: 1.5 },
+                ZoneEffect::Visualizer { sensitivity: 1.5 },
+            ),
+        ] {
+            assert_eq!(ZoneEffect::from(old), new);
+        }
+    }
+
+    #[test]
+    fn editing_the_zones_writes_the_old_effect_out_first() {
+        let mut l: Lighting = serde_json::from_str(SAVED_BEFORE_ZONES).unwrap();
+        l.zones_mut().push(Zone::new(
+            "WASD",
+            ZonePreset::Wasd.keys(),
+            ZoneEffect::Static {
+                color: Rgb { r: 0, g: 255, b: 0 },
+            },
+        ));
+        let zones = l.zones.as_ref().unwrap();
+        assert_eq!(zones.len(), 2);
+        assert_eq!(
+            zones[0].effect,
+            ZoneEffect::PerKey,
+            "the base stays at the bottom"
+        );
+        assert!(l.validate().is_ok());
+        let json = serde_json::to_value(&l).unwrap();
+        assert_eq!(json["zones"][1]["keys"]["kind"], "keys");
+        assert_eq!(json["zones"][1]["keys"]["codes"][0], 0x1A);
+        assert_eq!(json["zones"][1]["effect"]["kind"], "static");
+        assert_eq!(json["zones"][0]["keys"]["kind"], "all");
+        let back: Lighting = serde_json::from_value(json).unwrap();
+        assert_eq!(back, l);
+        let mut dark = Lighting::default();
+        dark.zones_mut().clear();
+        assert!(
+            dark.stack().is_empty(),
+            "an empty stack stays empty: every key dark"
+        );
+    }
+
+    #[test]
+    fn zones_are_validated_with_messages_for_the_user() {
+        let zone = |name: &str, effect| Zone::new(name, ZonePreset::Arrows.keys(), effect);
+        let with = |zones: Vec<Zone>| Lighting {
+            zones: Some(zones),
+            ..Lighting::default()
+        };
+        let red = Rgb { r: 255, g: 0, b: 0 };
+        let ok = ZoneEffect::Static { color: red };
+        assert!(with(vec![zone("a", ok), zone("b", ok)]).validate().is_ok());
+        let two = with(vec![zone("a", ok), zone("a", ok)]).validate();
+        assert_eq!(two.unwrap_err(), "two zones are called 'a'");
+        assert!(with(vec![zone("", ok)]).validate().is_err());
+        assert!(with(vec![zone(" a", ok)]).validate().is_err());
+        assert!(with(vec![zone(&"x".repeat(33), ok)]).validate().is_err());
+        let no_keys = Zone::new("a", ZoneKeys::Keys { codes: vec![] }, ok);
+        assert_eq!(
+            with(vec![no_keys]).validate().unwrap_err(),
+            "zone 'a' has no keys"
+        );
+        let slow = zone("a", ZoneEffect::Wave { period_s: 0.1 });
+        assert!(with(vec![slow])
+            .validate()
+            .unwrap_err()
+            .starts_with("zone 'a': effect period"));
+        let quick = ZoneEffect::Reactive {
+            mode: ReactiveMode::Fade,
+            color: red,
+            duration_s: 5.0,
+        };
+        assert!(with(vec![zone("a", quick)]).validate().is_err());
+        let loud = ZoneEffect::Visualizer { sensitivity: 9.0 };
+        assert!(with(vec![zone("a", loud)]).validate().is_err());
+        let many = (0..17).map(|i| zone(&i.to_string(), ok)).collect();
+        assert!(with(many).validate().is_err(), "at most 16");
+
+        let mut l = Lighting::default();
+        l.idle.after_minutes = 121;
+        assert!(l.validate().unwrap_err().contains("idle time"));
+        l.idle.after_minutes = 0;
+        l.idle.zones = vec![zone("a", ok), zone("a", ok)];
+        assert!(l.validate().is_err(), "the idle scene's zones too");
+    }
+
+    #[test]
+    fn the_presets_name_their_keys_and_every_key_is_all() {
+        assert_eq!(
+            ZonePreset::Wasd.keys(),
+            ZoneKeys::Keys {
+                codes: vec![0x1A, 0x04, 0x16, 0x07]
+            }
+        );
+        assert_eq!(ZonePreset::All.keys(), ZoneKeys::All);
+        let f = ZonePreset::FRow.keys();
+        assert!(f.contains(0x3A) && f.contains(0x45) && !f.contains(0x46));
+        let n = ZonePreset::NumberRow.keys();
+        assert!(n.contains(0x1E) && n.contains(0x27) && !n.contains(0x35));
+        assert!(ZonePreset::Arrows.keys().contains(0x52));
+        assert!(ZoneKeys::All.contains(0xFB));
+        for p in ZonePreset::ALL {
+            assert_eq!(ZonePreset::from_key(p.key()), Some(p));
+        }
+    }
+
+    #[test]
+    fn reflect_goes_over_the_last_every_key_zone_and_comes_out_again() {
+        let mut l = Lighting::default();
+        l.zones_mut().push(Zone::new(
+            "WASD",
+            ZonePreset::Wasd.keys(),
+            ZoneEffect::Static {
+                color: Rgb { r: 0, g: 255, b: 0 },
+            },
+        ));
+        assert!(!l.uses_reflect());
+        l.reflect_on();
+        let names: Vec<String> = l.stack().iter().map(|z| z.name.clone()).collect();
+        assert_eq!(
+            names,
+            ["all", "Screen", "WASD"],
+            "WASD still shows over the screen"
+        );
+        assert!(l.uses_reflect());
+        l.reflect_on();
+        assert_eq!(l.stack().len(), 3, "once");
+        assert_eq!(
+            serde_json::to_value(l.stack()[1].effect).unwrap()["kind"],
+            "reflect"
+        );
+        l.reflect_off();
+        assert_eq!(l.stack().len(), 2);
+        assert!(!l.uses_reflect());
+        l.idle.zones = vec![Zone::new("s", ZoneKeys::All, ZoneEffect::Reflect)];
+        assert!(l.uses_reflect(), "the idle scene's count too");
+
+        let mut fresh = Lighting {
+            zones: Some(vec![]),
+            ..Lighting::default()
+        };
+        fresh.reflect_on();
+        assert_eq!(
+            fresh.stack()[0].name,
+            "Screen",
+            "an empty stack: at the bottom"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_state_tells_the_idle_scene_and_reflect() {
+        let json = r#"{"connected":true,"layout":[],"lighting":{"enabled":false,"effect":{"kind":"static"},"keys":[],"brightness":100},"reactive":"off"}"#;
+        let state: KeyboardState = serde_json::from_str(json).unwrap();
+        assert!(!state.lighting_idle);
+        assert_eq!(state.reflect, ReflectStatus::Off);
+        let stopped = ReflectStatus::Stopped {
+            why: ReflectStatus::NOT_BUILT.into(),
+        };
+        let v = serde_json::to_value(&stopped).unwrap();
+        assert_eq!(v["state"], "stopped");
+        assert!(v["why"].as_str().unwrap().contains("isn't built"));
+        assert_eq!(
+            serde_json::to_value(ReflectStatus::Running).unwrap(),
+            serde_json::json!({"state": "running"})
+        );
     }
 
     #[test]

@@ -228,7 +228,8 @@ mod tests {
         assert!(sent.on(Feature::MousePower), "Feature::ALL[4]");
         assert!(sent.on(Feature::KeyboardOnboard), "the others as they were");
         assert_eq!(Feature::ALL.iter().filter(|&&f| sent.on(f)).count(), 2);
-        assert_eq!(toggled(now, 10, true), None, "no eleventh feature");
+        let past = Feature::ALL.len();
+        assert_eq!(toggled(now, past, true), None, "no feature past the last");
     }
 
     #[test]

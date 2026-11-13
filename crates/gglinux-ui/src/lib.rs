@@ -204,6 +204,7 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
             mouse::show_mouse(ui, s, &forms.mouse);
             engine::show_headset(ui, s, &forms.headset);
             // Panels whose controls are greyed while their gate is off.
+            keyboard::show(ui, s, &forms);
             bindings::show(ui, s);
             switches::show(ui, s, &forms);
             onboard::show(ui, s);
