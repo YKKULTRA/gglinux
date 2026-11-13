@@ -98,6 +98,12 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 
 ---
 
+### Rival: more from GG 123 (2026-11-13)
+
+Wheel bindings `1a <up action> 00 00 00 00 <down action> …` then `09` on Save (Scroll Up = Button 4: `1a 04 00 00 00 00
+32`; back: `1a 31 … 32`), actions as in the button table `19`. A macro on a button sends nothing but `09`: GG plays mouse
+macros on the PC. No pairing or lift-off control in GG for this mouse.
+
 ## 2. Arctis Nova Pro Wireless — headset + base station (GameDAC Gen 2) — `1038:12e0`
 
 **Status: best-documented SteelSeries device on Linux.** One vendor HID protocol on **iface 4**
@@ -190,6 +196,16 @@ Reuse: `Sapd/HeadsetControl` `lib/devices/steelseries_arctis_nova_pro_wireless.h
 `Dymstro/nova-chatmix-linux` `nova-chatmix.py` + udev/systemd units (0BSD, copy freely).
 
 ---
+
+### Captured from GG 123 (2026-11-13), base station `12e0`, headset off
+
+Our captures `arctis-1` … `arctis-3`; writes are `06 <op> <args>` on interface 4. They match Arctis Sound Manager
+(ea410e0): gain High `27 02` / Low `27 01`; Bluetooth on at power-up `b2 01`/`00`; Bluetooth call lower 12 dB `b3 01`,
+mute game `b3 02`, nothing `b3 00`; home screen Simple `89 01` / Detailed `89 00`; line-out Streaming `43 02` /
+Speakers `43 01`; stream mix `47 <main> 00 <aux> <mic>` (0–100). New: **OLED dim timeout `83 <n>`**: Off `00`, 1 min
+`01`, 5 `02`, 10 `03`, 15 `04`, 30 `05` (60 presumably `06`). GG's connect push sends `c1 05 · 89 00 · c3 00 · 39 00 ·
+bf 0a · 43 01 · 83 01 · b2 00 · 47 64 00 64 64 · 85 0a · 37 0a · 27 01 · b3 00 · 2e 00 · 33 14×10` (no ANC write). GG
+shows no idle brightness, USB source or pairing control for this model.
 
 ## 3. Apex Pro TKL Gen 3 — keyboard — `1038:1642`
 
@@ -412,6 +428,18 @@ On his keyboard (2026-11-13): the firmware key order of every per-key table in a
 Control's `deviceKeyIndexToHID` (pinned `Key.swift`), which the images' own normal layers confirm; the 91
 bindable keys are exactly `bindings::KEYS`; a bindings read (`B6`) needs ~13 ms before its answer is
 there (read at once, the Fn layer's read still returned the normal layer's answer).
+
+### 3f. More from GG 123 (2026-11-13 evening, lab VM), firmware 1.19.7
+
+Source for everything here: our captures `apex-10` … `apex-22` (notes: `~/projects/gg-m11/captures/GG-CAPTURES-2026-11-13.md`).
+
+- **GG sends only the table that changed.** Actuation of all keys: only `38 61 44 00` (1.5 mm `1e 1b`, 1.8 mm `28 25`,
+  the same curve as ours). Rapid Trigger on/off: only `38 62`. Never the sensitivity table or the Rapid Tap reports
+  with them. It changes only the 61 keys a US board has; the 7 others (`32 64 87 88 89 8a 8b`) stay at `2f 2a`, mode `00`.
+- **Keyboard macros live in the slot image.** At offset 2704, back to back: `77 <mode> <count u16 LE> 01 01 0f 00`,
+  then `count` 4-byte events: key `02 <usage> 01 <1 down / 0 up>`, delay `04 00 <ms u16 LE>`, mouse button
+  `00 <button> 00 <1/0>`. Mode `01` Play Once, `03` Repeat While Pressed. The key's normal-layer block is
+  `71 00 00 <start u16 LE, in 4-byte words>`. Nothing goes out live: GG writes macros (and dual bindings) only with SAVE.
 
 ### What gglinux sends this keyboard: the allowlist
 
