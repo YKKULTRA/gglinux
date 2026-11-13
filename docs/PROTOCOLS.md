@@ -393,7 +393,9 @@ come as input reports on endpoint `0x82`.
 
 - A deep-press binding (`36 02`) is kept only on a key that already has a second point. Written before the point, the
   keyboard drops it without an error (read back empty 5 times of 5; point first, kept 4 of 4). So gglinux sends the
-  points, then the deep layer, and writes the deep layer again after every points table.
+  points, then the deep layer, and writes the deep layer again after every points table. Written 0 ms after the
+  points table the binding was still dropped now and then; 2 ms and more after it, kept every time (gglinux waits
+  20 ms).
 - With W at 3.0 mm and W → x: a gentle press types `w`, a full press `wxw` (the key's own action comes back as it
   rises past the point again).
 - In RAM no table takes a point away: not `00 00` (which leaves a key as it is), not GG's `FF FF` for that key, not

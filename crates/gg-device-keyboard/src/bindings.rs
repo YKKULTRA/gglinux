@@ -92,6 +92,11 @@ const READ_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
 const READ_SETTLE: std::time::Duration = std::time::Duration::from_millis(13);
 /// How often a read is asked in all while the read slot still holds an earlier answer.
 const READ_TRIES: usize = 4;
+/// How long the keyboard gets after a second actuation table before the next report. On
+/// the owner's keyboard (2026-11-13) a deep-press binding written straight after the table
+/// was dropped now and then, 2 ms and more after it every time. GG 123 leaves about 15 ms
+/// between its reports.
+const POINTS_SETTLE: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// What a stock keyboard's Fn layer holds, as Apex Control read it: F9–F12, Left GUI, O,
 /// I, T and Q run the keyboard's own shortcuts (brightness, media, the screen menu). For
@@ -595,7 +600,9 @@ impl Keyboard {
         second_of: impl Fn(u8) -> Option<u8>,
         reset: impl Fn(u8) -> bool,
     ) -> Result<()> {
-        self.feature(&second_actuation_table(second_of, reset))
+        self.feature(&second_actuation_table(second_of, reset))?;
+        std::thread::sleep(POINTS_SETTLE);
+        Ok(())
     }
 }
 
