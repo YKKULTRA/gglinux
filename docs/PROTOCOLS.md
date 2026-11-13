@@ -78,7 +78,10 @@ to queries are 64-byte input reports, first byte at index 0.
 **Pacing (found on hardware, 2026-11-13):** a command sent straight after another makes the mouse drop
 the first. A setting followed at once by the save `09` was lost every time (DPI, polling rate and the sleep
 timer alike; the mouse kept reporting its old value), 5 ms apart it was kept. GG leaves 30–40 ms between
-its commands; gglinux now keeps 35 ms (`COMMAND_PACE`). `2B` on its own takes effect at once, without `09`.
+its commands; gglinux now keeps 35 ms (`COMMAND_PACE`). A sleep timer sent a few ms after another command's
+`09` was lost as well, so after a save gglinux waits 500 ms (`SAVE_PACE`, a guess: GG never sent anything
+within 5 s of a save). `2B` on its own takes effect at once, without `09`: a 60 s timer sent to a mouse that
+had lain still for minutes put it to sleep on the spot, after which it answers no query until it's moved.
 
 A mouse that isn't answering reads as all zeros, which would decode as 1000 Hz (`97` → `00`) and
 High-Efficiency Mode (`AE` → `00 00`). gglinux believes those two only next to an `AC` answer with a

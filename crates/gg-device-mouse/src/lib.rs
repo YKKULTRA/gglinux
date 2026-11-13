@@ -14,7 +14,7 @@
 //! # Ok(()) }
 //! ```
 
-use std::cell::Cell;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -49,18 +49,34 @@ const MAX_DRAIN_REPORTS: usize = 16;
 /// 40 ms between its commands, and so do we.
 pub const COMMAND_PACE: Duration = Duration::from_millis(35);
 
-/// How long to wait before the next command, the last one having gone out at `last`.
-fn pace(last: Option<Instant>, now: Instant) -> Duration {
-    last.map_or(Duration::ZERO, |last| {
-        COMMAND_PACE.saturating_sub(now.saturating_duration_since(last))
+/// The least time between a save (`09`) and the next command. A sleep timer sent a few
+/// milliseconds after another command's save was lost too (same day), so the mouse seems
+/// to take nothing while it writes its memory. How long that lasts isn't measured yet; in
+/// our captures GG never sent anything within 5 s of a save. Half a second is a guess on
+/// the safe side.
+pub const SAVE_PACE: Duration = Duration::from_millis(500);
+
+/// When the last command went out, and which it was. For the whole process, not per
+/// [`Mouse`]: the daemon opens the mouse afresh for each request, and two requests in a
+/// row must keep their distance as well.
+static LAST_COMMAND: Mutex<Option<(Instant, u8)>> = Mutex::new(None);
+
+/// How long to wait before the next command, the last one (`command`) having gone out at
+/// `at`.
+fn pace(last: Option<(Instant, u8)>, now: Instant) -> Duration {
+    last.map_or(Duration::ZERO, |(at, command)| {
+        let gap = if command == proto::CMD_SAVE {
+            SAVE_PACE
+        } else {
+            COMMAND_PACE
+        };
+        gap.saturating_sub(now.saturating_duration_since(at))
     })
 }
 
 /// An open handle to the mouse's control interface.
 pub struct Mouse {
     device: HidDevice,
-    /// When the last command went out, to keep [`COMMAND_PACE`].
-    last_command: Cell<Option<Instant>>,
 }
 
 impl Mouse {
@@ -89,10 +105,7 @@ impl Mouse {
             )
         })?;
         debug!(path = %path.to_string_lossy(), "opened mouse control interface");
-        Ok(Self {
-            device,
-            last_command: Cell::new(None),
-        })
+        Ok(Self { device })
     }
 
     /// Send one vendor command.
@@ -110,9 +123,12 @@ impl Mouse {
         );
         let mut buf = [0u8; 1 + REPORT_SIZE];
         buf[1..=payload.len()].copy_from_slice(payload);
-        std::thread::sleep(pace(self.last_command.get(), Instant::now()));
+        // Held across the wait and the write: commands leave one at a time, paced.
+        let mut last = LAST_COMMAND.lock().unwrap_or_else(|e| e.into_inner());
+        std::thread::sleep(pace(*last, Instant::now()));
         let sent = self.device.write(&buf);
-        self.last_command.set(Some(Instant::now()));
+        *last = Some((Instant::now(), payload[0]));
+        drop(last);
         sent.with_context(|| format!("writing command 0x{:02X}", payload[0]))?;
         Ok(())
     }
@@ -259,16 +275,23 @@ mod tests {
     #[test]
     fn commands_keep_their_distance() {
         let now = Instant::now();
+        let ago = |ms| now.checked_sub(Duration::from_millis(ms)).unwrap();
+        let dpi = proto::CMD_SENSITIVITY;
         assert_eq!(pace(None, now), Duration::ZERO, "the first goes at once");
-        assert_eq!(
-            pace(Some(now), now),
-            COMMAND_PACE,
-            "straight after: the whole pace"
-        );
-        let ten_ms_ago = now.checked_sub(Duration::from_millis(10)).unwrap();
-        assert_eq!(pace(Some(ten_ms_ago), now), Duration::from_millis(25));
-        let long_ago = now.checked_sub(Duration::from_secs(1)).unwrap();
-        assert_eq!(pace(Some(long_ago), now), Duration::ZERO);
+        assert_eq!(pace(Some((now, dpi)), now), COMMAND_PACE);
+        assert_eq!(pace(Some((ago(10), dpi)), now), Duration::from_millis(25));
+        assert_eq!(pace(Some((ago(1000), dpi)), now), Duration::ZERO);
         assert!(COMMAND_PACE >= Duration::from_millis(30), "GG's own pacing");
+        // After a save the mouse is given longer: it takes nothing while it writes.
+        assert_eq!(pace(Some((now, proto::CMD_SAVE)), now), SAVE_PACE);
+        assert_eq!(
+            pace(Some((ago(100), proto::CMD_SAVE)), now),
+            SAVE_PACE - Duration::from_millis(100)
+        );
+        assert_eq!(
+            pace(Some((ago(1000), proto::CMD_SAVE)), now),
+            Duration::ZERO
+        );
+        assert!(SAVE_PACE > COMMAND_PACE);
     }
 }
