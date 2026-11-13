@@ -12,9 +12,12 @@
 //! never written over. Every layer write is read back, and written again up to three
 //! times in all if the keyboard didn't keep it (the owner's keyboard drops one now and
 //! then); one it never keeps is reported and not taken as written, so the next change
-//! writes it again. After an onboard slot is loaded ([`on_slot_loaded`]) the next
-//! change reads again first. Turning the bindings off sends nothing: what was sent stays
-//! on the keyboard until it's unplugged.
+//! writes it again. Then, and after a failed send, the layer the keyboard held is written
+//! back once and read back, so no layer stays half old and half new; the error says what
+//! each layer holds. A layer that doesn't check out even then is written again with the
+//! next change, even one back to what it held. After an onboard slot is loaded
+//! ([`on_slot_loaded`]) the next change reads again first. Turning the bindings off sends
+//! nothing: what was sent stays on the keyboard until it's unplugged.
 //!
 //! The keyboard keeps a deep-press binding only on a key that already has a deep-press
 //! point (the owner's keyboard, 2026-11-13: written before the point, it was dropped
@@ -73,6 +76,10 @@ pub struct Store {
     loaded: bool,
     /// What gglinux last wrote on each layer on this connection, and read back.
     written: [Option<Vec<Block>>; 3],
+    /// Layers that may hold a mix of old and new blocks: a write didn't stick and writing
+    /// back what was there didn't check out either. Written with the next change even if
+    /// it's what gglinux last knew was there.
+    unsure: [bool; 3],
     /// The Fn key and its lit keys as last sent on this connection.
     fn_sent: Option<(u8, [u8; 32])>,
     /// The keys with a deep-press point of gglinux's on the open keyboard, as the
@@ -101,6 +108,7 @@ impl Store {
             base: None,
             loaded: false,
             written: Default::default(),
+            unsure: [false; 3],
             fn_sent: None,
             deep_keys: Vec::new(),
         }
@@ -177,20 +185,29 @@ impl Store {
 
     /// Send the bindings to the keyboard, read first if it hasn't been on this
     /// connection. `old` is what was applied before: a key dropped since goes back to
-    /// its default. Only what differs from what the keyboard holds is written.
+    /// its default. Only what differs from what the keyboard holds is written. A layer
+    /// write that fails stops there; the error says what each layer holds then.
     fn apply(&mut self, device: &Keyboard, old: &Bindings) -> Result<(), String> {
         if self.base.is_none() {
             self.read(device)?;
         }
         let merged = self.merged(&self.state.bindings, old)?;
         let base = self.base.as_ref().expect("read above");
-        for (i, (_, layer)) in LAYERS.into_iter().enumerate() {
-            let now = self.written[i].as_ref().unwrap_or(&base[i]);
-            if merged[i] != *now {
-                device
-                    .write_bindings(layer, &merged[i])
-                    .map_err(|e| format!("{e:#}"))?;
-                self.written[i] = Some(merged[i].clone());
+        let due: Vec<bool> = (0..LAYERS.len())
+            .map(|i| merged[i] != *self.written[i].as_ref().unwrap_or(&base[i]) || self.unsure[i])
+            .collect();
+        for (i, blocks) in merged.iter().enumerate() {
+            if !due[i] {
+                continue;
+            }
+            if let Err(e) = self.write_layer(device, i, blocks) {
+                let name = |j: usize| LAYERS[j].1.name();
+                let before: Vec<&str> = (0..i).filter(|&j| due[j]).map(name).collect();
+                let after: Vec<&str> = (i + 1..LAYERS.len())
+                    .filter(|&j| due[j])
+                    .map(name)
+                    .collect();
+                return Err(left_as(&e, &before, &after));
             }
         }
         let mask = kb::fn_mask(&merged[1]);
@@ -209,6 +226,29 @@ impl Store {
         Ok(())
     }
 
+    /// Write layer `i` as `blocks`, from what the keyboard is known to hold there: what
+    /// gglinux last wrote, else the keyboard's own. If the keyboard doesn't keep it, the
+    /// device writes that back; a layer that then doesn't check out either is unsure, and
+    /// goes again with the next change.
+    fn write_layer(&mut self, device: &Keyboard, i: usize, blocks: &[Block]) -> anyhow::Result<()> {
+        let base = self.base.as_ref().expect("written only after a read");
+        let kept = self.written[i].as_ref().unwrap_or(&base[i]);
+        match device.write_bindings(LAYERS[i].1, blocks, kept) {
+            Ok(()) => {
+                self.written[i] = Some(blocks.to_vec());
+                self.unsure[i] = false;
+                Ok(())
+            }
+            Err(e) => {
+                // An error before anything went out (a refusal) leaves the layer as it was.
+                if let Some(not_kept) = e.downcast_ref::<kb::NotKept>() {
+                    self.unsure[i] = !not_kept.put_back;
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// The deep layer again, after a deep-press table: from what gglinux last wrote there
     /// (or the keyboard's own), each binding on a key with a point, every other one
     /// nothing. Written even when it's what went last, since the keyboard dropped the
@@ -222,13 +262,11 @@ impl Store {
         let now = self.state.bindings.clone();
         let deep = kb::merge(kb::Layer::Second, &start, &self.deep_changes(&now, &now))
             .map_err(|e| e.to_string())?;
-        if self.written[2].is_none() && deep == start {
+        if self.written[2].is_none() && deep == start && !self.unsure[2] {
             return Ok(false);
         }
-        device
-            .write_bindings(kb::Layer::Second, &deep)
+        self.write_layer(device, 2, &deep)
             .map_err(|e| format!("{e:#}"))?;
-        self.written[2] = Some(deep);
         Ok(true)
     }
 
@@ -271,6 +309,7 @@ impl Store {
         self.base = None;
         self.loaded = false;
         self.written = Default::default();
+        self.unsure = [false; 3];
         self.fn_sent = None;
         self.state.read = None;
         self.state.error = None;
@@ -282,6 +321,33 @@ impl Store {
         self.forget();
         self.loaded = true;
     }
+}
+
+/// What a layer write that failed (`e`) left on the keyboard, in words: `e` says it for
+/// its own layer; the layers written before it in the same change have the new bindings,
+/// and the ones due after it weren't written.
+fn left_as(e: &anyhow::Error, before: &[&str], after: &[&str]) -> String {
+    let mut message = format!("{e:#}.");
+    let layers = |names: &[&str]| match names {
+        [one] => format!("{one} layer"),
+        more => format!("{} layers", more.join(" and ")),
+    };
+    if !before.is_empty() {
+        let has = if before.len() == 1 { "has" } else { "have" };
+        message.push_str(&format!(
+            " The {} {has} the new bindings.",
+            layers(before)
+        ));
+    }
+    if !after.is_empty() {
+        let were = if after.len() == 1 {
+            "wasn't written: it keeps the bindings it had"
+        } else {
+            "weren't written: they keep the bindings they had"
+        };
+        message.push_str(&format!(" The {} {were}.", layers(after)));
+    }
+    message
 }
 
 /// Whether a normal layer read back looks like the keyboard's: a blank-looking one (a bad
@@ -985,15 +1051,21 @@ mod tests {
         settle(&kb).await;
         match handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await {
             ResponseData::Error { message } => assert!(
-                message.contains("the keyboard didn't keep the normal bindings after 3 tries"),
+                message.contains("the keyboard didn't keep the normal bindings after 3 tries")
+                    && message.contains("wrote back the normal bindings the keyboard had before"),
                 "{message}"
             ),
             other => panic!("{other:?}"),
         }
+        // Three tries, then the layer it held written back once and read back.
         let write = (Kind::Feature, 0x36, 0x00);
         assert_eq!(
             sent_ops(&fake)[3..],
-            [write, READS[0], write, READS[0], write, READS[0]]
+            [write, READS[0], write, READS[0], write, READS[0], write, READS[0]]
+        );
+        assert_eq!(
+            fake.sent()[9].report,
+            write_report(kb::Layer::Normal, &stock(kb::Layer::Normal)).unwrap()
         );
         let state = get(&kb).await;
         assert!(state.error.unwrap().contains("3 tries"));
@@ -1018,6 +1090,49 @@ mod tests {
         assert_eq!(sent_ops(&fake), [write, READS[0]]);
         assert_eq!(fake.held_layer(kb::Layer::Normal).unwrap(), caps_layer());
         assert_eq!(get(&kb).await.error, None);
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_layer_that_may_be_a_mix_is_written_again_with_the_next_change() {
+        let d = Scratch::new("bindings-maybe-mixed");
+        let fake = stock_keyboard();
+        // Reads 1 to 3 are the first read, 4 to 6 the three checks, 7 the check after the
+        // layer the keyboard held is written back: that one fails.
+        fake.drop_layer_writes(3).fail_reads(7..8);
+        let (tx, _rx) = broadcast::channel(16);
+        let kb = spawn_fake(fake.keyboard(), d.0.clone(), tx, gate_on());
+        settle(&kb).await;
+        match handle(set(vec![bind(CAPS, ctrl_a())], true), &kb).await {
+            ResponseData::Error { message } => assert!(
+                message.contains("may be a mix of old and new bindings")
+                    && message.contains("unplug the keyboard and plug it back in"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+
+        // Back to the keyboard's own: what gglinux last knew it held, but the layer isn't
+        // known now, so it's written all the same, and read back.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(set(vec![], true), &kb).await,
+            ResponseData::Success
+        ));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x36, 0x00), READS[0]]);
+        assert_eq!(
+            fake.held_layer(kb::Layer::Normal).unwrap(),
+            stock(kb::Layer::Normal)
+        );
+        assert_eq!(get(&kb).await.error, None);
+
+        // Known again: the same again writes nothing.
+        fake.clear_sent();
+        assert!(matches!(
+            handle(set(vec![], true), &kb).await,
+            ResponseData::Success
+        ));
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
         kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 
@@ -1174,9 +1289,16 @@ mod tests {
             enabled: true,
         };
         match handle(both(), &kb).await {
-            ResponseData::Error { message } => assert!(message.contains("0x36"), "{message}"),
+            ResponseData::Error { message } => assert!(
+                message.contains("0x36")
+                    && message.contains("wrote back the Fn bindings the keyboard had before")
+                    && message.contains("The normal layer has the new bindings"),
+                "{message}"
+            ),
             other => panic!("{other:?}"),
         }
+        // The failed send isn't kept by the fake: the Fn layer is read back, written back
+        // as it was, and read back again.
         assert_eq!(
             sent_ops(&fake),
             [
@@ -1184,8 +1306,15 @@ mod tests {
                 READS[1],
                 READS[2],
                 (Kind::Feature, 0x36, 0x00),
-                READS[0]
+                READS[0],
+                READS[1],
+                (Kind::Feature, 0x36, 0x01),
+                READS[1]
             ]
+        );
+        assert_eq!(
+            fake.held_layer(kb::Layer::Fn).unwrap(),
+            stock(kb::Layer::Fn)
         );
         let state = get(&kb).await;
         assert!(state.error.unwrap().contains("0x36"));
@@ -1401,7 +1530,8 @@ mod tests {
         );
         assert_eq!(
             sent_ops(&fake)[1..],
-            [deep, READS[2], deep, READS[2], deep, READS[2]]
+            [deep, READS[2], deep, READS[2], deep, READS[2], deep, READS[2]],
+            "three tries, then the layer it held written back once"
         );
         fake.clear_sent();
         settle(&kb).await;
@@ -1735,6 +1865,25 @@ mod tests {
         assert_eq!(b.second, [bind(0x04, KeyAction::Mouse { button: 4 })]);
         assert_eq!(b.fn_layer.len(), 9);
         assert_eq!(b.fn_key, None, "the Fn key can't be read back");
+    }
+
+    #[test]
+    fn a_failed_layer_write_says_what_each_layer_holds_now() {
+        let e = anyhow::anyhow!("the keyboard didn't keep the Fn bindings");
+        assert_eq!(
+            left_as(&e, &["normal"], &["deep-press"]),
+            "the keyboard didn't keep the Fn bindings. The normal layer has the new bindings. \
+             The deep-press layer wasn't written: it keeps the bindings it had."
+        );
+        assert_eq!(
+            left_as(&e, &[], &["Fn", "deep-press"]),
+            "the keyboard didn't keep the Fn bindings. The Fn and deep-press layers weren't \
+             written: they keep the bindings they had."
+        );
+        assert_eq!(
+            left_as(&e, &[], &[]),
+            "the keyboard didn't keep the Fn bindings."
+        );
     }
 
     #[test]
