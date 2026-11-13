@@ -19,13 +19,16 @@
 
 use anyhow::{bail, ensure, Result};
 
+use crate::base::{
+    self, BluetoothCall, BluetoothLink, DimTimeout, Gain, HomeScreen, LineOut, Pairing, StreamMix,
+};
+
 // --- opcodes ------------------------------------------------------------------
 
 const CMD_SAVE: u8 = 0x09;
 const CMD_STATUS: u8 = 0xb0;
 const CMD_AUDIO_SETTINGS: u8 = 0x20;
 const CMD_VOLUME: u8 = 0x25;
-const CMD_ANALOG_GAIN: u8 = 0x27;
 const CMD_EQ_PRESET: u8 = 0x2e;
 const CMD_EQ_BANDS: u8 = 0x33;
 const CMD_MIC_VOLUME: u8 = 0x37;
@@ -146,11 +149,6 @@ pub fn mic_volume_packet(volume: u8) -> Result<Vec<u8>> {
         "mic volume {volume} out of range (1..={MIC_VOLUME_MAX})"
     );
     Ok(vec![CMD_MIC_VOLUME, volume])
-}
-
-/// Hardware mic gain. This is an analog (hi-Z) gain toggle, not a sample rate.
-pub fn analog_gain_packet(high: bool) -> Vec<u8> {
-    vec![CMD_ANALOG_GAIN, if high { 2 } else { 1 }]
 }
 
 /// Mic-mute LED brightness, 1..=10.
@@ -428,6 +426,13 @@ pub enum Setting {
     WirelessMode(WirelessMode),
     EqPreset(u8),
     EqBands(Vec<f32>),
+    BluetoothAtPowerOn(bool),
+    BluetoothCall(BluetoothCall),
+    Gain(Gain),
+    LineOut(LineOut),
+    StreamMix(StreamMix),
+    HomeScreen(HomeScreen),
+    ScreenDim(DimTimeout),
 }
 
 impl Setting {
@@ -446,7 +451,31 @@ impl Setting {
             Setting::EqBands(gains) => {
                 vec![eq_preset_packet(EQ_CUSTOM_PRESET)?, eq_bands_packet(gains)?]
             }
+            Setting::BluetoothAtPowerOn(on) => vec![base::bluetooth_at_power_on_packet(*on)],
+            Setting::BluetoothCall(call) => vec![base::bluetooth_call_packet(*call)],
+            Setting::Gain(gain) => vec![base::gain_packet(*gain)],
+            Setting::LineOut(line_out) => vec![base::line_out_packet(*line_out)],
+            Setting::StreamMix(mix) => vec![base::stream_mix_packet(*mix)?],
+            Setting::HomeScreen(home) => vec![base::home_screen_packet(*home)],
+            Setting::ScreenDim(dim) => vec![base::screen_dim_packet(*dim)],
         })
+    }
+
+    /// Whether a save (`09`) follows the setting. The first milestones' settings
+    /// save after each change, as HeadsetControl does. The base-station settings
+    /// GG 123 has don't: GG sends each alone (captures arctis-1 … arctis-3), and
+    /// nothing writes flash unless asked.
+    pub fn saved(&self) -> bool {
+        !matches!(
+            self,
+            Setting::BluetoothAtPowerOn(_)
+                | Setting::BluetoothCall(_)
+                | Setting::Gain(_)
+                | Setting::LineOut(_)
+                | Setting::StreamMix(_)
+                | Setting::HomeScreen(_)
+                | Setting::ScreenDim(_)
+        )
     }
 }
 
@@ -483,6 +512,10 @@ impl PowerStatus {
 /// Byte offsets into the `07 b0` reply, counting the report id as byte 0.
 mod offset {
     pub const OPCODE: usize = 1;
+    pub const BLUETOOTH_AT_POWER_ON: usize = 2;
+    pub const BLUETOOTH_CALL: usize = 3;
+    pub const BLUETOOTH_POWER: usize = 4;
+    pub const BLUETOOTH_LINK: usize = 5;
     pub const HEADSET_BATTERY: usize = 6;
     pub const SPARE_BATTERY: usize = 7;
     pub const TRANSPARENCY: usize = 8;
@@ -491,6 +524,7 @@ mod offset {
     pub const MIC_LED: usize = 11;
     pub const AUTO_OFF: usize = 12;
     pub const WIRELESS_MODE: usize = 13;
+    pub const PAIRING: usize = 14;
     pub const POWER: usize = 15;
     /// Shortest reply we can decode every field from.
     pub const MIN_LEN: usize = POWER + 1;
@@ -517,6 +551,17 @@ pub struct Status {
     pub anc_raw: u8,
     /// Raw status byte, 1..=10 when meaningful.
     pub transparency_raw: u8,
+    /// Bluetooth on when the headset powers on (byte 2).
+    pub bluetooth_at_power_on: Option<bool>,
+    /// What a Bluetooth call does to the game sound (byte 3).
+    pub bluetooth_call: Option<BluetoothCall>,
+    /// Whether Bluetooth is on now (byte 4, which reads `00` for on and `01` for
+    /// off, per Arctis Sound Manager's `status_parse`).
+    pub bluetooth_on: Option<bool>,
+    /// Bluetooth's link to a phone (byte 5).
+    pub bluetooth_link: Option<BluetoothLink>,
+    /// The 2.4 GHz link to the headset (byte 14).
+    pub pairing: Option<Pairing>,
 }
 
 impl Status {
@@ -541,6 +586,20 @@ impl Status {
             mic_status_raw: report[offset::MIC_STATUS],
             anc_raw: report[offset::ANC],
             transparency_raw: report[offset::TRANSPARENCY],
+            bluetooth_at_power_on: match report[offset::BLUETOOTH_AT_POWER_ON] {
+                0 => Some(false),
+                1 => Some(true),
+                _ => None,
+            },
+            bluetooth_call: BluetoothCall::from_code(report[offset::BLUETOOTH_CALL]),
+            // Inverted: `00` is on.
+            bluetooth_on: match report[offset::BLUETOOTH_POWER] {
+                0 => Some(true),
+                1 => Some(false),
+                _ => None,
+            },
+            bluetooth_link: BluetoothLink::from_code(report[offset::BLUETOOTH_LINK]),
+            pairing: Pairing::from_code(report[offset::PAIRING]),
         })
     }
 
@@ -582,8 +641,6 @@ mod tests {
         assert_eq!(sidetone_packet(2).unwrap(), vec![0x39, 0x02]);
         assert_eq!(eq_preset_packet(4).unwrap(), vec![0x2e, 0x04]);
         assert_eq!(mic_volume_packet(10).unwrap(), vec![0x37, 0x0a]);
-        assert_eq!(analog_gain_packet(true), vec![0x27, 0x02]);
-        assert_eq!(analog_gain_packet(false), vec![0x27, 0x01]);
         assert_eq!(mic_led_packet(10).unwrap(), vec![0xbf, 0x0a]);
         assert_eq!(auto_off_packet(AutoOff::Min30), vec![0xc1, 0x05]);
         assert_eq!(wireless_mode_packet(WirelessMode::Range), vec![0xc3, 0x01]);
@@ -647,6 +704,59 @@ mod tests {
         assert_eq!(s.auto_off, Some(AutoOff::Min30));
         assert_eq!(s.wireless_mode, Some(WirelessMode::Range));
         assert_eq!(s.mic_led_brightness, 7);
+    }
+
+    /// The reply GG 123 got in arctis-1 (headset off), after it had sent `b2 00`
+    /// and `b3 00`: Bluetooth off at power-on, calls do nothing, Bluetooth off,
+    /// no phone, headset paired but out of reach.
+    #[test]
+    fn status_decodes_bluetooth_and_pairing_from_the_captured_reply() {
+        let captured = [
+            0x06, 0xb0, 0x00, 0x00, 0x01, 0x00, 0x00, 0x08, 0x08, 0x00, 0x02, 0x0a, 0x05, 0x00,
+            0x04, 0x01,
+        ];
+        let s = Status::decode(&captured).unwrap();
+        assert_eq!(s.power, PowerStatus::Offline);
+        assert_eq!(s.bluetooth_at_power_on, Some(false));
+        assert_eq!(s.bluetooth_call, Some(BluetoothCall::Nothing));
+        assert_eq!(s.bluetooth_on, Some(false));
+        assert_eq!(s.bluetooth_link, Some(BluetoothLink::Off));
+        assert_eq!(s.pairing, Some(Pairing::PairedOffline));
+        // Docked and on (docs/PROTOCOLS.md, 2026-08-12): the link is up.
+        let docked = [
+            0x06, 0xb0, 0x00, 0x00, 0x01, 0x00, 0x08, 0x08, 0x08, 0x00, 0x02, 0x0a, 0x05, 0x00,
+            0x08, 0x08,
+        ];
+        let s = Status::decode(&docked).unwrap();
+        assert_eq!(s.power, PowerStatus::Online);
+        assert_eq!(s.pairing, Some(Pairing::Connected));
+    }
+
+    #[test]
+    fn status_bluetooth_bytes_decode_both_ways_and_odd_ones_are_unknown() {
+        let mut r = status_reply(0x08, 8, 8);
+        r[offset::BLUETOOTH_AT_POWER_ON] = 1;
+        r[offset::BLUETOOTH_CALL] = 2;
+        r[offset::BLUETOOTH_POWER] = 0; // on
+        r[offset::BLUETOOTH_LINK] = 1;
+        r[offset::PAIRING] = 1;
+        let s = Status::decode(&r).unwrap();
+        assert_eq!(s.bluetooth_at_power_on, Some(true));
+        assert_eq!(s.bluetooth_call, Some(BluetoothCall::MuteGame));
+        assert_eq!(s.bluetooth_on, Some(true));
+        assert_eq!(s.bluetooth_link, Some(BluetoothLink::Connected));
+        assert_eq!(s.pairing, Some(Pairing::NotPaired));
+        r[offset::BLUETOOTH_AT_POWER_ON] = 2;
+        r[offset::BLUETOOTH_CALL] = 3;
+        r[offset::BLUETOOTH_POWER] = 2;
+        r[offset::BLUETOOTH_LINK] = 7;
+        r[offset::PAIRING] = 2;
+        let s = Status::decode(&r).unwrap();
+        assert_eq!(
+            (s.bluetooth_at_power_on, s.bluetooth_call, s.bluetooth_on),
+            (None, None, None)
+        );
+        assert_eq!((s.bluetooth_link, s.pairing), (None, None));
     }
 
     /// An offline headset still reports *some* battery byte; it just means nothing.
@@ -796,6 +906,39 @@ mod tests {
         );
         assert_eq!(bands[1][0], 0x33);
         assert_eq!(bands.len(), 2);
+    }
+
+    #[test]
+    fn base_station_settings_encode_to_gg_bytes_and_send_no_save() {
+        let cases: Vec<(Setting, Vec<u8>)> = vec![
+            (Setting::BluetoothAtPowerOn(true), vec![0xb2, 1]),
+            (Setting::BluetoothCall(BluetoothCall::LowerGame), vec![0xb3, 1]),
+            (Setting::Gain(Gain::High), vec![0x27, 2]),
+            (Setting::LineOut(LineOut::Stream), vec![0x43, 2]),
+            (
+                Setting::StreamMix(StreamMix {
+                    main: 50,
+                    aux: 100,
+                    mic: 100,
+                }),
+                vec![0x47, 0x32, 0x00, 0x64, 0x64],
+            ),
+            (Setting::HomeScreen(HomeScreen::Simple), vec![0x89, 1]),
+            (Setting::ScreenDim(DimTimeout::Min5), vec![0x83, 2]),
+        ];
+        for (setting, expected) in cases {
+            assert_eq!(setting.packets().unwrap(), vec![expected], "{setting:?}");
+            assert!(!setting.saved(), "{setting:?}: GG sends no save after it");
+        }
+        assert!(Setting::Sidetone(1).saved(), "the first milestones' still save");
+        assert!(Setting::EqBands(vec![0.0; EQ_BANDS]).saved());
+        assert!(Setting::StreamMix(StreamMix {
+            main: 101,
+            aux: 0,
+            mic: 0
+        })
+        .packets()
+        .is_err());
     }
 
     #[test]

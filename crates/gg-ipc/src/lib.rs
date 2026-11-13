@@ -245,7 +245,82 @@ pub enum RadioMode {
     Range,
 }
 
+/// What a Bluetooth call does to the game sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BluetoothCall {
+    Nothing,
+    /// Game sound 12 dB lower during the call.
+    LowerGame,
+    MuteGame,
+}
+
+/// The base station's output gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadsetGain {
+    Low,
+    High,
+}
+
+/// What the base station's line out carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineOut {
+    /// The headset's sound, for speakers.
+    Speakers,
+    /// A mix of main, aux and mic at their own levels ([`LineOutMix`]).
+    Stream,
+}
+
+/// The base station's line-out stream mix, 0..=[`LINE_OUT_LEVEL_MAX`] each. Not
+/// Sonar's [`StreamMix`]: this one is mixed in the base station.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineOutMix {
+    pub main: u8,
+    pub aux: u8,
+    pub mic: u8,
+}
+
+/// Highest level in a [`LineOutMix`].
+pub const LINE_OUT_LEVEL_MAX: u8 = 100;
+
+/// The base station's home screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeScreen {
+    Detailed,
+    Simple,
+}
+
+/// The base station screen's dim timeout choices, in minutes; 0 never dims. GG
+/// also lists 60, but that choice was never captured, so it isn't offered.
+pub const SCREEN_DIM_MINUTES: [u16; 6] = [0, 1, 5, 10, 15, 30];
+
+/// Bluetooth's link to a phone, as the base station reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BluetoothLink {
+    Off,
+    Connected,
+    /// On, with nothing connected.
+    NotConnected,
+}
+
+/// The 2.4 GHz link between the base station and the headset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadsetPairing {
+    NotPaired,
+    /// Paired, but the headset is off or out of reach.
+    PairedOffline,
+    Connected,
+}
+
 /// One headset setting to change: `{"setting":"sidetone","value":2}`.
+///
+/// The base station's own settings at the end need [`Feature::HeadsetExtras`]
+/// ([`HeadsetChange::feature`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "setting", content = "value", rename_all = "snake_case")]
 pub enum HeadsetChange {
@@ -265,11 +340,46 @@ pub enum HeadsetChange {
     EqPreset(u8),
     /// Ten gains in dB, -10.0..=10.0 in 0.5 steps. Selects the Custom preset.
     EqBands(Vec<f32>),
+    /// Bluetooth on when the headset powers on.
+    BluetoothAtPowerOn(bool),
+    BluetoothCall(BluetoothCall),
+    Gain(HeadsetGain),
+    LineOut(LineOut),
+    /// All three levels at once, as the base station takes them.
+    LineOutMix(LineOutMix),
+    HomeScreen(HomeScreen),
+    /// One of [`SCREEN_DIM_MINUTES`].
+    ScreenDimMinutes(u16),
 }
 
-/// Headset settings. The first group is read from the base station every
-/// second; the second is what gglinux wrote this session, because the device
-/// cannot report it. `None` means not known.
+impl HeadsetChange {
+    /// The experimental gate this change needs, if any.
+    pub fn feature(&self) -> Option<Feature> {
+        match self {
+            HeadsetChange::BluetoothAtPowerOn(_)
+            | HeadsetChange::BluetoothCall(_)
+            | HeadsetChange::Gain(_)
+            | HeadsetChange::LineOut(_)
+            | HeadsetChange::LineOutMix(_)
+            | HeadsetChange::HomeScreen(_)
+            | HeadsetChange::ScreenDimMinutes(_) => Some(Feature::HeadsetExtras),
+            HeadsetChange::NoiseMode(_)
+            | HeadsetChange::Transparency(_)
+            | HeadsetChange::Sidetone(_)
+            | HeadsetChange::MicVolume(_)
+            | HeadsetChange::MicLed(_)
+            | HeadsetChange::AutoOffMinutes(_)
+            | HeadsetChange::RadioMode(_)
+            | HeadsetChange::EqPreset(_)
+            | HeadsetChange::EqBands(_) => None,
+        }
+    }
+}
+
+/// Headset settings, as the base station reports them each second where it does
+/// (its `b0` and `20` replies), else as gglinux wrote them this session. The home
+/// screen and the dim timeout are only ever what gglinux wrote: their read-back
+/// isn't checked on hardware yet. `None` means not known.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HeadsetControls {
     pub noise_mode: Option<NoiseMode>,
@@ -282,6 +392,29 @@ pub struct HeadsetControls {
     pub mic_volume: Option<u8>,
     pub eq_preset: Option<u8>,
     pub eq_bands: Option<Vec<f32>>,
+    #[serde(default)]
+    pub bluetooth_at_power_on: Option<bool>,
+    #[serde(default)]
+    pub bluetooth_call: Option<BluetoothCall>,
+    /// Whether Bluetooth is on now. Read only.
+    #[serde(default)]
+    pub bluetooth_on: Option<bool>,
+    /// Read only.
+    #[serde(default)]
+    pub bluetooth_link: Option<BluetoothLink>,
+    /// The 2.4 GHz link to the headset. Read only.
+    #[serde(default)]
+    pub pairing: Option<HeadsetPairing>,
+    #[serde(default)]
+    pub gain: Option<HeadsetGain>,
+    #[serde(default)]
+    pub line_out: Option<LineOut>,
+    #[serde(default)]
+    pub line_out_mix: Option<LineOutMix>,
+    #[serde(default)]
+    pub home_screen: Option<HomeScreen>,
+    #[serde(default)]
+    pub screen_dim_minutes: Option<u16>,
 }
 
 /// What the daemon knows about the headset and its base station.
@@ -2082,6 +2215,93 @@ mod tests {
         assert!(json.contains(r#""sidetone":null"#), "{json}");
         assert!(json.contains(r#""noise_mode":null"#), "{json}");
         assert!(json.contains(r#""eq_bands":null"#), "{json}");
+    }
+
+    #[test]
+    fn base_station_changes_parse_from_their_documented_json() {
+        let cases = [
+            (
+                r#"{"setting":"bluetooth_at_power_on","value":true}"#,
+                HeadsetChange::BluetoothAtPowerOn(true),
+            ),
+            (
+                r#"{"setting":"bluetooth_call","value":"lower_game"}"#,
+                HeadsetChange::BluetoothCall(BluetoothCall::LowerGame),
+            ),
+            (
+                r#"{"setting":"gain","value":"high"}"#,
+                HeadsetChange::Gain(HeadsetGain::High),
+            ),
+            (
+                r#"{"setting":"line_out","value":"stream"}"#,
+                HeadsetChange::LineOut(LineOut::Stream),
+            ),
+            (
+                r#"{"setting":"line_out_mix","value":{"main":50,"aux":100,"mic":0}}"#,
+                HeadsetChange::LineOutMix(LineOutMix {
+                    main: 50,
+                    aux: 100,
+                    mic: 0,
+                }),
+            ),
+            (
+                r#"{"setting":"home_screen","value":"simple"}"#,
+                HeadsetChange::HomeScreen(HomeScreen::Simple),
+            ),
+            (
+                r#"{"setting":"screen_dim_minutes","value":5}"#,
+                HeadsetChange::ScreenDimMinutes(5),
+            ),
+        ];
+        for (json, expected) in cases {
+            assert_eq!(
+                serde_json::from_str::<HeadsetChange>(json).unwrap(),
+                expected,
+                "{json}"
+            );
+            assert_eq!(serde_json::to_string(&expected).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn only_the_base_station_settings_need_headset_extras() {
+        let gated = [
+            HeadsetChange::BluetoothAtPowerOn(false),
+            HeadsetChange::BluetoothCall(BluetoothCall::Nothing),
+            HeadsetChange::Gain(HeadsetGain::Low),
+            HeadsetChange::LineOut(LineOut::Speakers),
+            HeadsetChange::LineOutMix(LineOutMix {
+                main: 100,
+                aux: 100,
+                mic: 100,
+            }),
+            HeadsetChange::HomeScreen(HomeScreen::Detailed),
+            HeadsetChange::ScreenDimMinutes(1),
+        ];
+        for change in gated {
+            assert_eq!(change.feature(), Some(Feature::HeadsetExtras), "{change:?}");
+        }
+        for change in [
+            HeadsetChange::NoiseMode(NoiseMode::Off),
+            HeadsetChange::Sidetone(0),
+            HeadsetChange::AutoOffMinutes(30),
+            HeadsetChange::EqBands(vec![0.0; 10]),
+        ] {
+            assert_eq!(change.feature(), None, "{change:?}");
+        }
+        assert!(!SCREEN_DIM_MINUTES.contains(&60), "60 min was never captured");
+    }
+
+    /// A daemon from before the base-station settings sends none of their fields.
+    #[test]
+    fn controls_without_the_base_station_fields_read_as_unknown() {
+        let old = r#"{"noise_mode":"anc","transparency":5,"mic_led":7,"mic_muted":false,
+            "auto_off_minutes":30,"radio_mode":"speed","sidetone":null,"mic_volume":null,
+            "eq_preset":null,"eq_bands":null}"#;
+        let c: HeadsetControls = serde_json::from_str(old).unwrap();
+        assert_eq!(c.noise_mode, Some(NoiseMode::Anc));
+        assert_eq!((c.gain, c.line_out, c.line_out_mix), (None, None, None));
+        assert_eq!((c.pairing, c.bluetooth_on, c.screen_dim_minutes), (None, None, None));
     }
 
     #[test]
