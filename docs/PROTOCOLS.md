@@ -78,10 +78,11 @@ to queries are 64-byte input reports, first byte at index 0.
 **Pacing (found on hardware, 2026-11-13):** a command sent straight after another makes the mouse drop
 the first. A setting followed at once by the save `09` was lost every time (DPI, polling rate and the sleep
 timer alike; the mouse kept reporting its old value), 5 ms apart it was kept. GG leaves 30–40 ms between
-its commands; gglinux now keeps 35 ms (`COMMAND_PACE`). After a polling-rate command (`17`) the dongle
-answers nothing for about a second, even when the rate didn't change, and a command sent 0.5 s after it was
-lost (1.5 s: kept); GG waits 3.0 s after `17` in both captures, and so does gglinux (`POLLING_PACE`). A save
-needs no extra time: a timer sent 40 ms after `09` was kept.
+its commands; gglinux now keeps 35 ms (`COMMAND_PACE`). After a polling-rate command (`17`, even with the
+rate unchanged) or a radio-mode command (`2E`) the dongle answers nothing, or late enough to mix answers
+up, for about a second, and a command sent 0.5–0.6 s after one was lost (1.5 s: kept). GG waits 3.0 s after
+`17` in both captures and 1.4–2.7 s after `2E`; gglinux waits 3 s after either (`LINK_PACE`). A save needs
+no extra time: a timer sent 40 ms after `09` was kept.
 `2B` on its own takes effect at once, without `09`: a 60 s timer sent to a mouse that
 had lain still for minutes put it to sleep on the spot, after which it answers no query until it's moved.
 

@@ -49,12 +49,13 @@ const MAX_DRAIN_REPORTS: usize = 16;
 /// 40 ms between its commands, and so do we.
 pub const COMMAND_PACE: Duration = Duration::from_millis(35);
 
-/// The time the mouse is given after a polling-rate command (`17`) before the next one.
-/// GG 123 waits 3.0 s after it in both of our captures (`17`, then `19` and the save `09`
-/// three seconds later). On the owner's mouse (2026-11-13) the dongle answered no query
-/// for about a second after a `17`, even one that set the rate it already had, and a sleep
-/// timer sent 0.5 s after it was lost; 1.5 s after it was kept.
-pub const POLLING_PACE: Duration = Duration::from_secs(3);
+/// The time the mouse is given after a command that makes its radio link settle again: the
+/// polling rate (`17`) and the radio mode (`2E`). On the owner's mouse (2026-11-13) the
+/// dongle answered no query, or answered late so that answers and queries got mixed up, for
+/// about a second after either, and a sleep timer sent 0.5 to 0.6 s after one was lost;
+/// 1.5 s after it was kept. GG 123 waits 3.0 s after `17` in both of our captures, and 1.4
+/// and 2.7 s after `2E` before it sends anything it relies on.
+pub const LINK_PACE: Duration = Duration::from_secs(3);
 
 /// When the last command went out, and which it was. For the whole process, not per
 /// [`Mouse`]: the daemon opens the mouse afresh for each request, and two requests in a
@@ -65,8 +66,8 @@ static LAST_COMMAND: Mutex<Option<(Instant, u8)>> = Mutex::new(None);
 /// `at`.
 fn pace(last: Option<(Instant, u8)>, now: Instant) -> Duration {
     last.map_or(Duration::ZERO, |(at, command)| {
-        let gap = if command == proto::CMD_POLLING_RATE {
-            POLLING_PACE
+        let gap = if matches!(command, proto::CMD_POLLING_RATE | proto::CMD_RADIO) {
+            LINK_PACE
         } else {
             COMMAND_PACE
         };
@@ -282,15 +283,16 @@ mod tests {
         assert_eq!(pace(Some((ago(10), dpi)), now), Duration::from_millis(25));
         assert_eq!(pace(Some((ago(1000), dpi)), now), Duration::ZERO);
         assert!(COMMAND_PACE >= Duration::from_millis(30), "GG's own pacing");
-        // After a polling-rate command the mouse is given GG's three seconds; a save
+        // After the polling rate or the radio mode the link is given three seconds; a save
         // needs no more than any other command (a timer 40 ms after one was kept).
-        let polling = proto::CMD_POLLING_RATE;
-        assert_eq!(pace(Some((now, polling)), now), POLLING_PACE);
-        assert_eq!(
-            pace(Some((ago(1000), polling)), now),
-            POLLING_PACE - Duration::from_secs(1)
-        );
-        assert_eq!(pace(Some((ago(3000), polling)), now), Duration::ZERO);
+        for settling in [proto::CMD_POLLING_RATE, proto::CMD_RADIO] {
+            assert_eq!(pace(Some((now, settling)), now), LINK_PACE);
+            assert_eq!(
+                pace(Some((ago(1000), settling)), now),
+                LINK_PACE - Duration::from_secs(1)
+            );
+            assert_eq!(pace(Some((ago(3000), settling)), now), Duration::ZERO);
+        }
         assert_eq!(pace(Some((now, proto::CMD_SAVE)), now), COMMAND_PACE);
     }
 }

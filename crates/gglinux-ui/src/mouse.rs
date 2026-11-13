@@ -11,9 +11,14 @@ use gg_ipc::{
 };
 use slint::{ComponentHandle, SharedString};
 
-use crate::client::{Client, State, TIMEOUT};
+use crate::client::{Client, State};
 use crate::engine::ints;
 use crate::{act, sync_rows, AppWindow, Forms, MouseUi};
+
+/// How long a mouse request may take. The daemon gives the mouse up to three seconds after
+/// some commands (polling rate, wireless mode) before the next, so two of those in a row,
+/// one of them saved, take over six.
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
 /// Mirrors gg-device-mouse: DPI_MIN, DPI_MAX, DPI_STEP, MAX_PRESETS.
 const DPI_MIN: i32 = 100;
