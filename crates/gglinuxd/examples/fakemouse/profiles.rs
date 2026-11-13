@@ -182,7 +182,11 @@ fn skipped(p: &Profile, s: &Fake) -> Vec<String> {
             }
         }
     };
-    gate(Section::Bindings, p.bindings.is_some(), Feature::KeyboardBindings);
+    gate(
+        Section::Bindings,
+        p.bindings.is_some(),
+        Feature::KeyboardBindings,
+    );
     let protection = p.switches.as_ref().is_some_and(|s| s.protection.enabled);
     gate(Section::Switches, protection, Feature::KeyboardProtection);
     let power = p
@@ -283,12 +287,7 @@ fn change(req: Request, s: &mut Fake, saved: &mut Saved) -> Result<ResponseData,
                 .expect("a free name");
             put(saved, Profile { name, ..source });
         }
-        other => {
-            return Err(format!(
-                "{} is not a profiles request",
-                method_name(&other)
-            ))
-        }
+        other => return Err(format!("{} is not a profiles request", method_name(&other))),
     }
     Ok(ResponseData::Success)
 }

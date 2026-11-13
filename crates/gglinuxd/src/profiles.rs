@@ -50,7 +50,10 @@ type Reply<T> = oneshot::Sender<Result<T, String>>;
 pub enum Command {
     GetState(Reply<ProfilesState>),
     /// Apply a saved profile (the actions on the spare keys use this).
-    Apply { name: String, reply: Reply<()> },
+    Apply {
+        name: String,
+        reply: Reply<()>,
+    },
     /// Any other profiles request, answered as the client gets it.
     Request(Request, oneshot::Sender<ResponseData>),
     /// The daemon's request handlers, which sections are applied through.
@@ -260,10 +263,7 @@ impl Controller {
 
     /// Apply or undo rules for what runs and what has the focus.
     pub async fn follow(&mut self) {
-        let focus = self
-            .focus
-            .as_ref()
-            .map(|w| w.as_ref().map(|f| &f.seen));
+        let focus = self.focus.as_ref().map(|w| w.as_ref().map(|f| &f.seen));
         let seen = Seen {
             running: &self.running,
             focus,
@@ -286,9 +286,7 @@ impl Controller {
         };
         let action = match decide(self.active.as_ref(), picked.as_ref()) {
             // A rule's profile left on by a daemon that stopped while it held.
-            Action::Stay if self.active.is_none() && self.store.before.is_some() => {
-                Action::Restore
-            }
+            Action::Stay if self.active.is_none() && self.store.before.is_some() => Action::Restore,
             action => action,
         };
         match action {
@@ -315,7 +313,12 @@ impl Controller {
     }
 
     /// Apply `p`, reading first what's needed to send only what differs.
-    async fn apply_profile(&mut self, d: &dyn Daemon, p: &Profile, gates: &gg_ipc::Experimental) -> Outcome {
+    async fn apply_profile(
+        &mut self,
+        d: &dyn Daemon,
+        p: &Profile,
+        gates: &gg_ipc::Experimental,
+    ) -> Outcome {
         let diffed: Vec<Section> = [Section::Headset, Section::Mouse]
             .into_iter()
             .filter(|s| p.has(*s))
@@ -430,7 +433,11 @@ impl Controller {
 
     /// Save the current settings of `sections` under `name`. Without `sections`, those of
     /// the profile it replaces, else every section that can be read now.
-    pub async fn save_current(&mut self, name: &str, sections: Option<Vec<Section>>) -> Result<(), String> {
+    pub async fn save_current(
+        &mut self,
+        name: &str,
+        sections: Option<Vec<Section>>,
+    ) -> Result<(), String> {
         let name = Profile::clean_name(name)?;
         let d = self.daemon()?;
         let gates = sections::gates(&*d).await;
@@ -450,7 +457,10 @@ impl Controller {
                 .iter()
                 .map(|(s, why)| format!("{}: {why}", s.label()))
                 .collect();
-            return Err(format!("nothing could be read to save ({})", why.join("; ")));
+            return Err(format!(
+                "nothing could be read to save ({})",
+                why.join("; ")
+            ));
         }
         p.name = name;
         self.store.put(p)?;
@@ -526,9 +536,9 @@ impl Controller {
                 let r = self.store.set_rules(rules);
                 self.edit(r)
             }
-            Request::GetProfile { name, preset } => {
-                self.file(&name, preset).map(|file| ResponseData::Profile { file })
-            }
+            Request::GetProfile { name, preset } => self
+                .file(&name, preset)
+                .map(|file| ResponseData::Profile { file }),
             Request::ImportProfile { profile, replace } => ok(self.import(*profile, replace)),
             Request::CopyProfile { from, preset, to } => ok(self.copy(&from, preset, to)),
             _ => Err("not a profiles request".into()),
@@ -538,9 +548,10 @@ impl Controller {
 
     async fn state_with_running(&self) -> ProfilesState {
         let root = self.proc_root.clone();
-        let running = tokio::task::spawn_blocking(move || procs::running(&root, unsafe { libc::getuid() }))
-            .await
-            .unwrap_or_default();
+        let running =
+            tokio::task::spawn_blocking(move || procs::running(&root, unsafe { libc::getuid() }))
+                .await
+                .unwrap_or_default();
         ProfilesState {
             running,
             ..self.state()
@@ -776,6 +787,11 @@ fn spawn_with(c: Controller, env: FocusEnv, scan_every: Duration) -> Handle {
 #[cfg(test)]
 impl Controller {
     fn at(path: &std::path::Path, store: Store) -> Controller {
-        Controller::new(store, path.to_path_buf(), broadcast::channel(64).0, watch::channel(None).0)
+        Controller::new(
+            store,
+            path.to_path_buf(),
+            broadcast::channel(64).0,
+            watch::channel(None).0,
+        )
     }
 }

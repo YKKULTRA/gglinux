@@ -14,8 +14,8 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use gg_ipc::{
-    Experimental, Feature, HeadsetChange, HeadsetControls, MouseSettings, Profile,
-    ProfileBindings, Request, ResponseData, Section,
+    Experimental, Feature, HeadsetChange, HeadsetControls, MouseSettings, Profile, ProfileBindings,
+    Request, ResponseData, Section,
 };
 
 /// How profiles reach the devices: the daemon's own request handlers.
@@ -290,24 +290,33 @@ pub async fn apply(
                 Some(why) => Err(Skip(why)),
                 None => {
                     let b = p.bindings.clone().unwrap_or_default();
-                    send(d, Request::SetBindings {
-                        bindings: b.bindings,
-                        enabled: b.enabled,
-                    })
+                    send(
+                        d,
+                        Request::SetBindings {
+                            bindings: b.bindings,
+                            enabled: b.enabled,
+                        },
+                    )
                     .await
                 }
             },
             Section::Screen => {
-                send(d, Request::SetScreen {
-                    screen: p.screen.clone().unwrap_or_default(),
-                })
+                send(
+                    d,
+                    Request::SetScreen {
+                        screen: p.screen.clone().unwrap_or_default(),
+                    },
+                )
                 .await
             }
             Section::Lighting => match &p.lighting {
                 Some(lighting) => {
-                    send(d, Request::SetLighting {
-                        lighting: lighting.clone(),
-                    })
+                    send(
+                        d,
+                        Request::SetLighting {
+                            lighting: lighting.clone(),
+                        },
+                    )
                     .await
                 }
                 None => Ok(()),
@@ -376,11 +385,16 @@ async fn headset(
         if have.contains(change) {
             continue;
         }
-        send(d, Request::SetHeadset {
-            change: change.clone(),
-        })
+        send(
+            d,
+            Request::SetHeadset {
+                change: change.clone(),
+            },
+        )
         .await?;
-        done.headset.get_or_insert_with(Vec::new).push(change.clone());
+        done.headset
+            .get_or_insert_with(Vec::new)
+            .push(change.clone());
     }
     if let Some(why) = skipped.first() {
         notes.push(note(
@@ -405,11 +419,14 @@ async fn mouse(
     let Some(m) = &p.mouse else { return Ok(()) };
     let out = done.mouse.get_or_insert_with(MouseSettings::default);
     if let Some(dpi) = &m.dpi {
-        send(d, Request::SetMouseDpi {
-            stages: dpi.stages.clone(),
-            active: dpi.active,
-            save: false,
-        })
+        send(
+            d,
+            Request::SetMouseDpi {
+                stages: dpi.stages.clone(),
+                active: dpi.active,
+                save: false,
+            },
+        )
         .await?;
         out.dpi = Some(dpi.clone());
     }
@@ -423,20 +440,29 @@ async fn mouse(
         if actions.len() > 6 && actions[6..] != factory {
             if let Some(why) = gates.refusal(Feature::MouseWheel) {
                 actions.truncate(6);
-                notes.push(note(Section::Mouse, format!("the wheel's actions skipped. {why}")));
+                notes.push(note(
+                    Section::Mouse,
+                    format!("the wheel's actions skipped. {why}"),
+                ));
             }
         }
-        send(d, Request::SetMouseButtons {
-            actions: actions.clone(),
-            save: false,
-        })
+        send(
+            d,
+            Request::SetMouseButtons {
+                actions: actions.clone(),
+                save: false,
+            },
+        )
         .await?;
         out.buttons = Some(actions);
     }
     let power = gates.refusal(Feature::MousePower);
     let has_sleep = now.mouse.as_ref().and_then(|n| n.sleep_minutes);
     match (m.sleep_minutes, &power) {
-        (Some(_), Some(why)) => notes.push(note(Section::Mouse, format!("the sleep timer skipped. {why}"))),
+        (Some(_), Some(why)) => notes.push(note(
+            Section::Mouse,
+            format!("the sleep timer skipped. {why}"),
+        )),
         (Some(minutes), None) if has_sleep != Some(minutes) => {
             send(d, Request::SetMouseSleep { minutes }).await?;
             out.sleep_minutes = Some(minutes);
@@ -444,7 +470,10 @@ async fn mouse(
         _ => {}
     }
     match (m.radio, &power) {
-        (Some(_), Some(why)) => notes.push(note(Section::Mouse, format!("the radio mode skipped. {why}"))),
+        (Some(_), Some(why)) => notes.push(note(
+            Section::Mouse,
+            format!("the radio mode skipped. {why}"),
+        )),
         (Some(radio), None) => {
             send(d, Request::SetMouseRadio { radio, save: false }).await?;
             out.radio = Some(radio);
@@ -547,7 +576,10 @@ pub mod testing {
             }
             self.log.lock().unwrap().push(name.to_string());
             let mut now = self.now.lock().unwrap();
-            self.stale.lock().unwrap().get_or_insert_with(|| now.clone());
+            self.stale
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| now.clone());
             f(&mut now);
             ResponseData::Success
         }
@@ -588,7 +620,10 @@ pub mod testing {
                     a.dpi = Some(gg_ipc::MouseDpi { stages, active });
                 }),
                 Request::SetMousePolling { hz, .. } => self.change("set_mouse_polling", |d| {
-                    d.mouse.applied.get_or_insert_with(Default::default).polling_hz = Some(hz);
+                    d.mouse
+                        .applied
+                        .get_or_insert_with(Default::default)
+                        .polling_hz = Some(hz);
                 }),
                 Request::SetMouseButtons { actions, .. } => {
                     self.change(&format!("set_mouse_buttons {}", actions.len()), |d| {
@@ -643,7 +678,7 @@ mod tests {
     use super::testing::{Fake, Shared};
     use super::*;
     use gg_ipc::{
-        Effect, HeadsetGain, Lighting, MouseDpi, NoiseMode, Protection, Switches, DpiStage,
+        DpiStage, Effect, HeadsetGain, Lighting, MouseDpi, NoiseMode, Protection, Switches,
     };
 
     fn lit(period: f32) -> Lighting {
@@ -667,9 +702,18 @@ mod tests {
                 }),
                 polling_hz: Some(1000),
                 buttons: Some(
-                    ["button1", "button2", "button3", "button4", "button5", "dpi", "button4", "scrolldown"]
-                        .map(String::from)
-                        .to_vec(),
+                    [
+                        "button1",
+                        "button2",
+                        "button3",
+                        "button4",
+                        "button5",
+                        "dpi",
+                        "button4",
+                        "scrolldown",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
                 ),
                 sleep_minutes: Some(5),
                 radio: Some(gg_ipc::MouseRadio::Stable),
@@ -689,7 +733,15 @@ mod tests {
     async fn apply_now(fake: &Arc<Fake>, p: &Profile) -> Outcome {
         let d = Shared(Arc::clone(fake));
         let g = gates(&d).await;
-        apply(&d, p, &Profile::named(""), &g, &mut Sent::default(), Instant::now()).await
+        apply(
+            &d,
+            p,
+            &Profile::named(""),
+            &g,
+            &mut Sent::default(),
+            Instant::now(),
+        )
+        .await
     }
 
     use std::sync::Arc;
@@ -712,7 +764,13 @@ mod tests {
             "headset gain, the wheel, sleep, radio and the bindings wait for their gates"
         );
         let notes = out.notes.join("\n");
-        for part in ["Headset: 1 setting(s) skipped", "wheel's actions skipped", "sleep timer skipped", "radio mode skipped", "Key bindings: skipped"] {
+        for part in [
+            "Headset: 1 setting(s) skipped",
+            "wheel's actions skipped",
+            "sleep timer skipped",
+            "radio mode skipped",
+            "Key bindings: skipped",
+        ] {
             assert!(notes.contains(part), "{part}\n{notes}");
         }
         assert!(notes.contains("Settings → Experimental"), "{notes}");
@@ -724,7 +782,12 @@ mod tests {
         let fake = Fake::new();
         {
             let mut d = fake.now.lock().unwrap();
-            for f in [Feature::HeadsetExtras, Feature::MouseWheel, Feature::MousePower, Feature::KeyboardBindings] {
+            for f in [
+                Feature::HeadsetExtras,
+                Feature::MouseWheel,
+                Feature::MousePower,
+                Feature::KeyboardBindings,
+            ] {
                 d.gates.set(f, true);
             }
         }
@@ -766,14 +829,22 @@ mod tests {
         let out = apply_now(&fake, &p).await;
         assert!(fake.sent().is_empty());
         assert_eq!(out.failed, 1);
-        assert!(out.notes[0].starts_with("Keyboard switches: skipped. "), "{:?}", out.notes);
+        assert!(
+            out.notes[0].starts_with("Keyboard switches: skipped. "),
+            "{:?}",
+            out.notes
+        );
         assert_eq!(out.notes[1], "Lighting: set_lighting failed");
     }
 
     #[tokio::test]
     async fn headset_changes_and_the_sleep_timer_go_only_where_they_differ() {
         let fake = Fake::new();
-        fake.now.lock().unwrap().gates.set(Feature::MousePower, true);
+        fake.now
+            .lock()
+            .unwrap()
+            .gates
+            .set(Feature::MousePower, true);
         let d = Shared(Arc::clone(&fake));
         let g = gates(&d).await;
         let p = Profile {
@@ -788,7 +859,10 @@ mod tests {
             ..Profile::named("P")
         };
         let mut now = Profile::named("");
-        now.headset = Some(vec![HeadsetChange::Sidetone(2), HeadsetChange::NoiseMode(NoiseMode::Off)]);
+        now.headset = Some(vec![
+            HeadsetChange::Sidetone(2),
+            HeadsetChange::NoiseMode(NoiseMode::Off),
+        ]);
         now.mouse = Some(MouseSettings {
             sleep_minutes: Some(5),
             ..MouseSettings::default()
@@ -813,7 +887,10 @@ mod tests {
         assert_eq!(p.lighting, Some(lit(7.0)));
         assert_eq!(
             p.headset,
-            Some(vec![HeadsetChange::Sidetone(1), HeadsetChange::EqBands(vec![1.0; 10])]),
+            Some(vec![
+                HeadsetChange::Sidetone(1),
+                HeadsetChange::EqBands(vec![1.0; 10])
+            ]),
             "the gain needs headset_extras"
         );
         assert_eq!(missing.len(), 1);
@@ -836,7 +913,11 @@ mod tests {
         };
         apply(&d, &p, &Profile::named(""), &g, &mut sent, t).await;
         let (mut read_now, _) = read(&d, &[Section::Lighting, Section::Headset], &g).await;
-        assert_eq!(read_now.lighting, Some(Lighting::default()), "the fake still answers the old");
+        assert_eq!(
+            read_now.lighting,
+            Some(Lighting::default()),
+            "the fake still answers the old"
+        );
         sent.over(&mut read_now, t, GRACE);
         assert_eq!(read_now.lighting, Some(lit(2.0)));
         // Once the grace has passed, the reading counts again.

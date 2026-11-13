@@ -152,7 +152,9 @@ fn keep_v1(path: &Path, bytes: &[u8]) {
     }
     match std::fs::write(&copy, bytes) {
         Ok(()) => info!(copy = %copy.display(), "profiles from an older gglinux: kept a copy"),
-        Err(e) => warn!(copy = %copy.display(), error = %e, "could not keep a copy of the older profiles"),
+        Err(e) => {
+            warn!(copy = %copy.display(), error = %e, "could not keep a copy of the older profiles")
+        }
     }
 }
 
@@ -300,7 +302,8 @@ mod tests {
 
     impl Dir {
         fn new(tag: &str) -> Dir {
-            let d = std::env::temp_dir().join(format!("gglinux-profiles-{tag}-{}", std::process::id()));
+            let d =
+                std::env::temp_dir().join(format!("gglinux-profiles-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             std::fs::create_dir_all(&d).unwrap();
             Dir(d)
@@ -323,7 +326,12 @@ mod tests {
         .unwrap();
         assert_eq!(s.profiles.len(), 2, "trimmed, replaced");
         assert_eq!(
-            s.profile("Night").unwrap().lighting.as_ref().unwrap().effect,
+            s.profile("Night")
+                .unwrap()
+                .lighting
+                .as_ref()
+                .unwrap()
+                .effect,
             Effect::Spectrum { period_s: 2.0 }
         );
         assert!(s.put(Profile::named("   ")).is_err());
@@ -381,14 +389,27 @@ mod tests {
             .unwrap();
         let both = names(&["rdr2.exe", "steam"]);
         let game = window("RDR2", &["rdr2.exe", "wine64-preload"]);
-        let seen = |w: Option<&Window>| pick(&s, &Seen { running: &both, focus: Some(w) }).cloned();
+        let seen = |w: Option<&Window>| {
+            pick(
+                &s,
+                &Seen {
+                    running: &both,
+                    focus: Some(w),
+                },
+            )
+            .cloned()
+        };
         assert_eq!(seen(Some(&game)), Some(by_program.clone()));
         assert_eq!(
             seen(Some(&window("Steam_App_1174180", &["x"]))),
             Some(by_class),
             "classes ignore case"
         );
-        assert_eq!(seen(Some(&window("kitty", &["kitty"]))), None, "Alt-Tabbed out");
+        assert_eq!(
+            seen(Some(&window("kitty", &["kitty"]))),
+            None,
+            "Alt-Tabbed out"
+        );
         assert_eq!(seen(None), None, "no window has the focus");
         // Not followed: a program rule acts while it runs, a class rule can't.
         assert_eq!(pick(&s, &running(&both)), Some(&by_program));
@@ -440,11 +461,18 @@ mod tests {
         assert_eq!(
             l.effect,
             Effect::Breathing {
-                color: gg_ipc::Rgb { r: 200, g: 80, b: 0 },
+                color: gg_ipc::Rgb {
+                    r: 200,
+                    g: 80,
+                    b: 0
+                },
                 period_s: 3.0
             }
         );
-        assert_eq!((l.brightness, l.keys.len(), l.reactive.enabled), (80, 1, true));
+        assert_eq!(
+            (l.brightness, l.keys.len(), l.reactive.enabled),
+            (80, 1, true)
+        );
         assert_eq!(s.rules, vec![rule("RDR2.exe", "Western")], "while it runs");
         let before = s.before.as_ref().unwrap();
         assert_eq!(before.name, DEFAULT);

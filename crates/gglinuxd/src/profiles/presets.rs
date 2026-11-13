@@ -54,16 +54,28 @@ mod tests {
         let all = all();
         assert_eq!(all.len(), FILES.len());
         for f in &all {
-            assert_eq!(f.profile.sections(), [Section::Switches], "{}", f.profile.name);
+            assert_eq!(
+                f.profile.sections(),
+                [Section::Switches],
+                "{}",
+                f.profile.name
+            );
             assert!(f.about.starts_with("gglinux's own preset"), "{}", f.about);
-            assert!(!f.about.contains("GG's"), "never labelled as GG's: {}", f.about);
+            assert!(
+                !f.about.contains("GG's"),
+                "never labelled as GG's: {}",
+                f.about
+            );
             let s = f.profile.switches.as_ref().unwrap();
             assert!(s.enabled, "a preset turns gglinux's switch settings on");
             assert!(!s.protection.enabled, "Protection Mode needs its gate");
             assert!(s.second.is_empty(), "deep presses need their gate");
         }
         let names: Vec<&str> = all.iter().map(|f| f.profile.name.as_str()).collect();
-        assert_eq!(names, ["Competitive FPS", "MOBA", "Typing", "Default switches"]);
+        assert_eq!(
+            names,
+            ["Competitive FPS", "MOBA", "Typing", "Default switches"]
+        );
     }
 
     #[test]
@@ -77,9 +89,16 @@ mod tests {
         assert!(s.rapid_tap.enabled);
         assert_eq!(s.rapid_tap.pairs.len(), 1);
         let pair = s.rapid_tap.pairs[0];
-        assert_eq!((pair.a, pair.b, pair.mode), (0x04, 0x07, TapMode::LastWins), "A and D");
+        assert_eq!(
+            (pair.a, pair.b, pair.mode),
+            (0x04, 0x07, TapMode::LastWins),
+            "A and D"
+        );
         let typing = find("Typing").unwrap().profile.switches.unwrap();
-        assert_eq!((typing.actuation, typing.rapid_trigger.enabled), (20, false));
+        assert_eq!(
+            (typing.actuation, typing.rapid_trigger.enabled),
+            (20, false)
+        );
         assert!(find("Nope").is_none());
         assert_eq!(infos()[0].sections, [Section::Switches]);
     }

@@ -165,7 +165,11 @@ async fn a_manual_apply_during_a_game_is_undone_when_the_game_ends() {
     assert_eq!(lighting(&fake), look(3.0));
     running(&mut c, &[]).await;
     assert_eq!(lighting(&fake), look(1.0));
-    assert!(c.apply("Nope", false).await.unwrap_err().contains("no profile"));
+    assert!(c
+        .apply("Nope", false)
+        .await
+        .unwrap_err()
+        .contains("no profile"));
 }
 
 #[tokio::test]
@@ -179,9 +183,17 @@ async fn the_running_game_is_shared_even_before_the_daemon_is_wired_in() {
         game_tx,
     );
     running(&mut c, &["game-b"]).await;
-    assert_eq!(game.borrow().as_deref(), Some("game-b"), "clips hear of the game");
+    assert_eq!(
+        game.borrow().as_deref(),
+        Some("game-b"),
+        "clips hear of the game"
+    );
     assert!(c.active.is_none(), "though nothing was applied");
-    assert!(c.apply("B", false).await.unwrap_err().contains("can't reach"));
+    assert!(c
+        .apply("B", false)
+        .await
+        .unwrap_err()
+        .contains("can't reach"));
     running(&mut c, &[]).await;
     assert_eq!(*game.borrow(), None);
 }
@@ -235,7 +247,12 @@ async fn saving_takes_the_sections_asked_for_and_says_which_cant_be_read() {
     c.save_current("All", None).await.unwrap();
     assert_eq!(
         c.store.profile("All").unwrap().sections(),
-        [Section::Switches, Section::Bindings, Section::Screen, Section::Lighting]
+        [
+            Section::Switches,
+            Section::Bindings,
+            Section::Screen,
+            Section::Lighting
+        ]
     );
     // Saved again without sections: the ones it holds.
     fake.now.lock().unwrap().keyboard.lighting = look(5.0);
@@ -243,7 +260,11 @@ async fn saving_takes_the_sections_asked_for_and_says_which_cant_be_read() {
     let nine = c.store.profile("Nine").unwrap();
     assert_eq!(nine.sections(), [Section::Switches, Section::Lighting]);
     assert_eq!(nine.lighting, Some(look(5.0)));
-    assert_eq!(store::load(&d.file()).profiles.len(), c.store.profiles.len(), "saved");
+    assert_eq!(
+        store::load(&d.file()).profiles.len(),
+        c.store.profiles.len(),
+        "saved"
+    );
 }
 
 #[tokio::test]
@@ -255,7 +276,10 @@ async fn saving_right_after_applying_saves_what_was_applied_though_the_daemon_la
     c.save_current("Copy of B", Some(vec![Section::Lighting]))
         .await
         .unwrap();
-    assert_eq!(c.store.profile("Copy of B").unwrap().lighting, Some(look(3.0)));
+    assert_eq!(
+        c.store.profile("Copy of B").unwrap().lighting,
+        Some(look(3.0))
+    );
 }
 
 #[tokio::test]
@@ -269,8 +293,15 @@ async fn an_apply_says_what_was_skipped_in_the_state() {
     let applied = c.state().applied.unwrap();
     assert_eq!(applied.profile, "Keys");
     assert_eq!(applied.notes.len(), 1);
-    assert!(applied.notes[0].starts_with("Key bindings: skipped."), "{applied:?}");
-    assert_eq!(fake.sent(), ["set_lighting"], "the bindings were never sent");
+    assert!(
+        applied.notes[0].starts_with("Key bindings: skipped."),
+        "{applied:?}"
+    );
+    assert_eq!(
+        fake.sent(),
+        ["set_lighting"],
+        "the bindings were never sent"
+    );
 }
 
 fn focus_rules() -> Store {
@@ -321,7 +352,10 @@ async fn a_focus_rule_holds_while_its_window_has_the_focus_and_switching_away_re
     assert!(c.focus_due(t + focus::DEBOUNCE * 2));
     c.follow().await;
     assert_eq!(lighting(&fake), look(3.0));
-    assert_eq!(c.state().focus.window.unwrap().program.as_deref(), Some("game-b"));
+    assert_eq!(
+        c.state().focus.window.unwrap().program.as_deref(),
+        Some("game-b")
+    );
     // Away to the desktop: your own lighting, though game-b still runs.
     let t = t + focus::DEBOUNCE * 4;
     c.on_focus(FocusEvent::Window(None), t);
@@ -330,12 +364,18 @@ async fn a_focus_rule_holds_while_its_window_has_the_focus_and_switching_away_re
     assert_eq!(lighting(&fake), look(1.0));
     assert!(c.active.is_none());
     // The desktop stops reporting: rules on focus act while their program runs.
-    assert!(c.on_focus(FocusEvent::Down("Hyprland closed its event socket".into()), t));
+    assert!(c.on_focus(
+        FocusEvent::Down("Hyprland closed its event socket".into()),
+        t
+    ));
     c.follow().await;
     assert_eq!(lighting(&fake), look(3.0), "game-b runs");
     let status = c.state().focus;
     assert_eq!(status.source, None);
-    assert!(status.note.unwrap().contains("act while their program runs"));
+    assert!(status
+        .note
+        .unwrap()
+        .contains("act while their program runs"));
 }
 
 #[tokio::test]
@@ -345,54 +385,91 @@ async fn presets_apply_copy_and_share_like_profiles() {
     assert_eq!(c.state().presets.len(), 4);
     c.apply("Competitive FPS", true).await.unwrap();
     assert_eq!(fake.now.lock().unwrap().keyboard.switches.actuation, 10);
-    assert!(c.apply("Competitive FPS", false).await.is_err(), "not a saved profile");
-    let copy = |c: &mut Controller, to: Option<&str>| {
-        c.copy("Typing", true, to.map(String::from))
-    };
+    assert!(
+        c.apply("Competitive FPS", false).await.is_err(),
+        "not a saved profile"
+    );
+    let copy = |c: &mut Controller, to: Option<&str>| c.copy("Typing", true, to.map(String::from));
     copy(&mut c, None).unwrap();
     copy(&mut c, None).unwrap();
     assert!(c.store.profile("Typing").is_some() && c.store.profile("Typing 2").is_some());
-    assert!(copy(&mut c, Some("Typing")).unwrap_err().contains("saved already"));
+    assert!(copy(&mut c, Some("Typing"))
+        .unwrap_err()
+        .contains("saved already"));
     let file = c.file("Typing", false).unwrap();
     assert_eq!(file.profile.switches.as_ref().unwrap().actuation, 20);
     // Shared and read back in.
     let shared = ProfileFile::parse(&file.to_json()).unwrap().profile;
-    assert!(c.import(shared.clone(), false).unwrap_err().contains("saved already"));
-    c.import(Profile { name: "Friend's".into(), ..shared.clone() }, false).unwrap();
+    assert!(c
+        .import(shared.clone(), false)
+        .unwrap_err()
+        .contains("saved already"));
+    c.import(
+        Profile {
+            name: "Friend's".into(),
+            ..shared.clone()
+        },
+        false,
+    )
+    .unwrap();
     c.import(shared, true).unwrap();
     assert!(c.import(Profile::named("Empty"), false).is_err());
-    assert!(store::load(&d.file()).profile("Friend's").is_some(), "saved");
+    assert!(
+        store::load(&d.file()).profile("Friend's").is_some(),
+        "saved"
+    );
 }
 
 #[tokio::test]
 async fn requests_are_answered_through_the_handle() {
     let d = Dir::new("handle");
     let (c, _fake) = controller(&d);
-    let h = spawn_with(c, FocusEnv { runtime: None, signature: None, bus: false }, Duration::from_secs(60));
+    let h = spawn_with(
+        c,
+        FocusEnv {
+            runtime: None,
+            signature: None,
+            bus: false,
+        },
+        Duration::from_secs(60),
+    );
     let ResponseData::Profiles { state } = h.ask(Request::GetProfiles).await else {
         panic!("no state");
     };
     assert_eq!(state.profiles, ["A", "B"]);
-    assert_eq!(state.sections, [vec![Section::Lighting], vec![Section::Lighting]]);
+    assert_eq!(
+        state.sections,
+        [vec![Section::Lighting], vec![Section::Lighting]]
+    );
     let answer = h
         .ask(Request::GetProfile {
             name: "MOBA".into(),
             preset: true,
         })
         .await;
-    assert!(matches!(answer, ResponseData::Profile { file } if file.about.starts_with("gglinux's own")));
+    assert!(
+        matches!(answer, ResponseData::Profile { file } if file.about.starts_with("gglinux's own"))
+    );
     assert!(matches!(
         h.ask(Request::DeleteProfile { name: "A".into() }).await,
         ResponseData::Error { message } if message.contains("game-a")
     ));
     assert!(matches!(
-        h.ask(Request::CopyProfile { from: "A".into(), preset: false, to: None }).await,
+        h.ask(Request::CopyProfile {
+            from: "A".into(),
+            preset: false,
+            to: None
+        })
+        .await,
         ResponseData::Success
     ));
     // The actions on the spare keys apply through their own command.
-    h.send::<()>(|reply| Command::Apply { name: "A 2".into(), reply })
-        .await
-        .unwrap();
+    h.send::<()>(|reply| Command::Apply {
+        name: "A 2".into(),
+        reply,
+    })
+    .await
+    .unwrap();
 }
 
 /// End to end: a fake Hyprland's event stream, through the task, to the fake daemon.
@@ -427,7 +504,11 @@ async fn the_task_follows_hyprlands_focus_and_alt_tab_out_restores() {
     };
     // Started on the terminal (j/activewindow), then the game's window for 1.2 s.
     tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert_eq!(lighting(&fake), look(2.0), "the game has had the focus for 0.8 s");
+    assert_eq!(
+        lighting(&fake),
+        look(2.0),
+        "the game has had the focus for 0.8 s"
+    );
     let s = state(h.clone()).await;
     assert_eq!(s.focus.source.as_deref(), Some("Hyprland"));
     assert_eq!(s.active.unwrap().profile, "A");

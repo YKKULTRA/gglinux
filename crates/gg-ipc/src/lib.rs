@@ -2719,7 +2719,11 @@ mod tests {
         ));
         assert!(matches!(
             req(r#"{"method":"copy_profile","params":{"from":"Typing","preset":true}}"#),
-            Request::CopyProfile { preset: true, to: None, .. }
+            Request::CopyProfile {
+                preset: true,
+                to: None,
+                ..
+            }
         ));
         for r in [
             Request::GetProfile {

@@ -556,7 +556,13 @@ fn chosen(g: &ProfilesUi<'_>) -> Vec<Section> {
 pub fn export_path(dir: &Path, name: &str) -> PathBuf {
     let safe: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || "-_ .".contains(c) { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || "-_ .".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     dir.join(format!("gglinux-profile-{}.json", safe.trim()))
 }
@@ -657,7 +663,11 @@ fn import_file(ui: &AppWindow, client: &Client, path: &Path) {
         Err(e) => return mark_profiles(ui, false, e.into()),
     };
     g.set_typing(false);
-    let saved = client.state().profiles.map(|s| s.profiles).unwrap_or_default();
+    let saved = client
+        .state()
+        .profiles
+        .map(|s| s.profiles)
+        .unwrap_or_default();
     if taken(&saved, &profile.name) {
         g.set_replace_name(profile.name.trim().into());
         TO_REPLACE.with(|t| *t.borrow_mut() = Some(profile));
@@ -691,10 +701,12 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
         }
     };
     g.on_apply(send(|st, i| {
-        st.profiles.get(i as usize).map(|name| Request::ApplyProfile {
-            name: name.clone(),
-            preset: false,
-        })
+        st.profiles
+            .get(i as usize)
+            .map(|name| Request::ApplyProfile {
+                name: name.clone(),
+                preset: false,
+            })
     }));
     g.on_apply_preset(send(|st, i| {
         st.presets.get(i as usize).map(|p| Request::ApplyProfile {
@@ -723,7 +735,13 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
         let Some(ui) = weak.upgrade() else { return };
         ui.global::<ProfilesUi>().set_confirm(SharedString::new());
         let name = name.to_string();
-        act(&ui, &c, Request::DeleteProfile { name }, TIMEOUT, mark_profiles);
+        act(
+            &ui,
+            &c,
+            Request::DeleteProfile { name },
+            TIMEOUT,
+            mark_profiles,
+        );
     });
     let weak = ui.as_weak();
     let c = client.clone();
@@ -901,7 +919,8 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
     let c = client.clone();
     g.on_replace(move || {
         let Some(ui) = weak.upgrade() else { return };
-        ui.global::<ProfilesUi>().set_replace_name(SharedString::new());
+        ui.global::<ProfilesUi>()
+            .set_replace_name(SharedString::new());
         if let Some(profile) = TO_REPLACE.with(|t| t.borrow_mut().take()) {
             let req = Request::ImportProfile {
                 profile: Box::new(profile),
@@ -913,7 +932,8 @@ pub fn bind_profiles(ui: &AppWindow, client: &Client) {
     let weak = ui.as_weak();
     g.on_cancel_replace(move || {
         let Some(ui) = weak.upgrade() else { return };
-        ui.global::<ProfilesUi>().set_replace_name(SharedString::new());
+        ui.global::<ProfilesUi>()
+            .set_replace_name(SharedString::new());
         TO_REPLACE.with(|t| t.borrow_mut().take());
     });
     let c = client.clone();
@@ -1204,8 +1224,9 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
         // Headless there's no session bus, so the file chooser fails and the path box shows.
         "profiles.import" => profiles.invoke_import(),
         // As after an export (writing a file would touch the real Documents folder).
-        "profiles.exported" => profiles
-            .set_exported("/home/you/Documents/gglinux-profile-Evening.json".into()),
+        "profiles.exported" => {
+            profiles.set_exported("/home/you/Documents/gglinux-profile-Evening.json".into())
+        }
         // As after reading a file whose profile has a saved one's name.
         "profiles.replace" => profiles.set_replace_name("Evening".into()),
         "settings.hyprland" => {
@@ -1294,7 +1315,10 @@ mod tests {
             preset_about("gglinux's own preset, not SteelSeries': 2.0 mm, no Rapid Trigger."),
             "2.0 mm, no Rapid Trigger."
         );
-        assert_eq!(preset_about("Shared by a friend: FPS"), "Shared by a friend: FPS");
+        assert_eq!(
+            preset_about("Shared by a friend: FPS"),
+            "Shared by a friend: FPS"
+        );
         assert_eq!(and_list(&[Section::Mouse]), "Mouse");
         assert_eq!(
             and_list(&[Section::Headset, Section::Mouse, Section::Lighting]),
@@ -1307,10 +1331,17 @@ mod tests {
         };
         let row = rule_row(&class);
         assert_eq!(
-            (row.process.as_str(), row.profile.as_str(), row.when.as_str()),
+            (
+                row.process.as_str(),
+                row.profile.as_str(),
+                row.when.as_str()
+            ),
             ("window class steam_app_1174180", "FPS", "on focus")
         );
-        assert_eq!(rule_row(&GameRule::running("obs", "Quiet")).when, "while it runs");
+        assert_eq!(
+            rule_row(&GameRule::running("obs", "Quiet")).when,
+            "while it runs"
+        );
     }
 
     #[test]
@@ -1354,7 +1385,8 @@ mod tests {
         assert_eq!(
             applied_line(&skipped),
             (
-                "Your own settings came back, except:\nMouse: skipped. why\nLighting: no keyboard".into(),
+                "Your own settings came back, except:\nMouse: skipped. why\nLighting: no keyboard"
+                    .into(),
                 true
             )
         );

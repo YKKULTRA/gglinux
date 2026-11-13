@@ -164,7 +164,8 @@ impl Profile {
         if self.sections().is_empty() {
             return Err(format!("the profile \"{}\" holds no settings", self.name));
         }
-        let within = |s: Section, r: Result<(), String>| r.map_err(|e| format!("{}: {e}", s.label()));
+        let within =
+            |s: Section, r: Result<(), String>| r.map_err(|e| format!("{}: {e}", s.label()));
         if let Some(l) = &self.lighting {
             within(Section::Lighting, l.validate())?;
         }
@@ -468,7 +469,10 @@ mod tests {
         assert_eq!(focused.reason(), "a steam_app_1174180 window has the focus");
         assert_eq!(old.reason(), "RDR2.exe is running");
         let json = serde_json::to_value(&focused).unwrap();
-        assert_eq!((json["by"].as_str(), json["when"].as_str()), (Some("class"), Some("focused")));
+        assert_eq!(
+            (json["by"].as_str(), json["when"].as_str()),
+            (Some("class"), Some("focused"))
+        );
     }
 
     #[test]
@@ -484,15 +488,22 @@ mod tests {
         assert_eq!(ProfileFile::parse(&bare).unwrap().profile, p);
         for (bad, why) in [
             ("{ nope", "not JSON"),
-            (r#"{"format":"something-else","version":1}"#, "isn't a gglinux"),
+            (
+                r#"{"format":"something-else","version":1}"#,
+                "isn't a gglinux",
+            ),
             (r#"{"hello":1}"#, "isn't a gglinux"),
         ] {
             let e = ProfileFile::parse(bad).unwrap_err();
             assert!(e.contains(why), "{bad}: {e}");
         }
         let newer = text.replace(r#""version": 2"#, r#""version": 3"#);
-        assert!(ProfileFile::parse(&newer).unwrap_err().contains("newer gglinux"));
+        assert!(ProfileFile::parse(&newer)
+            .unwrap_err()
+            .contains("newer gglinux"));
         let empty = ProfileFile::new(Profile::named("Empty"), "").to_json();
-        assert!(ProfileFile::parse(&empty).unwrap_err().contains("no settings"));
+        assert!(ProfileFile::parse(&empty)
+            .unwrap_err()
+            .contains("no settings"));
     }
 }

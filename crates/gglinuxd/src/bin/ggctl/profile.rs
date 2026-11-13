@@ -23,7 +23,10 @@ fn sections(word: &str) -> Result<Vec<Section>> {
         .map(|w| {
             Section::from_key(w.trim()).with_context(|| {
                 let names: Vec<&str> = Section::ALL.iter().map(|s| s.key()).collect();
-                format!("'{w}' is not a part of a profile (all, or some of: {})", names.join(", "))
+                format!(
+                    "'{w}' is not a part of a profile (all, or some of: {})",
+                    names.join(", ")
+                )
             })
         })
         .collect()
@@ -91,7 +94,9 @@ pub fn action(rest: &[&str]) -> Result<Action> {
             Request::SetGameRules { rules }
         }
         ["rule", "rm", n] => {
-            let n: usize = n.parse().with_context(|| format!("'{n}' is not a rule's number"))?;
+            let n: usize = n
+                .parse()
+                .with_context(|| format!("'{n}' is not a rule's number"))?;
             let mut rules = read()?.rules;
             if n == 0 || n > rules.len() {
                 bail!("there's no rule {n}: `ggctl profile list` numbers them");
@@ -241,7 +246,10 @@ mod tests {
             Request::SaveProfile { sections: Some(s), .. } if s.len() == 6
         ));
         let e = action(&["save", "lights", "x"]).err().unwrap().to_string();
-        assert!(e.contains("headset, mouse, ") && e.contains("'lights'"), "{e}");
+        assert!(
+            e.contains("headset, mouse, ") && e.contains("'lights'"),
+            "{e}"
+        );
         assert!(action(&["save", "all"]).is_err(), "no name");
     }
 
@@ -280,7 +288,10 @@ mod tests {
             sends(&line),
             Request::ImportProfile { profile, replace: true } if *profile == p
         ));
-        let e = action(&["import", bad.to_str().unwrap()]).err().unwrap().to_string();
+        let e = action(&["import", bad.to_str().unwrap()])
+            .err()
+            .unwrap()
+            .to_string();
         assert!(e.contains("isn't a gglinux profile"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }

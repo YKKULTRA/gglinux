@@ -172,9 +172,8 @@ pub async fn hyprland(dir: PathBuf, tx: mpsc::UnboundedSender<FocusEvent>) {
                         Ok(clients) => client(&clients, &a),
                         Err(_) => None,
                     };
-                    let w = found.or_else(|| {
-                        class.clone().map(|class| Window { class, pid: None })
-                    });
+                    let w =
+                        found.or_else(|| class.clone().map(|class| Window { class, pid: None }));
                     let _ = tx.send(FocusEvent::Window(w));
                 }
                 None => {}
@@ -295,11 +294,15 @@ pub mod testing {
         let requests = UnixListener::bind(dir.join(".socket.sock")).unwrap();
         tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = requests.accept().await else { return };
+                let Ok((mut s, _)) = requests.accept().await else {
+                    return;
+                };
                 let mut asked = vec![0u8; 64];
                 let n = s.read(&mut asked).await.unwrap_or(0);
                 let answer = match &asked[..n] {
-                    b"j/activewindow" => r#"{"address":"0x55d0c3a60000","class":"kitty","pid":1777}"#,
+                    b"j/activewindow" => {
+                        r#"{"address":"0x55d0c3a60000","class":"kitty","pid":1777}"#
+                    }
                     b"j/clients" => CLIENTS,
                     _ => "unknown request",
                 };
@@ -353,8 +356,14 @@ mod tests {
             parse_line("activewindowv2>>55d0c3a5e8b0\n"),
             Some(HyprEvent::Address("55d0c3a5e8b0".into()))
         );
-        assert_eq!(parse_line("activewindowv2>>"), Some(HyprEvent::Address(String::new())));
-        assert_eq!(parse_line("activewindowv2>>,"), Some(HyprEvent::Address(String::new())));
+        assert_eq!(
+            parse_line("activewindowv2>>"),
+            Some(HyprEvent::Address(String::new()))
+        );
+        assert_eq!(
+            parse_line("activewindowv2>>,"),
+            Some(HyprEvent::Address(String::new()))
+        );
         assert_eq!(parse_line("workspace>>2"), None);
         assert_eq!(parse_line("garbage"), None);
     }
@@ -482,7 +491,13 @@ mod tests {
 
     #[test]
     fn the_kwin_script_calls_what_the_daemon_serves() {
-        for name in [KWIN_NAME, KWIN_PATH, KWIN_INTERFACE, "WindowActivated", "callDBus"] {
+        for name in [
+            KWIN_NAME,
+            KWIN_PATH,
+            KWIN_INTERFACE,
+            "WindowActivated",
+            "callDBus",
+        ] {
             assert!(SCRIPT.contains(name), "{name}");
         }
         let meta: serde_json::Value = serde_json::from_str(METADATA).unwrap();
