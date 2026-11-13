@@ -630,8 +630,7 @@ mod tests {
             reply,
             running: writes.start(),
         };
-        let loaded = on_command(cmd, &mut store, None, &gates(true, true), &event_tx, None);
-        assert!(!loaded);
+        on_command(cmd, &mut store, None, &gates(true, true), &event_tx, None);
         let e = answer.try_recv().unwrap().unwrap_err();
         assert!(e.contains("isn't connected"), "{e}");
         assert!(!writes.running());
