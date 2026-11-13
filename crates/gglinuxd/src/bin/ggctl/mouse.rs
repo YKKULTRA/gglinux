@@ -46,10 +46,7 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
             wheel_request(applied_buttons()?.as_deref(), wheel, save)
         }
         Some((&"wheel", _)) => {
-            bail!(
-                "usage: ggctl mouse wheel <up> <down> [--save]   (each one of: {})",
-                wheel_names()
-            )
+            bail!("usage: ggctl mouse wheel <up> <down> [--save]   (each {WHEEL_TAKES})")
         }
         Some((&"save", [])) => Request::SaveMouse,
         Some((&"save", _)) => bail!("usage: ggctl mouse save"),
@@ -76,20 +73,15 @@ pub fn request(rest: &[&str], args: &[String], save: bool) -> Result<Request> {
     })
 }
 
-/// The names the wheel takes: only actions a capture of GG shows on it.
-fn wheel_names() -> String {
-    let names: Vec<&str> = gg_ipc::mouse_keys::WHEEL.iter().map(|(n, _)| *n).collect();
-    names.join(", ")
-}
+/// What the wheel takes, in words: what a button takes, as GG offers it.
+const WHEEL_TAKES: &str =
+    "what a button takes: button1 to button6, dpi, scrollup, scrolldown, disable, a key such as f5, or a media key such as volumeup";
 
 /// A wheel action as typed, if the daemon takes it for the wheel.
 fn wheel_name(name: &str) -> Result<String> {
     match ButtonAction::parse(name) {
-        Ok(action) if proto::wheel_code(action).is_some() => Ok(name.trim().to_ascii_lowercase()),
-        _ => bail!(
-            "“{name}” is not known for the wheel yet (try: {})",
-            wheel_names()
-        ),
+        Ok(action) if proto::wheel_takes(action) => Ok(name.trim().to_ascii_lowercase()),
+        _ => bail!("the wheel doesn't take “{}”: it takes {WHEEL_TAKES}", name.trim()),
     }
 }
 
@@ -426,13 +418,17 @@ mod tests {
         );
     }
 
-    /// Refused before the daemon is asked anything, so no daemon is needed here.
+    /// Any name a button takes goes on the wheel; anything else is refused before the
+    /// daemon is asked anything, so no daemon is needed here.
     #[test]
-    fn the_wheel_takes_only_what_a_capture_shows() {
-        for bad in ["mouse wheel f5 scrolldown", "mouse wheel scrollup dpi"] {
+    fn the_wheel_takes_any_button_name() {
+        for name in ["button1", "Button6", "dpi", "disable", "f5", "a", "volumeup", "mute"] {
+            assert_eq!(wheel_name(name).unwrap(), name.to_ascii_lowercase());
+        }
+        for bad in ["mouse wheel f99 scrolldown", "mouse wheel scrollup button7"] {
             let e = parse(&args(bad)).err().unwrap().to_string();
-            assert!(e.contains("not known for the wheel yet"), "{bad}: {e}");
-            assert!(e.contains("scrollup, scrolldown, button4"), "{e}");
+            assert!(e.contains("the wheel doesn't take"), "{bad}: {e}");
+            assert!(e.contains("button1 to button6"), "{e}");
         }
         for bad in ["mouse wheel", "mouse wheel button4", "mouse wheel a b c"] {
             let e = parse(&args(bad)).err().unwrap().to_string();

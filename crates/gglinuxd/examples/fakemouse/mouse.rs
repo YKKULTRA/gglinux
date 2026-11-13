@@ -3,8 +3,8 @@
 //!
 //! With `--asleep` it behaves as the daemon does with a sleeping mouse: no battery, none of
 //! the mouse's own settings shown, and every write refused with [`MOUSE_ASLEEP`]. The
-//! wheel is checked as the daemon checks it: only the actions a capture shows, and
-//! anything but the factory pair only with `mouse_wheel` on.
+//! wheel is checked as the daemon checks it: any button name, and anything but the factory
+//! pair only with `mouse_wheel` on.
 
 use gg_device_mouse::{proto, ButtonAction, BUTTON_COUNT, DEFAULT_WHEEL};
 use gg_ipc::{
@@ -100,8 +100,8 @@ fn buttons_refusal(actions: &[String], experimental: &Experimental) -> Option<St
     let mut picked = Vec::new();
     for name in wheel {
         match ButtonAction::parse(name) {
-            Ok(action) if proto::wheel_code(action).is_some() => picked.push(action),
-            _ => return Some(format!("“{name}” is not known for the wheel yet")),
+            Ok(action) if proto::wheel_takes(action) => picked.push(action),
+            _ => return Some(format!("the wheel doesn't take “{name}”")),
         }
     }
     if picked == DEFAULT_WHEEL {
@@ -186,8 +186,12 @@ mod tests {
         let gated = buttons_refusal(&eight("button4", "scrolldown"), &off).unwrap();
         assert!(gated.contains("scroll wheel"), "{gated}");
         assert_eq!(buttons_refusal(&eight("button4", "scrolldown"), &on), None);
-        let unknown = buttons_refusal(&eight("f5", "scrolldown"), &on).unwrap();
-        assert!(unknown.contains("not known for the wheel yet"), "{unknown}");
+        // Any button name goes on the wheel; a name no button takes doesn't.
+        for name in ["f5", "dpi", "button6", "volumeup", "disable"] {
+            assert_eq!(buttons_refusal(&eight(name, "scrolldown"), &on), None, "{name}");
+        }
+        let unknown = buttons_refusal(&eight("f99", "scrolldown"), &on).unwrap();
+        assert!(unknown.contains("the wheel doesn't take"), "{unknown}");
         assert!(buttons_refusal(&names(&SIX[..5]), &on).is_some());
 
         // Recorded as the daemon records them.

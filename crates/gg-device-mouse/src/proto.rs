@@ -35,8 +35,9 @@ pub const CMD_READ_SENSITIVITY: u8 = 0xAC;
 pub const CMD_READ_POLLING_RATE: u8 = 0x97;
 /// Set what the scroll wheel does: `1A <up entry> <down entry>`, each entry five bytes like
 /// a field of the buttons table [`CMD_BUTTONS`]. Not in rivalcfg: from our own GG 123
-/// capture rival-5 (2026-11-13, `docs/PROTOCOLS.md` §1 "Rival: more from GG 123"), where GG
-/// sends it on Save, followed by [`CMD_SAVE`]. Nothing reads it back.
+/// captures rival-5 and rival-8 to rival-10 (2026-11-13, `docs/PROTOCOLS.md` §1 "Rival:
+/// more from GG 123"), where GG sends it on Save, followed by [`CMD_SAVE`]. Nothing reads
+/// it back. What the wheel takes: [`wheel_takes`].
 pub const CMD_WHEEL: u8 = 0x1A;
 
 /// The firmware always parses five DPI slots, whatever `count` says.
@@ -334,80 +335,74 @@ pub fn default_buttons() -> [ButtonAction; BUTTON_COUNT] {
 pub fn buttons_packet(actions: &[ButtonAction; BUTTON_COUNT]) -> Vec<u8> {
     let mut packet = vec![0u8; 1 + BUTTON_COUNT * BUTTON_FIELD_LEN];
     packet[0] = CMD_BUTTONS;
-
     for (i, action) in actions.iter().enumerate() {
         let off = 1 + i * BUTTON_FIELD_LEN;
-        match *action {
-            ButtonAction::Button(n) => packet[off] = n,
-            ButtonAction::Disable => packet[off] = BTN_DISABLE,
-            ButtonAction::DpiCycle => packet[off] = BTN_DPI_SWITCH,
-            ButtonAction::ScrollUp => packet[off] = BTN_SCROLL_UP,
-            ButtonAction::ScrollDown => packet[off] = BTN_SCROLL_DOWN,
-            ButtonAction::Key(code) => {
-                packet[off] = BTN_KEYBOARD;
-                packet[off + 1] = code;
-            }
-            ButtonAction::Multimedia(code) => {
-                packet[off] = BTN_MULTIMEDIA;
-                packet[off + 1] = code;
-            }
-        }
+        packet[off..off + BUTTON_FIELD_LEN].copy_from_slice(&entry(*action));
     }
     packet
 }
 
-/// One wheel action a capture proves: the action, the byte GG sent for it, and where it
-/// was seen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WheelAction {
-    pub action: ButtonAction,
-    pub code: u8,
-    pub seen: &'static str,
+/// One action's five bytes, as the buttons table `19` and the wheel `1A` both take them:
+/// its code, then a key's or media key's usage, then zeros.
+fn entry(action: ButtonAction) -> [u8; BUTTON_FIELD_LEN] {
+    let (code, usage) = match action {
+        ButtonAction::Button(n) => (n, 0),
+        ButtonAction::Disable => (BTN_DISABLE, 0),
+        ButtonAction::DpiCycle => (BTN_DPI_SWITCH, 0),
+        ButtonAction::ScrollUp => (BTN_SCROLL_UP, 0),
+        ButtonAction::ScrollDown => (BTN_SCROLL_DOWN, 0),
+        ButtonAction::Key(usage) => (BTN_KEYBOARD, usage),
+        ButtonAction::Multimedia(usage) => (BTN_MULTIMEDIA, usage),
+    };
+    [code, usage, 0, 0, 0]
 }
-
-/// The only actions sent for the wheel: those a capture shows. The buttons table's other
-/// actions (other buttons, keys, media keys, DPI, disabled) look alike but were never seen
-/// on the wheel, so they aren't sent. Add a row only with the capture that proves it.
-pub const WHEEL_ACTIONS: [WheelAction; 3] = [
-    WheelAction {
-        action: ButtonAction::ScrollUp,
-        code: 0x31,
-        seen: "rival-5.pcap: GG's default wheel, 1a 31 00 00 00 00 32",
-    },
-    WheelAction {
-        action: ButtonAction::ScrollDown,
-        code: 0x32,
-        seen: "rival-5.pcap: GG's default wheel, 1a 31 00 00 00 00 32",
-    },
-    WheelAction {
-        action: ButtonAction::Button(4),
-        code: 0x04,
-        seen: "rival-5.pcap: Scroll Up = Button 4, 1a 04 00 00 00 00 32",
-    },
-];
 
 /// The wheel as it comes from the factory, and as GG sends it by default: up scrolls up,
 /// down scrolls down.
 pub const DEFAULT_WHEEL: [ButtonAction; 2] = [ButtonAction::ScrollUp, ButtonAction::ScrollDown];
 
-/// The byte the wheel takes for `action`, or `None` for an action no capture shows on it.
-pub fn wheel_code(action: ButtonAction) -> Option<u8> {
-    WHEEL_ACTIONS
-        .iter()
-        .find(|w| w.action == action)
-        .map(|w| w.code)
+/// Whether the wheel takes `action`. Each kind of action GG 123 offers for the wheel went
+/// out in our captures as the same entry the buttons table has for it ([`entry`]):
+///
+/// | GG's action | entry | capture |
+/// |---|---|---|
+/// | Button 1, 2, 3, 5, 6 | `01` `02` `03` `05` `06` | rival-8, 22:08:25 to 22:09:12 (up) |
+/// | Button 4 | `04` | rival-5 (up), rival-8 22:10:01 (down) |
+/// | DPI Toggle | `30` | rival-8 22:09:25 |
+/// | Scroll Up, Scroll Down | `31`, `32` | rival-5; rival-8 22:09:36 (`32` up) |
+/// | a keyboard key | `51 <usage>` (A: `51 04`) | rival-9 22:11:45 |
+/// | a media key | `61 <usage>` (Volume Up: `61 e9`) | rival-9 22:12:15 |
+/// | Deactivate | `00` | rival-10 22:13:50 |
+///
+/// The entry doesn't depend on the direction (button 4 and the scroll codes were seen in
+/// both), so every kind goes in both. Refused: a button the mouse doesn't have (it has
+/// [`BUTTON_COUNT`]), and a key or media code no name in rivalcfg's tables gives
+/// ([`ButtonAction::parse`] never gives one).
+pub fn wheel_takes(action: ButtonAction) -> bool {
+    let named = |table: &[(&str, u8)], code: u8| table.iter().any(|&(_, c)| c == code);
+    match action {
+        ButtonAction::Button(n) => (1..=BUTTON_COUNT as u8).contains(&n),
+        ButtonAction::Disable
+        | ButtonAction::DpiCycle
+        | ButtonAction::ScrollUp
+        | ButtonAction::ScrollDown => true,
+        ButtonAction::Key(code) => named(tables::KEYBOARD, code),
+        ButtonAction::Multimedia(code) => named(tables::MULTIMEDIA, code),
+    }
 }
 
-/// Build the wheel packet: `1A <up> 00 00 00 00 <down> 00 00 00 00`, as GG sends it.
-/// Refuses an action [`WHEEL_ACTIONS`] doesn't have.
+/// Build the wheel packet: `1A <up entry> <down entry>`, five bytes each, as GG sends it.
+/// Where GG left a byte of the action before in an entry (rival-10), this writes zeros.
+/// Refuses an action [`wheel_takes`] doesn't take.
 pub fn wheel_packet(up: ButtonAction, down: ButtonAction) -> Result<Vec<u8>> {
     let mut packet = vec![0u8; 1 + 2 * BUTTON_FIELD_LEN];
     packet[0] = CMD_WHEEL;
     for (i, action) in [up, down].into_iter().enumerate() {
-        let Some(code) = wheel_code(action) else {
-            bail!("{action:?} is not known for the wheel yet: no capture shows its bytes");
-        };
-        packet[1 + i * BUTTON_FIELD_LEN] = code;
+        if !wheel_takes(action) {
+            bail!("the wheel doesn't take {action:?}: the mouse has no name for it");
+        }
+        let at = 1 + i * BUTTON_FIELD_LEN;
+        packet[at..at + BUTTON_FIELD_LEN].copy_from_slice(&entry(action));
     }
     Ok(packet)
 }
@@ -633,56 +628,79 @@ mod tests {
         assert!(ButtonAction::parse("nonsense").is_err());
     }
 
-    /// Byte for byte as GG 123 sent them on Save (rival-5 capture): Scroll Up as Button 4,
-    /// then back to GG's default. The whole report is these eleven bytes and zeros.
+    /// Byte for byte as GG 123 sent each wheel action on Save (captures rival-5 and rival-8
+    /// to rival-10, `~/projects/gg-m11/captures/`). The whole report is these eleven bytes
+    /// and zeros. Where GG left a stale byte from the action before (rival-10: Deactivate
+    /// after Volume Up went out as `1a 00 e9 …`), gglinux writes zeros.
     #[test]
-    fn the_wheel_goes_out_as_gg_sends_it() {
+    fn every_wheel_action_goes_out_as_gg_sends_it() {
         use ButtonAction::*;
-        assert_eq!(
-            wheel_packet(Button(4), ScrollDown).unwrap(),
-            [0x1A, 0x04, 0, 0, 0, 0, 0x32, 0, 0, 0, 0]
-        );
-        assert_eq!(
-            wheel_packet(ScrollUp, ScrollDown).unwrap(),
-            [0x1A, 0x31, 0, 0, 0, 0, 0x32, 0, 0, 0, 0]
-        );
+        let wheel = |up: [u8; 2], down: u8| [0x1A, up[0], up[1], 0, 0, 0, down, 0, 0, 0, 0];
+        let cases = [
+            (Button(1), ScrollDown, wheel([0x01, 0], 0x32), "rival-8 22:08:25"),
+            (Button(2), ScrollDown, wheel([0x02, 0], 0x32), "rival-8 22:08:37"),
+            (Button(3), ScrollDown, wheel([0x03, 0], 0x32), "rival-8 22:08:49"),
+            (Button(4), ScrollDown, wheel([0x04, 0], 0x32), "rival-5"),
+            (Button(5), ScrollDown, wheel([0x05, 0], 0x32), "rival-8 22:09:00"),
+            (Button(6), ScrollDown, wheel([0x06, 0], 0x32), "rival-8 22:09:12"),
+            (DpiCycle, ScrollDown, wheel([0x30, 0], 0x32), "rival-8 22:09:25"),
+            (ScrollDown, ScrollDown, wheel([0x32, 0], 0x32), "rival-8 22:09:36"),
+            (ScrollUp, ScrollDown, wheel([0x31, 0], 0x32), "rival-8 22:09:48"),
+            (ScrollUp, Button(4), wheel([0x31, 0], 0x04), "rival-8 22:10:01"),
+            (Key(0x04), ScrollDown, wheel([0x51, 0x04], 0x32), "rival-9 22:11:45"),
+            (Multimedia(0xE9), ScrollDown, wheel([0x61, 0xE9], 0x32), "rival-9 22:12:15"),
+            (Disable, ScrollDown, wheel([0x00, 0], 0x32), "rival-10 22:13:50"),
+        ];
+        for (up, down, want, seen) in cases {
+            assert_eq!(wheel_packet(up, down).unwrap(), want, "{seen}");
+        }
+        // The names that give the captured key and media key.
+        assert_eq!(ButtonAction::parse("a").unwrap(), Key(0x04));
+        assert_eq!(ButtonAction::parse("volumeup").unwrap(), Multimedia(0xE9));
         assert_eq!(
             wheel_packet(DEFAULT_WHEEL[0], DEFAULT_WHEEL[1]).unwrap(),
             wheel_packet(ScrollUp, ScrollDown).unwrap()
         );
-        // Each entry has the buttons table's layout: the same byte the button field takes.
-        for w in WHEEL_ACTIONS {
+    }
+
+    /// The wheel's entry is the buttons table's field for the same action, in either slot.
+    #[test]
+    fn a_wheel_entry_is_the_buttons_tables_field() {
+        use ButtonAction::*;
+        let mut every: Vec<ButtonAction> = (1..=BUTTON_COUNT as u8).map(Button).collect();
+        every.extend([Disable, DpiCycle, ScrollUp, ScrollDown]);
+        every.extend(tables::KEYBOARD.iter().map(|&(_, code)| Key(code)));
+        every.extend(tables::MULTIMEDIA.iter().map(|&(_, code)| Multimedia(code)));
+        for action in every {
             let mut buttons = default_buttons();
-            buttons[0] = w.action;
-            assert_eq!(buttons_packet(&buttons)[1], w.code, "{:?}", w.action);
-            assert!(w.seen.contains(".pcap"), "{:?} has its capture", w.action);
+            buttons[2] = action;
+            let field = &buttons_packet(&buttons)[1 + 2 * BUTTON_FIELD_LEN..][..BUTTON_FIELD_LEN];
+            let up = wheel_packet(action, ScrollDown).unwrap();
+            let down = wheel_packet(ScrollUp, action).unwrap();
+            assert_eq!(&up[1..1 + BUTTON_FIELD_LEN], field, "{action:?} up");
+            assert_eq!(&down[1 + BUTTON_FIELD_LEN..], field, "{action:?} down");
         }
     }
 
-    /// Only what a capture shows goes to the wheel: everything else in the buttons table is
-    /// refused there, however alike it looks.
+    /// What the mouse doesn't have, or the tables don't name, is refused, and nothing is
+    /// built for it: a button past the sixth, and key or media codes no name gives.
     #[test]
-    fn an_action_no_capture_shows_on_the_wheel_is_refused() {
+    fn the_wheel_refuses_a_button_or_code_the_mouse_has_no_name_for() {
         use ButtonAction::*;
         for action in [
-            Button(1),
-            Button(2),
-            Button(3),
-            Button(5),
-            Disable,
-            DpiCycle,
-            Key(0x3E),
-            Multimedia(0xCD),
+            Button(0),
+            Button(7),
+            Button(0xFF),
+            Key(0x00),
+            Key(0xF0),
+            Multimedia(0x00),
+            Multimedia(0x30),
         ] {
-            assert_eq!(wheel_code(action), None, "{action:?}");
+            assert!(!wheel_takes(action), "{action:?}");
             let up = wheel_packet(action, ScrollDown).unwrap_err().to_string();
-            assert!(up.contains("not known for the wheel yet"), "{up}");
+            assert!(up.contains("the wheel doesn't take"), "{up}");
             assert!(wheel_packet(ScrollUp, action).is_err(), "{action:?} down");
         }
-        assert_eq!(
-            WHEEL_ACTIONS.map(|w| (w.action, w.code)),
-            [(ScrollUp, 0x31), (ScrollDown, 0x32), (Button(4), 0x04)]
-        );
     }
 
     #[test]

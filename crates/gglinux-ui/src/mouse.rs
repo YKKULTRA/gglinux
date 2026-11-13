@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gg_ipc::mouse_keys::{self, KEYS, MEDIA, WHEEL, WHEEL_FACTORY};
+use gg_ipc::mouse_keys::{self, KEYS, MEDIA, WHEEL_FACTORY};
 use gg_ipc::{
     DpiStage, Experimental, Feature, MouseRadio, MouseSettings, Request, MOUSE_SLEEP_MINUTES,
 };
@@ -26,13 +26,15 @@ const DPI_MAX: i32 = 18000;
 const DPI_STEP: i32 = 100;
 const MAX_STAGES: usize = 5;
 
-/// The `ButtonAction::parse` names offered, in the menu's order (`MouseUi.actions`).
-pub const ACTIONS: [&str; 15] = [
+/// The `ButtonAction::parse` names offered, in the menu's order (`MouseUi.actions`). The
+/// wheel's rows offer the same, as GG does (captures rival-8 to rival-10).
+pub const ACTIONS: [&str; 16] = [
     "button1",
     "button2",
     "button3",
     "button4",
     "button5",
+    "button6",
     "dpi",
     "scrollup",
     "scrolldown",
@@ -49,6 +51,9 @@ pub const KEY_ITEM: usize = ACTIONS.len();
 pub const MEDIA_ITEM: usize = ACTIONS.len() + 1;
 /// proto::default_buttons(): each button itself, the sixth cycling DPI.
 const FACTORY_BUTTONS: [&str; 6] = ["button1", "button2", "button3", "button4", "button5", "dpi"];
+/// The rows the actions menu and the key lists serve are counted as the buttons (0 to 5),
+/// then the wheel turned up (this one) and down (the next), as [`KeyPicker::button`] is.
+pub const WHEEL_ROW: usize = FACTORY_BUTTONS.len();
 
 /// One DPI stage as typed: X is side to side, Y up and down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,9 +99,10 @@ impl KeyList {
     }
 }
 
-/// The open key list: under which button, which list, and the search typed.
+/// The open key list: under which row, which list, and the search typed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyPicker {
+    /// A button, or a wheel direction ([`WHEEL_ROW`] and after).
     pub button: usize,
     pub list: KeyList,
     pub filter: String,
@@ -122,7 +128,7 @@ pub struct MouseForm {
     pub buttons: Vec<String>,
     /// The key list under a button, while it's open.
     pub picker: Option<KeyPicker>,
-    /// What the wheel does turned up, then down: names from [`WHEEL`].
+    /// What the wheel does turned up, then down: names as a button has them.
     pub wheel: [String; 2],
     /// `mouse_wheel` is on: the wheel goes out with the buttons. Followed from the daemon.
     pub wheel_gate: bool,
@@ -278,25 +284,51 @@ impl MouseForm {
         }
     }
 
-    /// A pick from a wheel direction's menu (0 up, 1 down), by its place in [`WHEEL`].
+    /// A pick from a wheel direction's menu (0 up, 1 down), the buttons' menu: see
+    /// [`MouseForm::pick_button`].
     pub fn pick_wheel(&mut self, direction: usize, action: usize) {
-        if let (Some(slot), Some((name, _))) = (self.wheel.get_mut(direction), WHEEL.get(action)) {
-            *slot = (*name).to_owned();
+        if direction < self.wheel.len() {
+            self.pick_button(WHEEL_ROW + direction, action);
         }
     }
 
-    /// Each wheel direction's place in its menu, or -1 for a name the menu doesn't have.
+    /// Each wheel direction's place in the menu, as [`MouseForm::button_menu`] gives it.
     pub fn wheel_menu(&self) -> Vec<i32> {
-        self.wheel
-            .iter()
-            .map(|w| {
-                let w = w.trim().to_ascii_lowercase();
-                WHEEL
-                    .iter()
-                    .position(|(n, _)| *n == w)
-                    .map_or(-1, |i| i as i32)
-            })
+        (WHEEL_ROW..WHEEL_ROW + self.wheel.len())
+            .map(|row| self.menu_at(row))
             .collect()
+    }
+
+    /// The line under each wheel direction, as [`button_text`] gives it.
+    pub fn wheel_keys(&self) -> Vec<String> {
+        self.wheel.iter().map(|w| button_text(w)).collect()
+    }
+
+    /// A row's name: a button's, or a wheel direction's.
+    fn name(&self, row: usize) -> Option<&String> {
+        match row.checked_sub(WHEEL_ROW) {
+            None => self.buttons.get(row),
+            Some(direction) => self.wheel.get(direction),
+        }
+    }
+
+    fn name_mut(&mut self, row: usize) -> Option<&mut String> {
+        match row.checked_sub(WHEEL_ROW) {
+            None => self.buttons.get_mut(row),
+            Some(direction) => self.wheel.get_mut(direction),
+        }
+    }
+
+    /// A row's place in the menu: the open list's entry under it, an action's own entry or
+    /// its key list's, or -1 for a name set elsewhere that the menu doesn't offer.
+    fn menu_at(&self, row: usize) -> i32 {
+        match &self.picker {
+            Some(p) if p.button == row => p.list.item() as i32,
+            _ => self
+                .name(row)
+                .and_then(|n| menu_index(n))
+                .map_or(-1, |i| i as i32),
+        }
     }
 
     /// A stage's number (both of them while X and Y are together).
@@ -365,18 +397,19 @@ impl MouseForm {
         self.active = i.min(self.stages.len().saturating_sub(1));
     }
 
-    /// A pick from a button's menu: an action is that button's name at once;
-    /// "Keyboard key…" or "Media key…" opens that list under it instead.
+    /// A pick from a row's menu (a button, or a wheel direction from [`WHEEL_ROW`]): an
+    /// action is that row's name at once; "Keyboard key…" or "Media key…" opens that list
+    /// under it instead.
     pub fn pick_button(&mut self, i: usize, action: usize) {
-        if i >= self.buttons.len() {
+        if self.name(i).is_none() {
             return;
         }
         let list = match action {
             KEY_ITEM => KeyList::Keys,
             MEDIA_ITEM => KeyList::Media,
             _ => {
-                if let Some(a) = ACTIONS.get(action) {
-                    self.buttons[i] = (*a).to_owned();
+                if let (Some(a), Some(name)) = (ACTIONS.get(action), self.name_mut(i)) {
+                    *name = (*a).to_owned();
                     if self.picker.as_ref().is_some_and(|p| p.button == i) {
                         self.picker = None;
                     }
@@ -416,14 +449,15 @@ impl MouseForm {
     }
 
     /// A key from the open list (by its place in [`MouseForm::key_choices`])
-    /// becomes the button's name, and the list closes.
+    /// becomes the row's name, and the list closes.
     pub fn pick_key(&mut self, index: usize) {
         let Some(p) = &self.picker else { return };
-        let Some((name, _)) = choices(p.list, &p.filter).get(index).copied() else {
+        let row = p.button;
+        let Some((key, _)) = choices(p.list, &p.filter).get(index).copied() else {
             return;
         };
-        if let Some(b) = self.buttons.get_mut(p.button) {
-            *b = name.to_owned();
+        if let Some(name) = self.name_mut(row) {
+            *name = key.to_owned();
         }
         self.picker = None;
     }
@@ -432,13 +466,8 @@ impl MouseForm {
     /// (and for the button whose list is open), or -1 for a name set elsewhere
     /// that the menu doesn't offer.
     pub fn button_menu(&self) -> Vec<i32> {
-        self.buttons
-            .iter()
-            .enumerate()
-            .map(|(i, b)| match &self.picker {
-                Some(p) if p.button == i => p.list.item() as i32,
-                _ => menu_index(b).map_or(-1, |i| i as i32),
-            })
+        (0..self.buttons.len().min(WHEEL_ROW))
+            .map(|row| self.menu_at(row))
             .collect()
     }
 
@@ -640,6 +669,8 @@ fn show_mouse_form(ui: &AppWindow, f: &MouseForm) {
     sync_rows(g.get_wheel(), f.wheel_menu(), |m| g.set_wheel(m));
     let keys: Vec<SharedString> = f.buttons.iter().map(|b| button_text(b).into()).collect();
     sync_rows(g.get_button_keys(), keys, |m| g.set_button_keys(m));
+    let wheel_keys = f.wheel_keys().into_iter().map(SharedString::from).collect();
+    sync_rows(g.get_wheel_keys(), wheel_keys, |m| g.set_wheel_keys(m));
     show_picker(&g, f);
 }
 
@@ -650,8 +681,7 @@ fn show_picker(g: &MouseUi, f: &MouseForm) {
             p.button as i32,
             p.list == KeyList::Media,
             p.filter.as_str(),
-            f.buttons
-                .get(p.button)
+            f.name(p.button)
                 .and_then(|b| mouse_keys::label(b))
                 .unwrap_or(""),
         ),
@@ -700,8 +730,6 @@ pub fn show_mouse(ui: &AppWindow, s: &State, form: &RefCell<MouseForm>) {
             .unwrap_or_default()
             .into(),
     );
-    let labels = WHEEL.iter().map(|(_, l)| SharedString::from(*l)).collect();
-    sync_rows(g.get_wheel_actions(), labels, |m| g.set_wheel_actions(m));
     let awake = s.mouse.as_ref().filter(|m| !asleep(m));
     g.set_sleep_read(sleep_read(awake.and_then(|m| m.sleep_secs)).into());
     g.set_reported(
@@ -968,7 +996,7 @@ mod tests {
         f.seed(&applied);
         assert_eq!(
             (f.stages.clone(), f.polling, f.button_menu()),
-            (both(&[400]), 500, vec![1, 0, 2, 3, 4, 5])
+            (both(&[400]), 500, vec![1, 0, 2, 3, 4, 6])
         );
         assert!(!f.split, "equal axes keep X and Y together");
         f.set_stage(0, 3200);
@@ -1009,16 +1037,16 @@ mod tests {
         // Case and the "disabled" spelling are the daemon's too; a short list
         // gets the factory action for the rest. "bksp" is a name the daemon
         // takes that the menu and the key lists don't offer.
-        assert_eq!(f.button_menu(), vec![0, 1, -1, 3, 14, 5]);
+        assert_eq!(f.button_menu(), vec![0, 1, -1, 3, 15, 6]);
         assert_eq!(button_text(&f.buttons[2]), "Set elsewhere: bksp");
         let Request::SetMouseButtons { actions, .. } = f.buttons_request(false) else {
             panic!("not a buttons request");
         };
         assert_eq!(actions[2], "bksp", "applying doesn't replace it");
-        f.pick_button(2, 8);
+        f.pick_button(2, 9);
         assert_eq!(f.buttons[2], "playpause");
         f.factory_buttons();
-        assert_eq!(f.button_menu(), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(f.button_menu(), vec![0, 1, 2, 3, 4, 6]);
     }
 
     #[test]
@@ -1178,7 +1206,7 @@ mod tests {
         f.pick_key(1);
         assert_eq!(f.buttons[5], "volumedown");
         // The menu has that one as an action already.
-        assert_eq!(f.button_menu()[5], 13);
+        assert_eq!(f.button_menu()[5], 14);
         assert_eq!(button_text(&f.buttons[5]), "");
     }
 
@@ -1191,7 +1219,7 @@ mod tests {
         });
         assert_eq!(
             f.button_menu(),
-            vec![KEY_ITEM as i32, KEY_ITEM as i32, 8, 3, 4, 5]
+            vec![KEY_ITEM as i32, KEY_ITEM as i32, 9, 3, 4, 6]
         );
         assert_eq!(button_text("F13"), "Key: F13");
         assert_eq!(button_text("leftctrl"), "Key: Left Ctrl");
@@ -1233,7 +1261,7 @@ mod tests {
         f.pick_button(0, KEY_ITEM);
         f.pick_button(1, MEDIA_ITEM);
         assert_eq!(f.button_menu()[..2], [0, MEDIA_ITEM as i32]);
-        f.pick_button(1, 6);
+        f.pick_button(1, 7);
         assert_eq!(
             (f.picker.clone(), f.buttons[1].as_str()),
             (None, "scrollup")
@@ -1389,21 +1417,53 @@ mod tests {
             actions, FACTORY_BUTTONS,
             "gate off: the six alone, as before"
         );
-        f.pick_wheel(0, 2);
+        f.pick_wheel(0, 3);
         f.pick_wheel(5, 0);
-        f.pick_wheel(1, 9);
+        f.pick_wheel(1, 99);
         assert_eq!(
             f.wheel,
             ["button4", "scrolldown"],
             "picks past the menus change nothing"
         );
-        assert_eq!(f.wheel_menu(), [2, 1]);
+        assert_eq!(f.wheel_menu(), [3, 8]);
+        assert_eq!(f.buttons, FACTORY_BUTTONS, "the buttons are left alone");
         f.wheel_gate = true;
         let Request::SetMouseButtons { actions, save } = f.buttons_request(true) else {
             panic!("not a buttons request");
         };
         assert_eq!((actions.len(), save), (8, true));
         assert_eq!(actions[6..], ["button4", "scrolldown"]);
+    }
+
+    /// The wheel's two rows offer what a button's do, as GG's wheel menu does (captures
+    /// rival-8 to rival-10): every action, and a key or a media key from the lists.
+    #[test]
+    fn the_wheel_rows_offer_the_buttons_menu_and_key_lists() {
+        let mut f = MouseForm::default();
+        f.pick_wheel(0, 5);
+        f.pick_wheel(1, 6);
+        assert_eq!(f.wheel, ["button6", "dpi"]);
+        f.pick_wheel(0, KEY_ITEM);
+        assert_eq!(
+            f.picker.as_ref().map(|p| (p.button, p.list)),
+            Some((WHEEL_ROW, KeyList::Keys))
+        );
+        assert_eq!(f.wheel_menu()[0], KEY_ITEM as i32);
+        assert_eq!(f.button_menu(), [0, 1, 2, 3, 4, 6], "no button's list is open");
+        f.filter_keys("a");
+        f.pick_key(0);
+        assert_eq!((f.wheel[0].as_str(), f.picker.clone()), ("a", None));
+        f.pick_wheel(1, MEDIA_ITEM);
+        f.filter_keys("Volume up");
+        f.pick_key(0);
+        assert_eq!(f.wheel, ["a", "volumeup"]);
+        assert_eq!(f.wheel_menu(), [KEY_ITEM as i32, 13]);
+        assert_eq!(f.wheel_keys(), ["Key: A", ""]);
+        assert_eq!(f.buttons, FACTORY_BUTTONS, "the buttons are left alone");
+        // An action picked on the row with the open list closes it.
+        f.pick_wheel(1, KEY_ITEM);
+        f.pick_wheel(1, 15);
+        assert_eq!((f.wheel[1].as_str(), f.picker.clone()), ("disable", None));
     }
 
     #[test]
@@ -1423,11 +1483,11 @@ mod tests {
             buttons: Some(eight.clone()),
             ..MouseSettings::default()
         });
-        assert_eq!((f.buttons.len(), f.wheel_menu()), (6, vec![2, 1]));
+        assert_eq!((f.buttons.len(), f.wheel_menu()), (6, vec![3, 8]));
         f.factory_buttons();
         assert_eq!(
             f.wheel_menu(),
-            [0, 1],
+            [7, 8],
             "reset to factory resets the wheel too"
         );
         assert_eq!(
@@ -1444,7 +1504,7 @@ mod tests {
         });
         assert_eq!(
             g.wheel_menu(),
-            [0, 1],
+            [7, 8],
             "six written: the wheel stays factory"
         );
     }

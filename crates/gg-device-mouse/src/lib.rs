@@ -255,8 +255,8 @@ impl Mouse {
         self.send(&proto::buttons_packet(actions))
     }
 
-    /// Set what the wheel does when turned up and down. Only the actions a capture shows
-    /// are taken ([`proto::WHEEL_ACTIONS`]); nothing reads the wheel back.
+    /// Set what the wheel does when turned up and down: any action GG offers for it
+    /// ([`proto::wheel_takes`]); nothing reads the wheel back.
     pub fn set_wheel(&self, up: ButtonAction, down: ButtonAction) -> Result<()> {
         let packet = proto::wheel_packet(up, down)?;
         debug!(?up, ?down, "setting the wheel");
