@@ -1631,6 +1631,9 @@ mod tests {
         ));
 
         fake.clear_sent();
+        // The worker announces a change after it answers: one more command first, so the
+        // change's own event is in the channel before it's emptied.
+        get(&kb).await;
         while rx.try_recv().is_ok() {}
         let loaded = kb
             .send(|reply| Command::Onboard(onboard::Cmd::Load { slot: 2, reply }))
