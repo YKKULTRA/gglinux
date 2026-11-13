@@ -26,6 +26,9 @@ pub struct SwitchesState {
     /// With which bindings family the open keyboard last had its deep-press points
     /// dealt with: sent (`true`), held back (`false`), or not yet.
     second: Option<bool>,
+    /// Whether the keyboard let Protection Mode out when the settings last went: they go
+    /// again when that changes, with or without the protected keys.
+    protection: Option<bool>,
     /// The open keyboard holds deep-press points of gglinux's: a table with some went out
     /// since it connected. They stay there until a table without them replaces them.
     second_out: bool,
@@ -40,6 +43,7 @@ impl SwitchesState {
             path,
             sent: None,
             second: None,
+            protection: None,
             second_out: false,
         }
     }
@@ -66,7 +70,10 @@ impl SwitchesState {
         let Some(device) = device else {
             return;
         };
-        if self.sent.is_none() {
+        // Again when the protection gate changes, so its keys follow it at once.
+        let protection = device.families().protection;
+        let follows = !self.switches.protection.enabled || self.protection == Some(protection);
+        if self.sent.is_none() || !follows {
             self.send(device);
         }
         self.sync_second(device);
@@ -87,10 +94,14 @@ impl SwitchesState {
             })
             .collect();
         let sensitivity = s.rapid_trigger.sensitivity;
+        // Protection Mode only while its gate lets it out; without, the keys go unprotected.
+        let protection = device.families().protection;
+        self.protection = Some(protection);
         let result = device
             .set_switches(&gg_device_keyboard::Switches {
                 actuation: &|code| s.actuation_of(code),
                 rapid_trigger: &|code| s.rapid_trigger_on(code),
+                protection: &|code| protection && s.protection_on(code),
                 sensitivity: &|_| sensitivity,
                 rapid_tap: s.rapid_tap.enabled,
                 tap_pairs: &pairs,
@@ -145,6 +156,7 @@ impl SwitchesState {
     pub fn forget(&mut self) {
         self.sent = None;
         self.second = None;
+        self.protection = None;
         self.second_out = false;
     }
 
@@ -196,6 +208,7 @@ fn check_analog(switches: &Switches) -> Result<(), String> {
         .iter()
         .map(|k| k.code)
         .chain(switches.rapid_trigger.keys.iter().copied())
+        .chain(switches.protection.keys.iter().copied())
         .chain(switches.rapid_tap.pairs.iter().flat_map(|p| [p.a, p.b]))
         .chain(switches.second.iter().map(|k| k.code));
     for code in named {
@@ -260,8 +273,68 @@ mod tests {
             path: PathBuf::new(),
             sent: None,
             second: None,
+            protection: None,
             second_out: false,
         }
+    }
+
+    /// The release-mode tables (`38 62`) among what was sent, as each key's mode.
+    fn release_tables(fake: &FakeTransport) -> Vec<Vec<u8>> {
+        fake.sent()
+            .iter()
+            .filter(|s| s.report[1..3] == [0x38, 0x62])
+            .map(|s| s.report[4..4 + 68 * 2].chunks(2).map(|p| p[1]).collect())
+            .collect()
+    }
+
+    #[test]
+    fn protection_mode_goes_out_only_while_its_gate_is_on_and_follows_it() {
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        let mut s = state(Switches {
+            enabled: true,
+            protection: gg_ipc::Protection {
+                enabled: true,
+                keys: vec![0x04],
+            },
+            rapid_trigger: gg_ipc::RapidTrigger {
+                enabled: true,
+                keys: vec![0x04, 0x05],
+                sensitivity: 2,
+            },
+            ..Switches::default()
+        });
+        // Gate off: A and B have Rapid Trigger, nothing is protected, nothing is refused.
+        s.sync(Some(&kb));
+        let tables = release_tables(&fake);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0][..3], [2, 2, 0], "A, B, C");
+        assert!(matches!(s.sent, Some(Ok(()))));
+        s.sync(Some(&kb));
+        assert_eq!(
+            release_tables(&fake).len(),
+            1,
+            "not sent again while nothing changed"
+        );
+        // Gate on: sent again at once, A now Rapid Trigger with Protection (04).
+        kb.set_families(gg_device_keyboard::Families {
+            protection: true,
+            ..gg_device_keyboard::Families::default()
+        });
+        s.sync(Some(&kb));
+        let tables = release_tables(&fake);
+        assert_eq!(tables.len(), 2);
+        assert_eq!(tables[1][..3], [4, 2, 0]);
+        s.sync(Some(&kb));
+        assert_eq!(release_tables(&fake).len(), 2);
+        // Gate off again: the protected key goes back to Rapid Trigger alone.
+        kb.set_families(gg_device_keyboard::Families::default());
+        s.sync(Some(&kb));
+        assert_eq!(release_tables(&fake).last().unwrap()[..3], [2, 2, 0]);
+        // Protection on a key with a fixed switch is refused like any other switch setting.
+        let mut bad = Switches::default();
+        bad.protection.keys.push(0x29);
+        assert!(check_analog(&bad).is_err());
     }
 
     #[test]
@@ -338,6 +411,7 @@ mod tests {
         gg_device_keyboard::Families {
             bindings: true,
             onboard: false,
+            protection: false,
         }
     }
 

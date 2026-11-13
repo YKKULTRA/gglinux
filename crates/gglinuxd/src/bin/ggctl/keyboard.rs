@@ -34,8 +34,13 @@ pub fn print(state: &KeyboardState) {
         } else {
             "off".to_owned()
         };
+        let protection = match (s.protection.enabled, s.protection.keys.len()) {
+            (false, _) => "off".to_owned(),
+            (true, 0) => "on, every key".to_owned(),
+            (true, n) => format!("on, {n} keys"),
+        };
         println!(
-            "switches:  actuation {}{own}; Rapid Trigger {rapid}; Rapid Tap {tap}",
+            "switches:  actuation {}{own}; Rapid Trigger {rapid}; Rapid Tap {tap}; Protection Mode {protection}",
             mm(s.actuation)
         );
     } else {
@@ -57,6 +62,8 @@ pub enum SwitchEdit {
         on: bool,
         sensitivity: Option<u8>,
     },
+    /// Protection Mode, on every adjustable key.
+    Protection(bool),
 }
 
 impl SwitchEdit {
@@ -67,6 +74,11 @@ impl SwitchEdit {
                 s.enabled = true;
                 s.actuation = tenths;
                 s.keys.clear();
+            }
+            SwitchEdit::Protection(on) => {
+                s.enabled |= on;
+                s.protection.enabled = on;
+                s.protection.keys.clear();
             }
             SwitchEdit::RapidTrigger { on, sensitivity } => {
                 s.enabled |= on;
@@ -97,6 +109,8 @@ pub fn switches_action(rest: &[&str]) -> Result<Action> {
         ["on"] => Action::EditSwitches(SwitchEdit::Enable(true)),
         ["off"] => Action::EditSwitches(SwitchEdit::Enable(false)),
         ["actuation", mm] => Action::EditSwitches(SwitchEdit::Actuation(tenths(mm)?)),
+        ["protection", "on"] => Action::EditSwitches(SwitchEdit::Protection(true)),
+        ["protection", "off"] => Action::EditSwitches(SwitchEdit::Protection(false)),
         ["rapid-trigger", "on"] => Action::EditSwitches(SwitchEdit::RapidTrigger {
             on: true,
             sensitivity: None,
@@ -115,7 +129,9 @@ pub fn switches_action(rest: &[&str]) -> Result<Action> {
             on: false,
             sensitivity: None,
         }),
-        _ => bail!("usage: ggctl switches on|off | actuation 1.5 | rapid-trigger on [0.2]|off"),
+        _ => bail!(
+            "usage: ggctl switches on|off | actuation 1.5 | rapid-trigger on [0.2]|off | protection on|off"
+        ),
     })
 }
 
@@ -134,6 +150,17 @@ mod tests {
     #[test]
     fn switch_commands_edit_what_the_daemon_has() {
         assert_eq!(edits("switches on"), SwitchEdit::Enable(true));
+        assert_eq!(
+            edits("switches protection on"),
+            SwitchEdit::Protection(true)
+        );
+        let mut s = Switches::default();
+        s.protection.keys.push(0x04);
+        SwitchEdit::Protection(true).apply(&mut s);
+        assert!(s.enabled && s.protection.enabled && s.protection.keys.is_empty());
+        SwitchEdit::Protection(false).apply(&mut s);
+        assert!(s.enabled && !s.protection.enabled);
+        assert!(parse(&args("switches protection maybe")).is_err());
         assert_eq!(edits("switches actuation 1.5"), SwitchEdit::Actuation(15));
         assert_eq!(
             edits("switches rapid-trigger on 0.2"),

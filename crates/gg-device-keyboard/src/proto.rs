@@ -32,8 +32,14 @@ pub const OLED_RELEASE: u8 = 0x82;
 pub const OP_SWITCHES: u8 = 0x38;
 /// Actuation thresholds, one `(code, h, l)` block per analog key.
 pub const SW_THRESHOLDS: u8 = 0x61;
-/// Release mode per key: 0 normal, 2 Rapid Trigger.
+/// Release mode per key, one of the `RELEASE_*` values.
 pub const SW_RELEASE_MODE: u8 = 0x62;
+pub const RELEASE_NORMAL: u8 = 0x00;
+pub const RELEASE_RAPID_TRIGGER: u8 = 0x02;
+/// Protection Mode, and Protection Mode with Rapid Trigger: what GG 123 sends for its shield
+/// switch (our capture of 2026-11-13: key A `03`, with Rapid Trigger `04`, back to `02`/`00`).
+pub const RELEASE_PROTECTION: u8 = 0x03;
+pub const RELEASE_RAPID_TRIGGER_PROTECTION: u8 = 0x04;
 /// Rapid Trigger's re-trigger distance per key, in tenths of a millimetre.
 pub const SW_RT_SENSITIVITY: u8 = 0x65;
 /// Rapid Tap on or off.
@@ -248,11 +254,19 @@ pub fn actuation_table(actuation_of: impl Fn(u8) -> u8) -> Vec<u8> {
     report
 }
 
-/// The release-mode table: which analog keys have Rapid Trigger.
-pub fn release_mode_table(rapid_trigger: impl Fn(u8) -> bool) -> Vec<u8> {
+/// The release-mode table: which analog keys have Rapid Trigger, Protection Mode, or both.
+pub fn release_mode_table(
+    rapid_trigger: impl Fn(u8) -> bool,
+    protection: impl Fn(u8) -> bool,
+) -> Vec<u8> {
     let mut report = switch_table(SW_RELEASE_MODE);
     for (i, &code) in ANALOG_KEYS.iter().enumerate() {
-        let mode = if rapid_trigger(code) { 2 } else { 0 };
+        let mode = match (rapid_trigger(code), protection(code)) {
+            (false, false) => RELEASE_NORMAL,
+            (true, false) => RELEASE_RAPID_TRIGGER,
+            (false, true) => RELEASE_PROTECTION,
+            (true, true) => RELEASE_RAPID_TRIGGER_PROTECTION,
+        };
         report[4 + i * 2..6 + i * 2].copy_from_slice(&[code, mode]);
     }
     report
@@ -461,9 +475,29 @@ mod tests {
         assert!(check_report(&table).is_ok());
     }
 
+    /// The four tables GG 123 sent as key A's switches were clicked (apex-3 capture):
+    /// `38 62 44 04 02 05 00 …`, `… 04 04 …`, `… 04 03 …`, `… 04 00 …`.
+    #[test]
+    fn protection_mode_is_release_mode_3_and_4_with_rapid_trigger() {
+        let a = |code| code == 0x04;
+        let none = |_| false;
+        for (rapid, protection, mode) in [
+            (true, false, 2),
+            (true, true, 4),
+            (false, true, 3),
+            (false, false, 0),
+        ] {
+            let table = release_mode_table(|c| rapid && a(c), |c| protection && a(c));
+            assert_eq!(&table[1..8], &[0x38, 0x62, 0x44, 0x04, mode, 0x05, 0x00]);
+        }
+        // Every key protected: `38 62 44 04 03 05 03 06 03 …` (apex-2 capture).
+        let all = release_mode_table(none, |_| true);
+        assert!(all[4..4 + 68 * 2].chunks(2).all(|p| p[1] == 3));
+    }
+
     #[test]
     fn rapid_trigger_tables_mark_mode_2_and_clamp_the_distance() {
-        let modes = release_mode_table(|code| code == 0x04 || code == 0x07);
+        let modes = release_mode_table(|code| code == 0x04 || code == 0x07, |_| false);
         assert_eq!(&modes[..4], &[0x00, 0x38, 0x62, 68]);
         assert_eq!(
             &modes[4..10],

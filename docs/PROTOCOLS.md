@@ -363,6 +363,26 @@ Pro generation on Linux. This is the project's one real reverse-engineering effo
 >   and for one that holds a whole image with its CRC right but other schemas (other firmware's
 >   layout). A slot that reads bad on a plain read is saved the same way, to look at later.
 
+### 3e. Captured from GG 123 (2026-11-13), firmware 1.19.7
+
+Our own USB captures of GG 123.0.0 with the keyboard passed through to a Windows VM (pcaps `apex-2…8`,
+action logs and screenshots in the M11 capture folder). All on interface 1; answers to output reports
+come as input reports on endpoint `0x82`.
+
+| What | Bytes | Notes |
+|---|---|---|
+| Protection Mode | release-mode table `38 62 44 [key, mode] × 68` | mode `00` neither, `02` Rapid Trigger, `03` Protection Mode, `04` both. **Built (gated `keyboard_protection`).** |
+| Deep press, "none" | `38 61 44 02 [key, h, l] × 68` | GG sends `00 00` for keys never set and `FF FF` for a key switched off; Apex Control sends `FF FF`. gglinux sends `FF FF`. His flash images hold `00 00`. |
+| Deep-press bindings | (GG's text) | "Maximum of 8 dual actuation keybinds permitted": enforced in `Bindings::validate`. |
+| Slot write | `02 01 <file>` → input `02 00` (125 ms); 25 × `03 01 <file> F4 01 <offset u32>` ~15 ms apart, the last at 12000 with size 500; `B1 <slot>` → `B1 00 <slot> 01`; `B2 <slot>` → `B2 00 <slot>` | GG's Save. The shapes of §3d; `B2` does answer. GG doesn't read back; gglinux does. |
+| Slot read | `83 01 <file> F4 01 <offset u32>` (feature), read 15–17 ms later → `83 00 <data>` | GG reads all five slots when it opens the keyboard. |
+| Queries | `90` → `90 00 "1.19.7"`; `F5` → `F5 00 01` (region); `F2` → `F2 00 00` (layout); `34` → `34 00 00` (unknown) | GG's connect sequence: `90 F5 90 F2 F5`, the five slots, `1F 82`, `B2 <its config>`, `34`, `90`. |
+
+On his keyboard (2026-11-13): the firmware key order of every per-key table in a slot image is Apex
+Control's `deviceKeyIndexToHID` (pinned `Key.swift`), which the images' own normal layers confirm; the 91
+bindable keys are exactly `bindings::KEYS`; a bindings read (`B6`) needs ~13 ms before its answer is
+there (read at once, the Fn layer's read still returned the normal layer's answer).
+
 ### What gglinux sends this keyboard: the allowlist
 
 Every report is checked right before it goes out, by
@@ -378,6 +398,8 @@ which rule refused it.
   `83 01 <file> F4 01 <offset>` with `file` `0x80`–`0x84` and `offset` a multiple of 500 from 0 to 12000
   (500-byte chunks, as Apex Control's code sends them; `03`'s data is the image's bytes there, `0xFF` up to 500,
   then zeros), and `B1`/`B2 <slot 0–4>`. Nothing but zeros may follow their fields.
+- **With `keyboard_protection` on:** release modes `03` and `04` in the `38 62` table (Protection Mode,
+  and with Rapid Trigger). Without it the table takes only `00` and `02`; no other mode ever passes.
 - **Never, whatever is on:** `04` (the firmware's file checksum), `02`/`03`/`83` with another
   sub-command or another file (the other files hold what the keyboard needs to run), `75` (writes the
   region to flash on every call), `38 83` (a screen picture to flash), any bootloader entry

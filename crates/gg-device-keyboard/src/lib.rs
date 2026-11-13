@@ -84,6 +84,8 @@ pub struct Switches<'a> {
     /// Actuation point, tenths of a millimetre (1..=40).
     pub actuation: &'a dyn Fn(u8) -> u8,
     pub rapid_trigger: &'a dyn Fn(u8) -> bool,
+    /// Protection Mode; needs the protection family ([`Families::protection`]).
+    pub protection: &'a dyn Fn(u8) -> bool,
     /// Rapid Trigger's re-trigger distance, tenths of a millimetre (1..=20).
     pub sensitivity: &'a dyn Fn(u8) -> u8,
     pub rapid_tap: bool,
@@ -203,7 +205,10 @@ impl Keyboard {
         // Built first, so a bad pair list sends nothing at all.
         let pairs = proto::rapid_tap_pairs(switches.tap_pairs)?;
         self.feature(&proto::actuation_table(switches.actuation))?;
-        self.feature(&proto::release_mode_table(switches.rapid_trigger))?;
+        self.feature(&proto::release_mode_table(
+            switches.rapid_trigger,
+            switches.protection,
+        ))?;
         self.feature(&proto::sensitivity_table(switches.sensitivity))?;
         self.output(&pairs)?;
         self.output(&proto::rapid_tap_enable(switches.rapid_tap))
@@ -335,6 +340,7 @@ mod tests {
         kb.set_switches(&Switches {
             actuation: &|_| 15,
             rapid_trigger: &|_| false,
+            protection: &|_| false,
             sensitivity: &|_| 2,
             rapid_tap: false,
             tap_pairs: &[],
@@ -383,6 +389,7 @@ mod tests {
         kb.set_families(Families {
             bindings: true,
             onboard: false,
+            protection: false,
         });
         fake.answer_feature(Key::op(0xB6), &[0xB6, 0x00, 0x00, 0x01, 0x04, 0x51, 0x04]);
         let mut request = vec![0u8; proto::FEATURE_REPORT];
@@ -477,6 +484,7 @@ mod tests {
         kb.set_families(Families {
             bindings: true,
             onboard: false,
+            protection: false,
         });
         assert!(kb.families().bindings);
         kb.exchange_feature(&read).unwrap();

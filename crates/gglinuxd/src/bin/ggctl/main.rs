@@ -49,6 +49,7 @@ ggctl keyboard                          # switch settings and screen, as the dae
 ggctl switches on|off                   # gglinux's switch settings, or leave them alone
 ggctl switches actuation 1.5            # every key's actuation point, 0.1 to 4.0 mm
 ggctl switches rapid-trigger on [0.2]|off   # optional re-trigger distance, 0.1 to 2.0 mm
+ggctl switches protection on|off        # Protection Mode on every key (needs keyboard_protection)
 ggctl screen keyboard                   # hand the screen back to the keyboard's own menus
 ggctl screen clock [seconds] [12h] [date]
 ggctl screen text Hello|world           # up to 5 lines of 16 characters; | starts a line

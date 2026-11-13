@@ -624,12 +624,22 @@ async fn dispatch(
                 .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
                 .await,
         ),
-        Request::SetSwitches { switches } => outcome(
-            workers
-                .keyboard
-                .send::<()>(|reply| KeyboardCommand::SetSwitches { switches, reply })
-                .await,
-        ),
+        Request::SetSwitches { switches } => {
+            // Protection Mode is refused while its gate is off, before anything is saved.
+            let gates = workers.experimental.current();
+            match gates
+                .refusal(Feature::KeyboardProtection)
+                .filter(|_| switches.protection.enabled)
+            {
+                Some(message) => ResponseData::Error { message },
+                None => outcome(
+                    workers
+                        .keyboard
+                        .send::<()>(|reply| KeyboardCommand::SetSwitches { switches, reply })
+                        .await,
+                ),
+            }
+        }
         Request::SetScreen { screen } => outcome(
             workers
                 .keyboard
@@ -1302,6 +1312,28 @@ mod tests {
             ),
             other => panic!("set_mouse_sleep: {other:?}"),
         }
+        // Protection Mode has its own gate too: switch settings that turn it on are refused
+        // whole, and the same settings without it go through to the keyboard worker.
+        match ask(
+            "set_switches",
+            r#"{"switches":{"enabled":false,"actuation":15,"protection":{"enabled":true}}}"#,
+        )
+        .await
+        {
+            ResponseData::Error { message } => assert!(
+                message.contains("Keyboard: Protection Mode") && message.contains("Experimental"),
+                "{message}"
+            ),
+            other => panic!("set_switches: {other:?}"),
+        }
+        assert!(matches!(
+            ask(
+                "set_switches",
+                r#"{"switches":{"enabled":false,"actuation":15}}"#
+            )
+            .await,
+            ResponseData::Success
+        ));
         match ask("set_mouse_radio", r#"{"radio":"stable"}"#).await {
             ResponseData::Error { message } => {
                 assert!(message.contains("Settings → Experimental"), "{message}")

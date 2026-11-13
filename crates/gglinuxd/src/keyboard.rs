@@ -885,6 +885,7 @@ fn families(experimental: &Experimental) -> Families {
     Families {
         bindings: experimental.keyboard_bindings,
         onboard: experimental.keyboard_onboard,
+        protection: experimental.keyboard_protection,
     }
 }
 
@@ -1329,6 +1330,7 @@ mod tests {
         let bindings = Families {
             bindings: true,
             onboard: false,
+            protection: false,
         };
         assert_eq!(families_now(&state), bindings);
         connected(&mut state, FakeTransport::new().keyboard());
@@ -1352,7 +1354,8 @@ mod tests {
             families_now(&state),
             Families {
                 bindings: false,
-                onboard: true
+                onboard: true,
+                protection: false,
             }
         );
 

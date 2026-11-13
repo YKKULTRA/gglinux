@@ -45,6 +45,7 @@ impl Slots {
         keyboard.set_families(Families {
             bindings: false,
             onboard: true,
+            protection: false,
         });
         Slots {
             keyboard,

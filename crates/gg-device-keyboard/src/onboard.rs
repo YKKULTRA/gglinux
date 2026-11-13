@@ -366,7 +366,13 @@ impl Image {
             let (h, l) = proto::thresholds((switches.actuation)(code));
             self.bytes[at::PRIMARY_H + place] = h;
             self.bytes[at::PRIMARY_L + place] = l;
-            self.bytes[at::RELEASE + place] = if (switches.rapid_trigger)(code) { 2 } else { 0 };
+            self.bytes[at::RELEASE + place] =
+                match ((switches.rapid_trigger)(code), (switches.protection)(code)) {
+                    (false, false) => proto::RELEASE_NORMAL,
+                    (true, false) => proto::RELEASE_RAPID_TRIGGER,
+                    (false, true) => proto::RELEASE_PROTECTION,
+                    (true, true) => proto::RELEASE_RAPID_TRIGGER_PROTECTION,
+                };
             self.bytes[at::SENSITIVITY + place] = (switches.sensitivity)(code);
         }
         self.seal();
@@ -1429,6 +1435,7 @@ mod tests {
     const ONBOARD: Families = Families {
         bindings: false,
         onboard: true,
+        protection: false,
     };
     const QUICK: Timing = Timing {
         chunk_gap: Duration::ZERO,
@@ -1691,6 +1698,7 @@ mod tests {
         let switches = Switches {
             actuation: &|code| if code == 0x04 { 1 } else { 40 },
             rapid_trigger: &|code| code == 0x2C,
+            protection: &|_| false,
             sensitivity: &|_| 5,
             rapid_tap: false,
             tap_pairs: &[],

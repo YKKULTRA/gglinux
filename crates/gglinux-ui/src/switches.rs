@@ -71,6 +71,23 @@ pub fn show(ui: &AppWindow, s: &State, forms: &Forms) {
     };
     show_switches(ui, kb, &forms.switches.borrow());
     show_deep(ui, kb, s.experimental.is_some_and(|e| e.keyboard_bindings));
+    let g = ui.global::<SwitchesUi>();
+    g.set_protection_gated(s.experimental.is_some_and(|e| e.keyboard_protection));
+    g.set_protection_refusal(
+        Experimental::default()
+            .refusal(Feature::KeyboardProtection)
+            .unwrap_or_default()
+            .into(),
+    );
+}
+
+/// The keys a per-key switch setting is on for, in words.
+fn keys_text(keys: &[u8]) -> String {
+    match keys.len() {
+        0 => "every adjustable key".to_string(),
+        1 => "1 key".to_string(),
+        n => format!("{n} keys"),
+    }
 }
 
 /// The deep-press point: whether it may be set, and which keys have one.
@@ -162,6 +179,9 @@ fn show_switches(ui: &AppWindow, kb: &KeyboardState, f: &SwitchesForm) {
     g.set_actuation(sw.actuation as i32);
     sync_rows(g.get_keys(), keys, |m| g.set_keys(m));
     g.set_selected(f.selected.len() as i32);
+    g.set_protection(sw.protection.enabled);
+    g.set_protection_some(!sw.protection.keys.is_empty());
+    g.set_protection_keys(keys_text(&sw.protection.keys).into());
     g.set_rapid(sw.rapid_trigger.enabled);
     g.set_rapid_distance(sw.rapid_trigger.sensitivity as i32);
     g.set_rapid_some(!sw.rapid_trigger.keys.is_empty());
@@ -333,6 +353,14 @@ pub fn bind(ui: &AppWindow, client: &Client, forms: &Rc<Forms>) {
     g.on_rapid_only_selected(move || f([0; 4], 0));
     let f = switches(Rc::new(|sw, _, _, _, _| sw.rapid_trigger.keys.clear()));
     g.on_rapid_every_key(move || f([0; 4], 0));
+    let f = switches(Rc::new(|sw, _, _, a, _| sw.protection.enabled = a[0] != 0));
+    g.on_set_protection(move |on| f([on as i32, 0, 0, 0], 0));
+    let f = switches(Rc::new(|sw, _, form, _, _| {
+        sw.protection.keys = form.selected.iter().copied().collect()
+    }));
+    g.on_protection_only_selected(move || f([0; 4], 0));
+    let f = switches(Rc::new(|sw, _, _, _, _| sw.protection.keys.clear()));
+    g.on_protection_every_key(move || f([0; 4], 0));
     let f = switches(Rc::new(|sw, _, _, a, _| sw.rapid_tap.enabled = a[0] != 0));
     g.on_set_tap(move |on| f([on as i32, 0, 0, 0], 0));
     let f = switches(Rc::new(|sw, kb, _, a, both| {
@@ -395,6 +423,8 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
         "switches.deep-level" => sw.set_deep_level(n),
         "switches.set-deep" => sw.invoke_set_deep(n != 0),
         "switches.set-rapid" => sw.invoke_set_rapid(n != 0),
+        "switches.set-protection" => sw.invoke_set_protection(n != 0),
+        "switches.protection-only-selected" => sw.invoke_protection_only_selected(),
         "switches.rapid-only-selected" => sw.invoke_rapid_only_selected(),
         "switches.set-tap" => sw.invoke_set_tap(n != 0),
         "switches.add-pair" => sw.invoke_add_pair(),

@@ -40,7 +40,9 @@ use std::ops::RangeInclusive;
 use anyhow::{bail, ensure, Result};
 
 use crate::proto::{
-    ALLOWED, ALLOWED_SUB, ANALOG_KEYS, FEATURE_REPORT, OP_OLED, OP_SWITCHES, SW_THRESHOLDS,
+    ALLOWED, ALLOWED_SUB, ANALOG_KEYS, FEATURE_REPORT, OP_OLED, OP_SWITCHES, RELEASE_NORMAL,
+    RELEASE_PROTECTION, RELEASE_RAPID_TRIGGER, RELEASE_RAPID_TRIGGER_PROTECTION, SW_RELEASE_MODE,
+    SW_THRESHOLDS,
 };
 
 /// The gated command families [`check`] lets through, each only while the daemon has its
@@ -51,6 +53,8 @@ pub struct Families {
     pub bindings: bool,
     /// `keyboard_onboard`: the onboard profile slots in flash.
     pub onboard: bool,
+    /// `keyboard_protection`: Protection Mode, release modes `03` and `04`.
+    pub protection: bool,
 }
 
 /// Write one layer's bindings: `36 <layer> <count> [key, function, code × 4] × count`.
@@ -115,6 +119,10 @@ const ONBOARD: Family = Family {
     what: "onboard profile slot commands",
     gate: "keyboard_onboard",
 };
+const PROTECTION: Family = Family {
+    what: "Protection Mode release modes",
+    gate: "keyboard_protection",
+};
 
 /// Check a whole report, report id first, before it goes out with `families` on.
 pub fn check(report: &[u8], families: Families) -> Result<()> {
@@ -162,6 +170,9 @@ fn sub_command(report: &[u8]) -> Result<()> {
 /// always, the second actuation point's with the bindings family.
 fn switches(report: &[u8], families: Families) -> Result<()> {
     sub_command(report)?;
+    if report[2] == SW_RELEASE_MODE {
+        return release_modes(report, families);
+    }
     if report[2] != SW_THRESHOLDS || report.get(4) == Some(&0) {
         return Ok(());
     }
@@ -180,6 +191,28 @@ fn switches(report: &[u8], families: Families) -> Result<()> {
         report.len()
     );
     open(report, BINDINGS, families.bindings)
+}
+
+/// The release-mode table, `38 62 <count> [key, mode] × count`. The modes GG sends (our
+/// capture of 2026-11-13): `00` neither, `02` Rapid Trigger, and with the protection family
+/// `03` Protection Mode and `04` both. No other mode is ever sent.
+fn release_modes(report: &[u8], families: Families) -> Result<()> {
+    let count = usize::from(report.get(3).copied().unwrap_or(0));
+    let Some(pairs) = report.get(4..4 + 2 * count) else {
+        bail!("the release-mode table (38 62) is shorter than its {count} keys");
+    };
+    let mut protection = false;
+    for pair in pairs.chunks(2) {
+        match pair[1] {
+            RELEASE_NORMAL | RELEASE_RAPID_TRIGGER => {}
+            RELEASE_PROTECTION | RELEASE_RAPID_TRIGGER_PROTECTION => protection = true,
+            mode => bail!("release mode {mode:#04x} is not one the keyboard is known to take"),
+        }
+    }
+    if protection {
+        return open(report, PROTECTION, families.protection);
+    }
+    Ok(())
 }
 
 /// A gated command: its shape first, so a shape that's never sent says so whatever is on,
@@ -370,18 +403,22 @@ mod tests {
     const OFF: Families = Families {
         bindings: false,
         onboard: false,
+        protection: false,
     };
     const BINDINGS_ON: Families = Families {
         bindings: true,
         onboard: false,
+        protection: false,
     };
     const ONBOARD_ON: Families = Families {
         bindings: false,
         onboard: true,
+        protection: false,
     };
     const BOTH: Families = Families {
         bindings: true,
         onboard: true,
+        protection: false,
     };
     const ALL: [Families; 4] = [OFF, BINDINGS_ON, ONBOARD_ON, BOTH];
 
@@ -423,6 +460,44 @@ mod tests {
     #[track_caller]
     fn never(r: &[u8], why: &str) {
         passes_only_with(r, &[], why);
+    }
+
+    /// The release-mode table as GG 123 sent it (apex-2/-3 captures): `00` and `02` always,
+    /// `03` and `04` only with the protection family, nothing else ever.
+    #[test]
+    fn protection_modes_wait_for_their_family_and_unknown_modes_never_pass() {
+        let with = Families {
+            protection: true,
+            ..OFF
+        };
+        let a = |c| c == 0x04;
+        let plain = proto::release_mode_table(a, |_| false);
+        assert!(check(&plain, OFF).is_ok() && check(&plain, with).is_ok());
+        for table in [
+            proto::release_mode_table(|_| false, a),
+            proto::release_mode_table(a, a),
+        ] {
+            assert!(matches!(table[5], 3 | 4));
+            let e = format!("{:#}", check(&table, OFF).unwrap_err());
+            assert!(e.contains("keyboard_protection"), "{e}");
+            assert!(
+                check(&table, BOTH).is_err(),
+                "the other families don't open it"
+            );
+            assert!(check(&table, with).is_ok());
+        }
+        for unknown in [1, 5, 0x10, 0xFF] {
+            let mut table = plain.clone();
+            table[4 + 2 * 67 + 1] = unknown;
+            let e = format!("{:#}", check(&table, with).unwrap_err());
+            assert!(
+                e.contains("not one the keyboard is known to take"),
+                "{unknown}: {e}"
+            );
+        }
+        // A table cut short of its count is refused whole.
+        let e = format!("{:#}", check(&plain[..40], with).unwrap_err());
+        assert!(e.contains("shorter than its 68 keys"), "{e}");
     }
 
     const BINDINGS_GATE: &str = "keyboard_bindings";
@@ -775,7 +850,7 @@ mod tests {
             proto::oled_frame(&[0xA5; crate::oled::PACKED]),
             proto::oled_release(),
             proto::actuation_table(|c| c % 40 + 1),
-            proto::release_mode_table(|c| c % 2 == 0),
+            proto::release_mode_table(|c| c % 2 == 0, |_| false),
             proto::sensitivity_table(|c| c % 20 + 1),
             proto::rapid_tap_enable(true),
             proto::rapid_tap_enable(false),
@@ -860,9 +935,16 @@ mod tests {
                 }
                 r
             }
-            OP_SWITCHES => {
+            OP_SWITCHES if rng.below(2) == 0 => {
                 let mut r = proto::actuation_table(|c| c % 40 + 1);
                 r[4] = rng.pick(&[0, SECOND_LAYER]);
+                r
+            }
+            OP_SWITCHES => {
+                // A release-mode table with one key's mode anything from none to unknown.
+                let mut r = proto::release_mode_table(|c| c % 2 == 0, |_| false);
+                let key = rng.below(ANALOG_KEYS.len());
+                r[5 + 2 * key] = rng.pick(&[0, 2, 3, 4, 5, 0xFF]);
                 r
             }
             OP_ERASE => output(&[op, FILE_SUB, rng.pick(&[0x80, 0x81, 0x82, 0x83, 0x84])]),
@@ -960,7 +1042,14 @@ mod tests {
             0x23 | 0x40 | 0x41 | 0x4B | 0x90 | 0xA3 | 0xF5 => true,
             0x1F => matches!(at(2), Some(0x81 | 0x82)),
             0x38 => match at(2) {
-                Some(0x62 | 0x65 | 0x66 | 0x67) => true,
+                Some(0x62) => {
+                    let count = at(3).map_or(0, usize::from);
+                    r.get(4..4 + 2 * count).is_some_and(|pairs| {
+                        let mut modes = pairs.chunks(2).map(|p| p[1]);
+                        modes.all(|m| matches!(m, 0 | 2) || (f.protection && matches!(m, 3 | 4)))
+                    })
+                }
+                Some(0x65..=0x67) => true,
                 Some(0x61) => {
                     at(4) == Some(0)
                         || (f.bindings

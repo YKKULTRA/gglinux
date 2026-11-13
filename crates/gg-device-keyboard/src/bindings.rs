@@ -587,6 +587,7 @@ mod tests {
     const ON: Families = Families {
         bindings: true,
         onboard: false,
+        protection: false,
     };
 
     /// A stock keyboard's `layer`: the self-map on the normal layer, the nine shortcuts on

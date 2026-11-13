@@ -864,6 +864,16 @@ pub struct RapidTrigger {
     pub sensitivity: u8,
 }
 
+/// GG's Protection Mode: a protected key is guarded against being set off by accident
+/// while a key next to it is pressed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Protection {
+    pub enabled: bool,
+    /// The keys it's on for, by HID code; empty means every adjustable key.
+    #[serde(default)]
+    pub keys: Vec<u8>,
+}
+
 impl Default for RapidTrigger {
     fn default() -> Self {
         RapidTrigger {
@@ -898,6 +908,9 @@ pub struct Switches {
     pub rapid_trigger: RapidTrigger,
     #[serde(default)]
     pub rapid_tap: RapidTap,
+    /// Protection Mode. Needs [`Feature::KeyboardProtection`].
+    #[serde(default)]
+    pub protection: Protection,
     /// Keys with a second (deep-press) actuation point, deeper than their first; what they do
     /// there is their binding on [`Layer::Second`]. Needs [`Feature::KeyboardBindings`].
     #[serde(default)]
@@ -1001,6 +1014,12 @@ impl Switches {
         let rt = &self.rapid_trigger;
         rt.enabled && (rt.keys.is_empty() || rt.keys.contains(&code))
     }
+
+    /// Whether `code` has Protection Mode.
+    pub fn protection_on(&self, code: u8) -> bool {
+        let p = &self.protection;
+        p.enabled && (p.keys.is_empty() || p.keys.contains(&code))
+    }
 }
 
 impl Default for Switches {
@@ -1011,6 +1030,7 @@ impl Default for Switches {
             keys: Vec::new(),
             rapid_trigger: RapidTrigger::default(),
             rapid_tap: RapidTap::default(),
+            protection: Protection::default(),
             second: Vec::new(),
         }
     }

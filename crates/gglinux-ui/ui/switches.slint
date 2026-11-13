@@ -27,6 +27,16 @@ export global SwitchesUi {
     in property <[string]> key-names;
     in property <[TapRow]> pairs;
     in property <string> refused;
+    /// Protection Mode: on, for which keys, whether `keyboard_protection` is on, and the
+    /// sentence shown while it isn't.
+    in property <bool> protection;
+    in property <string> protection-keys;
+    in property <bool> protection-some;
+    in property <bool> protection-gated;
+    in property <string> protection-refusal;
+    callback set-protection(bool);
+    callback protection-only-selected();
+    callback protection-every-key();
     /// The deep-press point: `keyboard_bindings` is on, and why it isn't.
     in property <bool> deep-gated;
     in property <string> deep-refusal;
@@ -110,6 +120,16 @@ export component SwitchesPanel {
                         Button { text: "Every key"; small: true; enabled: !SwitchesUi.busy && SwitchesUi.rapid-some; clicked => { SwitchesUi.rapid-every-key(); } }
                     }
                 }
+            } }
+            Opt { gap: 20px; SubTitle { text: "Protection Mode"; } }
+            Opt { shown: !SwitchesUi.protection-gated; Hint { text: SwitchesUi.protection-refusal; color: Theme.accent; } }
+            Opt { Toggle { text: "Guard keys against being set off by accident while a key next to them is pressed"; checked: SwitchesUi.protection; enabled: SwitchesUi.protection-gated && !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-protection(v); } } }
+            Opt { shown: SwitchesUi.protection; HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Unit { text: SwitchesUi.protection-keys; min-width: 0; }
+                Button { text: "Only the selected"; small: true; enabled: SwitchesUi.protection-gated && !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.protection-only-selected(); } }
+                Button { text: "Every key"; small: true; enabled: SwitchesUi.protection-gated && !SwitchesUi.busy && SwitchesUi.protection-some; clicked => { SwitchesUi.protection-every-key(); } }
             } }
             Opt { gap: 20px; SubTitle { text: "Rapid Tap"; } }
             Opt { Toggle { text: "With both keys of a pair held, the keyboard decides which one counts (SOCD)"; checked: SwitchesUi.tap; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-tap(v); } } }

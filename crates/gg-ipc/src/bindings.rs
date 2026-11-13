@@ -79,6 +79,8 @@ pub struct Bindings {
 impl Bindings {
     /// The most keyboard usages one key can send at once.
     pub const MAX_KEYS: usize = 4;
+    /// How many keys can have a deep-press binding.
+    pub const MAX_SECOND: usize = 8;
 
     pub fn layer(&self, layer: Layer) -> &[KeyBinding] {
         match layer {
@@ -99,6 +101,19 @@ impl Bindings {
     /// Check what can be checked without the keyboard, with a message meant for the user.
     /// Which keys exist and which have a second actuation point is the daemon's to check.
     pub fn validate(&self) -> Result<(), String> {
+        // The keyboard's own limit, as GG states it ("Maximum of 8 dual actuation keybinds
+        // permitted", GG 123, 2026-11-13).
+        let deep = self
+            .layer(Layer::Second)
+            .iter()
+            .filter(|b| !matches!(b.action, KeyAction::Default))
+            .count();
+        if deep > Self::MAX_SECOND {
+            return Err(format!(
+                "the keyboard takes at most {} deep-press bindings, not {deep}",
+                Self::MAX_SECOND
+            ));
+        }
         for layer in [Layer::Normal, Layer::Fn, Layer::Second] {
             let mut seen = Vec::new();
             for b in self.layer(layer) {

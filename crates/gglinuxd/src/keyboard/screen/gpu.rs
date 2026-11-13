@@ -231,7 +231,12 @@ fn parse(out: &str) -> Option<Shown> {
     let line = out.lines().next()?;
     let mut fields = line.split(',').map(str::trim);
     let busy = fields.next()?.parse::<u8>().ok().filter(|b| *b <= 100);
-    let celsius = fields.next().and_then(|t| t.parse::<i32>().ok());
+    // Newer drivers print a fraction ("33.65"); the screen shows whole degrees.
+    let celsius = fields
+        .next()
+        .and_then(|t| t.parse::<f32>().ok())
+        .filter(|t| t.is_finite() && (-100.0..=300.0).contains(t))
+        .map(|t| t.round() as i32);
     (busy.is_some() || celsius.is_some()).then_some(Shown::Read { busy, celsius })
 }
 
@@ -481,6 +486,21 @@ pub(super) mod tests {
             Some(Shown::Read {
                 busy: None,
                 celsius: Some(61)
+            })
+        );
+        // As nvidia-smi 620.70 answers on the owner's PC (2026-11-13).
+        assert_eq!(
+            parse("0, 33.65\n"),
+            Some(Shown::Read {
+                busy: Some(0),
+                celsius: Some(34)
+            })
+        );
+        assert_eq!(
+            parse("5, nan"),
+            Some(Shown::Read {
+                busy: Some(5),
+                celsius: None
             })
         );
         assert_eq!(parse("No devices were found"), None);
