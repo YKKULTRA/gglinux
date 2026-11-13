@@ -6,6 +6,12 @@
 //! station's screen) are greyed while `headset_extras` is off. A change there
 //! shows what was sent until the daemon shows it too ([`Pending`]): the base
 //! station may still report the old value on the first read after a write.
+//!
+//! The stream-mix sliders show the levels the base station reads back, but a
+//! slider moved sends the other two levels as gglinux last wrote them, never as
+//! read back ([`HeadsetForm::mix_to_send`], review R2 H1): no capture yet tells
+//! the three places in the reply apart (all read `64` in arctis-5), and a wrong
+//! place would write a wrong level, such as aux muted.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -174,31 +180,30 @@ impl Extras {
         }
         self
     }
-
-    /// The stream mix with one level changed (0 main, 1 aux, 2 mic); `None`
-    /// while the mix isn't known, so a guess for the other two is never sent.
-    pub fn mix_with(&self, which: i32, level: i32) -> Option<HeadsetChange> {
-        let mut mix = self.line_out_mix?;
-        let level = level.clamp(0, i32::from(gg_ipc::LINE_OUT_LEVEL_MAX)) as u8;
-        match which {
-            0 => mix.main = level,
-            1 => mix.aux = level,
-            2 => mix.mic = level,
-            _ => return None,
-        }
-        Some(HeadsetChange::LineOutMix(mix))
-    }
 }
+
+/// A stream-mix level gglinux hasn't written in this run of the app goes out at
+/// 100 (`64`), the level GG's own connect push sends for all three
+/// (`47 64 00 64 64`, capture arctis-1).
+const UNWRITTEN_MIX: LineOutMix = LineOutMix {
+    main: gg_ipc::LINE_OUT_LEVEL_MAX,
+    aux: gg_ipc::LINE_OUT_LEVEL_MAX,
+    mic: gg_ipc::LINE_OUT_LEVEL_MAX,
+};
 
 /// The custom EQ curve being edited, seeded once from what was last applied, and
 /// the base-station settings sent and not shown by the daemon yet; gone with the
-/// daemon, like the mouse's form ([`crate::mouse::MouseForm`]).
+/// daemon, like the mouse's form ([`crate::mouse::MouseForm`]). The stream mix
+/// last written stays: the base station keeps its levels while the daemon is
+/// away.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadsetForm {
     pub bands: Vec<f32>,
     pub editing_custom: bool,
     seeded: bool,
     pub extras: Pending<Extras>,
+    /// The stream mix the daemon last took from this app; `None` before the first.
+    mix_written: Option<LineOutMix>,
 }
 
 impl Default for HeadsetForm {
@@ -208,6 +213,7 @@ impl Default for HeadsetForm {
             editing_custom: false,
             seeded: false,
             extras: Pending::default(),
+            mix_written: None,
         }
     }
 }
@@ -217,9 +223,17 @@ impl HeadsetForm {
     /// what was applied, and starts over, Custom closed, while there's no state.
     pub fn follow(&mut self, headset: Option<&gg_ipc::HeadsetState>) {
         match headset {
-            None => *self = HeadsetForm::default(),
+            None => self.afresh(),
             Some(h) => self.seed(&h.controls),
         }
+    }
+
+    /// Everything afresh but the stream mix last written.
+    fn afresh(&mut self) {
+        *self = HeadsetForm {
+            mix_written: self.mix_written,
+            ..HeadsetForm::default()
+        };
     }
 
     pub fn seed(&mut self, c: &HeadsetControls) {
@@ -242,6 +256,28 @@ impl HeadsetForm {
     pub fn pick_preset(&mut self, i: i32) -> Option<HeadsetChange> {
         self.editing_custom = i == EQ_CUSTOM;
         (i != EQ_CUSTOM).then(|| HeadsetChange::EqPreset(i.clamp(0, 3) as u8))
+    }
+
+    /// The stream mix to send for one slider moved (0 main, 1 aux, 2 mic): that
+    /// level, and the other two as the daemon last took them from this app, or
+    /// [`UNWRITTEN_MIX`]'s. What the base station reads back is only shown.
+    pub fn mix_to_send(&self, which: i32, level: i32) -> Option<HeadsetChange> {
+        let mut mix = self.mix_written.unwrap_or(UNWRITTEN_MIX);
+        let level = level.clamp(0, i32::from(gg_ipc::LINE_OUT_LEVEL_MAX)) as u8;
+        match which {
+            0 => mix.main = level,
+            1 => mix.aux = level,
+            2 => mix.mic = level,
+            _ => return None,
+        }
+        Some(HeadsetChange::LineOutMix(mix))
+    }
+
+    /// The daemon took `change`: a stream mix is the one written now.
+    pub fn mix_taken(&mut self, change: &HeadsetChange) {
+        if let HeadsetChange::LineOutMix(mix) = change {
+            self.mix_written = Some(*mix);
+        }
     }
 }
 
@@ -396,6 +432,7 @@ fn send_extra(ui: &AppWindow, client: &Client, change: HeadsetChange) {
     with_forms(|f| show_headset(ui, &client.state(), &f.headset));
     let weak = ui.as_weak();
     let reader = client.clone();
+    let taken = change.clone();
     client.command(Request::SetHeadset { change }, TIMEOUT, move |result| {
         let read = result.is_ok();
         client::runtime().spawn(async move {
@@ -413,7 +450,13 @@ fn send_extra(ui: &AppWindow, client: &Client, change: HeadsetChange) {
             }
             let error = result.err().map(|e| panel_error(&e)).unwrap_or_default();
             let _ = weak.upgrade_in_event_loop(move |ui| {
-                with_forms(|f| f.headset.borrow_mut().extras.settle());
+                with_forms(|f| {
+                    let mut form = f.headset.borrow_mut();
+                    form.extras.settle();
+                    if read {
+                        form.mix_taken(&taken);
+                    }
+                });
                 let g = ui.global::<HeadsetUi>();
                 g.set_busy(false);
                 g.set_error(error);
@@ -477,11 +520,8 @@ fn bind_extras(ui: &AppWindow, client: &Client) {
     let client = client.clone();
     g.on_set_mix(move |which, level| {
         let Some(ui) = weak.upgrade() else { return };
-        let Some(h) = client.state().headset else {
-            return;
-        };
-        let shown = with_forms(|f| f.headset.borrow_mut().extras.show(&Extras::of(&h.controls)));
-        if let Some(change) = shown.mix_with(which, level) {
+        // The other two levels as last written, never as read back (R2 H1).
+        if let Some(change) = with_forms(|f| f.headset.borrow().mix_to_send(which, level)) {
             send_extra(&ui, &client, change);
         }
     });
@@ -598,9 +638,10 @@ pub fn bind_headset(ui: &AppWindow, client: &Client, form: Rc<RefCell<HeadsetFor
     });
 }
 
-/// Start the headset's working copy afresh (see [`Forms::reset`]).
+/// Start the headset's working copy afresh (see [`Forms::reset`]), but for the
+/// stream mix last written: the base station kept it.
 pub fn reset(forms: &Forms) {
-    *forms.headset.borrow_mut() = HeadsetForm::default();
+    forms.headset.borrow_mut().afresh();
 }
 
 /// The `shot` example's scripted steps for this page (see [`crate::poke`]). A
@@ -749,34 +790,52 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_level_is_sent_only_with_the_whole_mix_known() {
-        let unknown = Extras::default();
-        assert_eq!(unknown.mix_with(0, 50), None, "no guess for aux and mic");
-        let known = Extras {
+    fn a_stream_level_goes_out_with_the_levels_gglinux_last_wrote_never_the_read_back() {
+        let mix = |main, aux, mic| Some(HeadsetChange::LineOutMix(LineOutMix { main, aux, mic }));
+        let mut f = HeadsetForm::default();
+        // The base station reads back aux 0, the byte next to aux's place: shown, not sent.
+        let read_back = Extras {
             line_out_mix: Some(LineOutMix {
                 main: 100,
-                aux: 80,
-                mic: 60,
+                aux: 0,
+                mic: 100,
             }),
             ..Extras::default()
         };
-        assert_eq!(
-            known.mix_with(0, 50),
-            Some(HeadsetChange::LineOutMix(LineOutMix {
-                main: 50,
-                aux: 80,
-                mic: 60
-            }))
-        );
-        assert_eq!(
-            known.mix_with(2, 140),
-            Some(HeadsetChange::LineOutMix(LineOutMix {
-                main: 100,
-                aux: 80,
-                mic: 100
-            }))
-        );
-        assert_eq!(known.mix_with(3, 10), None);
+        assert_eq!(f.extras.show(&read_back), read_back);
+        // Nothing written yet: the other two go out at 100, as GG's own connect push
+        // (`47 64 00 64 64`, capture arctis-1).
+        assert_eq!(f.mix_to_send(0, 50), mix(50, 100, 100));
+        // A change the daemon didn't take isn't remembered.
+        assert_eq!(f.mix_to_send(1, 70), mix(100, 70, 100));
+        // One it took is.
+        f.mix_taken(&HeadsetChange::LineOutMix(LineOutMix {
+            main: 50,
+            aux: 100,
+            mic: 100,
+        }));
+        assert_eq!(f.mix_to_send(1, 70), mix(50, 70, 100));
+        f.mix_taken(&HeadsetChange::LineOutMix(LineOutMix {
+            main: 50,
+            aux: 70,
+            mic: 100,
+        }));
+        assert_eq!(f.mix_to_send(2, 140), mix(50, 70, 100), "100 at most");
+        assert_eq!(f.mix_to_send(2, -5), mix(50, 70, 0));
+        assert_eq!(f.mix_to_send(3, 10), None);
+        // Another setting taken leaves it alone.
+        f.mix_taken(&HeadsetChange::Gain(HeadsetGain::High));
+        assert_eq!(f.mix_to_send(0, 20), mix(20, 70, 100));
+        // The base station keeps its levels while the daemon goes and comes back.
+        f.follow(None);
+        assert!(!f.editing_custom && !f.extras.waiting());
+        assert_eq!(f.mix_to_send(0, 20), mix(20, 70, 100));
+        let forms = Forms::default();
+        *forms.headset.borrow_mut() = f;
+        forms.headset.borrow_mut().pick_preset(EQ_CUSTOM);
+        reset(&forms);
+        assert!(!forms.headset.borrow().editing_custom, "the rest afresh");
+        assert_eq!(forms.headset.borrow().mix_to_send(0, 20), mix(20, 70, 100));
     }
 
     #[test]
