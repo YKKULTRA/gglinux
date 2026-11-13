@@ -9,7 +9,7 @@ import { LineEdit, TextEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Hint, ErrorLine, Toggle, Button, Row, Head, Board, Key } from "widgets.slint";
 import { KeyboardUi, Opt, SubTitle } from "keyboard.slint";
-import { Pick } from "devices.slint";
+import { Pick, NumberBox } from "devices.slint";
 
 /// One macro in the list.
 export struct MacroRow {
@@ -40,11 +40,20 @@ export global MacrosUi {
     in-out property <string> steps;
     /// The keys, for picking the ones that play the macro being edited.
     in property <[Key]> keys;
-    /// Its keys play it again and again while held.
-    in property <bool> hold;
+    /// The keys that play the macro being edited, a row each ("P"), and per row: its
+    /// place in `modes`, the number of times and the wait between plays, in ms.
+    in property <[string]> key-names;
+    in property <[int]> key-modes;
+    in property <[int]> key-times;
+    in property <[int]> key-delays;
+    /// GG's play modes, in its order (MacroMode::ALL): once, a number of times, while
+    /// held, toggle. GG's fifth, Toggle Hold, is greyed out in GG.
+    out property <[string]> modes: ["Once per press", "A number of times", "Again while held", "Toggle on and off"];
     /// The five slots by name, the running one marked.
     in property <[string]> slots;
     in property <int> slot;
+    /// The write button's words, naming the target slot ("Write into Config 5").
+    in property <string> write-label: "Write into slot 5";
     /// Where the macros were last written, in words.
     in property <string> written;
     in property <bool> busy;
@@ -55,7 +64,10 @@ export global MacrosUi {
     callback save();
     callback remove();
     callback key-clicked(int);
-    callback set-hold(bool);
+    /// A key row, and its new mode (a place in `modes`), number of times or wait.
+    callback set-mode(int, int);
+    callback set-times(int, int);
+    callback set-delay(int, int);
     callback pick-slot(int);
     callback write();
 }
@@ -127,7 +139,7 @@ export component MacrosPanel {
                     enabled: root.can;
                 }
             } }
-            Opt { Hint { text: "Steps as words, one after another: a key (a, f1, enter), keys together (ctrl+c), down:shift and up:shift, wait:100 (milliseconds), click:1 (the left mouse button), text:\"Hello\" (typed with the US layout)."; } }
+            Opt { Hint { text: "Steps as words, one after another: a key (a, f1, enter), keys together (ctrl+c), down:shift and up:shift, wait:100 (milliseconds), click:1 (the left mouse button), text:\"Hello\" (typed with the US layout). At most 64 steps for now; a text counts each key going down and up."; } }
             Opt { HorizontalLayout {
                 spacing: 8px;
                 alignment: start;
@@ -139,7 +151,31 @@ export component MacrosPanel {
                 spacing: 0;
                 Hint { text: "Click a key to have it play this macro, or click it again to have it type itself. Two keys can have a macro for now; grey keys can't have one."; }
                 Opt { gap: 10px; Board { keys: MacrosUi.keys; cols: KeyboardUi.cols; rows: KeyboardUi.rows; clicked(i) => { if root.can { MacrosUi.key-clicked(i); } } } }
-                Opt { gap: 10px; Toggle { text: "Its keys play it again and again while held (off: once per press)"; checked: MacrosUi.hold; enabled: root.can; toggled(v) => { MacrosUi.set-hold(v); } } }
+                // A row per key: how it plays the macro, and the numbers the mode takes
+                // (a number of times: both; toggle: the wait).
+                Opt { shown: MacrosUi.key-names.length > 0; gap: 4px; VerticalLayout {
+                    spacing: 0;
+                    for kname[k] in MacrosUi.key-names : VerticalLayout {
+                        spacing: 0;
+                        Opt { gap: 8px; Row {
+                            label: kname + " plays it";
+                            Pick { model: MacrosUi.modes; index: MacrosUi.key-modes[k]; enabled: root.can; busy: MacrosUi.busy; picked(m) => { MacrosUi.set-mode(k, m); } }
+                            Rectangle { horizontal-stretch: 1; }
+                        } }
+                        Opt { shown: MacrosUi.key-modes[k] == 1; gap: 6px; Row {
+                            label: "Times";
+                            NumberBox { width: 130px; minimum: 1; maximum: 255; value: MacrosUi.key-times[k]; enabled: root.can; busy: MacrosUi.busy; commit-on-pause: true; committed(v) => { MacrosUi.set-times(k, v); } }
+                            Rectangle { horizontal-stretch: 1; }
+                        } }
+                        Opt { shown: MacrosUi.key-modes[k] == 1 || MacrosUi.key-modes[k] == 3; gap: 6px; Row {
+                            label: "Wait";
+                            NumberBox { width: 130px; minimum: 1; maximum: 65535; value: MacrosUi.key-delays[k]; enabled: root.can; busy: MacrosUi.busy; commit-on-pause: true; committed(v) => { MacrosUi.set-delay(k, v); } }
+                            Text { text: "ms between plays"; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; }
+                            Rectangle { horizontal-stretch: 1; }
+                        } }
+                    }
+                } }
+                Opt { shown: MacrosUi.key-names.length > 0; gap: 8px; Hint { text: "“A number of times” plays it that many times per press; “Toggle on and off” plays it again and again from one press until the next. Both wait as set between plays; “Again while held” waits 15 ms, as GG does."; } }
             } }
         } }
         Opt { gap: 16px; SubTitle { text: "Write into a slot"; } }
@@ -149,11 +185,11 @@ export component MacrosPanel {
             Pick { model: MacrosUi.slots; index: MacrosUi.slot; enabled: root.can && MacrosUi.can-write; busy: MacrosUi.busy; picked(i) => { MacrosUi.pick-slot(i); } }
             Rectangle { horizontal-stretch: 1; }
         } }
-        Opt { Hint { text: "This rewrites slot " + (MacrosUi.slot + 1) + "'s macros and the keys that play them, and nothing else in it. A backup of the slot is saved first, and written back if anything goes wrong. A slot with macros gglinux can't read yet is left as it is."; } }
+        Opt { Hint { text: "This rewrites slot " + (MacrosUi.slot + 1) + "'s macros and the keys that play them, and nothing else in it. A backup of the slot is saved first, and written back if anything goes wrong. A slot with macros gglinux can't read yet is left as it is. Slot 5 is the target unless you pick another, for one write at a time. The slot isn't loaded afterwards: load it to use the macros."; } }
         Opt { gap: 10px; HorizontalLayout {
             spacing: 10px;
             alignment: start;
-            Button { text: "Write to slot " + (MacrosUi.slot + 1); primary: true; enabled: root.can && MacrosUi.can-write; clicked => { MacrosUi.write(); } }
+            Button { text: MacrosUi.write-label; primary: true; enabled: root.can && MacrosUi.can-write; clicked => { MacrosUi.write(); } }
             Hint { text: MacrosUi.busy ? "Writing the keyboard's memory…" : MacrosUi.written; vertical-alignment: center; }
         } }
         Opt { shown: MacrosUi.note != ""; Hint { text: MacrosUi.note; } }

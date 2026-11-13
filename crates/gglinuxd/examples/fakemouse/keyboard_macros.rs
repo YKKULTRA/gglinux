@@ -50,11 +50,7 @@ impl Default for Macros {
                             events: steps("ctrl+c wait:50 ctrl+v"),
                         },
                     ],
-                    bindings: vec![MacroBinding {
-                        code: 0x13,
-                        name: "greeting".into(),
-                        mode: MacroMode::Once,
-                    }],
+                    bindings: vec![MacroBinding::new(0x13, "greeting", MacroMode::Once)],
                 },
                 ..MacrosState::default()
             },
@@ -108,8 +104,12 @@ fn slot_macros(library: &MacroLibrary) -> Vec<SlotMacro> {
                 key: b.code,
                 mode: match b.mode {
                     MacroMode::Once => Mode::Once,
+                    MacroMode::Times => Mode::Times,
                     MacroMode::WhileHeld => Mode::WhileHeld,
+                    MacroMode::Toggle => Mode::Toggle,
                 },
+                times: b.times,
+                repeat_delay_ms: b.repeat_delay_ms,
                 events: m
                     .events
                     .iter()
@@ -153,10 +153,10 @@ impl Macros {
         self.state.written_slot = Some(slot);
         self.state.note = match written {
             Written::Unchanged => None,
+            // As the daemon: never loaded, the note says how (review R2, K1).
             Written::Written(check) => Some(check.warning().unwrap_or_else(|| {
                 format!(
-                    "the keyboard plays these macros once it runs slot {}: `ggctl onboard load {}` (or the slot's Load button in the app)",
-                    slot + 1,
+                    "run `ggctl onboard load {}` to use it (or the slot's Load button in the app); gglinux doesn't load it itself, as a load also swaps the keyboard's switch settings and bindings",
                     slot + 1
                 )
             })),

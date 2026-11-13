@@ -388,29 +388,70 @@ pub fn describe(action: &KeyAction) -> String {
             "the keyboard's own shortcut ({:02x} {:02x} {:02x} {:02x})",
             raw[0], raw[1], raw[2], raw[3]
         ),
-        KeyAction::Macro { slot } => format!("macro {slot}"),
+        KeyAction::Macro { .. } => "a macro (GG's)".into(),
         KeyAction::Unbound => "none".into(),
     }
 }
 
-fn print_layers(b: &gg_ipc::Bindings, indent: &str) {
-    let mut any = false;
+/// What a key's binding does, in words: a macro key on the normal layer by the name of
+/// the macro gglinux keeps for it (`macros`: key code and name), else [`describe`]'s.
+fn action_text(macros: &[(u8, String)], layer: Layer, k: &KeyBinding) -> String {
+    let named = macros.iter().find(|(code, _)| *code == k.code);
+    match (&k.action, layer, named) {
+        (KeyAction::Macro { .. }, Layer::Normal, Some((_, name))) => format!("macro {name}"),
+        _ => describe(&k.action),
+    }
+}
+
+/// One line per binding in `b`; `macros` names the macro keys.
+fn layer_lines(b: &gg_ipc::Bindings, indent: &str, macros: &[(u8, String)]) -> Vec<String> {
+    let mut lines = Vec::new();
     for (layer, name) in [
         (Layer::Normal, ""),
         (Layer::Fn, "fn+"),
         (Layer::Second, "deep+"),
     ] {
         for k in b.layer(layer) {
-            println!(
+            lines.push(format!(
                 "{indent}{name}{} → {}",
                 key_name(k.code),
-                describe(&k.action)
-            );
-            any = true;
+                action_text(macros, layer, k)
+            ));
         }
     }
-    if !any {
-        println!("{indent}(all keys as they come from the factory)");
+    if lines.is_empty() {
+        lines.push(format!("{indent}(all keys as they come from the factory)"));
+    }
+    lines
+}
+
+fn print_layers(b: &gg_ipc::Bindings, indent: &str, macros: &[(u8, String)]) {
+    for line in layer_lines(b, indent, macros) {
+        println!("{line}");
+    }
+}
+
+/// The keys gglinux's macros are on, with the macro's name, asked of the daemon only when
+/// a key shows a macro; none if it doesn't answer.
+fn macro_names(state: &BindingsState) -> Vec<(u8, String)> {
+    let shown = |b: &gg_ipc::Bindings| {
+        [Layer::Normal, Layer::Fn, Layer::Second]
+            .into_iter()
+            .flat_map(|l| b.layer(l))
+            .any(|k| matches!(k.action, KeyAction::Macro { .. }))
+    };
+    if !shown(&state.bindings) && !state.read.as_ref().is_some_and(shown) {
+        return Vec::new();
+    }
+    let answer = crate::connect().and_then(|c| crate::send(c, Request::GetMacros));
+    match answer {
+        Ok(ResponseData::Macros { state }) => state
+            .library
+            .bindings
+            .into_iter()
+            .map(|b| (b.code, b.name))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -427,11 +468,12 @@ pub fn print(state: &BindingsState) {
     if let Some(k) = state.bindings.fn_key {
         println!("Fn key: {}", key_name(k));
     }
-    print_layers(&state.bindings, "  ");
+    let macros = macro_names(state);
+    print_layers(&state.bindings, "  ", &macros);
     match &state.read {
         Some(read) => {
             println!("read from the keyboard on this connection:");
-            print_layers(read, "  ");
+            print_layers(read, "  ", &macros);
         }
         None => println!("not read from the keyboard on this connection (ggctl bind read)"),
     }
@@ -599,6 +641,42 @@ mod tests {
             read: Some(Bindings::default()),
             error: Some("the keyboard isn't connected".into()),
         });
+    }
+
+    /// A macro key shows the name of the macro gglinux keeps for it, else that it's GG's;
+    /// only on the normal layer, where gglinux puts its macros.
+    #[test]
+    fn a_macro_key_shows_its_macros_name_or_that_it_is_ggs() {
+        let read = Bindings {
+            normal: vec![
+                KeyBinding {
+                    code: 0x13,
+                    action: KeyAction::Macro { slot: 0 },
+                },
+                KeyBinding {
+                    code: 0x12,
+                    action: KeyAction::Macro { slot: 0 },
+                },
+            ],
+            fn_layer: vec![KeyBinding {
+                code: 0x13,
+                action: KeyAction::Macro { slot: 0 },
+            }],
+            ..Bindings::default()
+        };
+        let macros = vec![(0x13, "copy".to_owned())];
+        assert_eq!(
+            layer_lines(&read, "  ", &macros),
+            [
+                "  p → macro copy",
+                "  o → a macro (GG's)",
+                "  fn+p → a macro (GG's)"
+            ]
+        );
+        assert_eq!(
+            layer_lines(&Bindings::default(), "", &macros),
+            ["(all keys as they come from the factory)"]
+        );
     }
 
     #[test]

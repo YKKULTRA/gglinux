@@ -6,7 +6,11 @@
 //! ggctl macro set NAME <steps>       # make or change one: a ctrl+c down:shift up:shift wait:100
 //!                                    #   click:1 'text:"hello"'
 //! ggctl macro rm NAME                # remove one, and its keys
-//! ggctl macro bind KEY NAME [hold]   # KEY plays it once per press, or again and again while held
+//! ggctl macro bind KEY NAME [once|hold|times N|toggle] [delay MS]
+//!                                    # KEY plays it once per press (the default), again and
+//!                                    #   again while held, N times per press, or again and
+//!                                    #   again until pressed again; MS between plays (times
+//!                                    #   and toggle; GG's 15 if left out)
 //! ggctl macro unbind KEY
 //! ggctl macro write N                # write them into slot N (1 to 5), a backup of it first
 //! ```
@@ -18,7 +22,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use gg_ipc::{Macro, MacroBinding, MacroLibrary, MacroMode, MacrosState, Request, ResponseData};
 
-const USAGE: &str = "usage: ggctl macro [set NAME <steps> | rm NAME | bind KEY NAME [hold] | unbind KEY | write SLOT] (steps: a ctrl+c down:shift up:shift wait:100 click:1 'text:\"hi\"'; slots 1 to 5)";
+const USAGE: &str = "usage: ggctl macro [set NAME <steps> | rm NAME | bind KEY NAME [once|hold|times N|toggle] [delay MS] | unbind KEY | write SLOT] (steps: a ctrl+c down:shift up:shift wait:100 click:1 'text:\"hi\"'; slots 1 to 5)";
 
 /// What `ggctl macro ...` asks for, before anything is read from the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,11 +39,8 @@ pub enum Edit {
     /// Make a macro, or change the steps of the one with its name.
     Set(Macro),
     Remove(String),
-    Bind {
-        code: u8,
-        name: String,
-        mode: MacroMode,
-    },
+    /// A key plays a macro, in a play mode, with its numbers.
+    Bind(MacroBinding),
     Unbind(u8),
 }
 
@@ -56,18 +57,9 @@ pub fn command(words: &[&str]) -> Result<Command> {
             }))
         }
         ["rm" | "remove", name] => Command::Edit(Edit::Remove((*name).to_owned())),
-        ["bind", key, name, mode @ ..] if mode.len() <= 1 => Command::Edit(Edit::Bind {
-            code: key_of(key)?,
-            name: (*name).to_owned(),
-            mode: match mode {
-                [] | ["once"] => MacroMode::Once,
-                ["hold"] => MacroMode::WhileHeld,
-                [other] => bail!(
-                    "'{other}' is not a way to play a macro: leave it out for once per press, or say hold"
-                ),
-                _ => unreachable!("one word at most"),
-            },
-        }),
+        ["bind", key, name, play @ ..] => {
+            Command::Edit(Edit::Bind(binding(key_of(key)?, name, play)?))
+        }
         ["unbind", key] => Command::Edit(Edit::Unbind(key_of(key)?)),
         _ => bail!("{USAGE}"),
     })
@@ -82,6 +74,57 @@ fn key_of(word: &str) -> Result<u8> {
     }
     MacroBinding::key_by_name(word)
         .with_context(|| format!("'{word}' is not a key name (try: p, f1, capslock, 0x13)"))
+}
+
+/// How key `code` plays macro `name`, from the words after the name:
+/// `[once|hold|times N|toggle] [delay MS]`. Once per press with GG's numbers if none.
+fn binding(code: u8, name: &str, words: &[&str]) -> Result<MacroBinding> {
+    let mut b = MacroBinding::new(code, name, MacroMode::Once);
+    let mut rest = words;
+    if let Some((&first, after)) = words.split_first() {
+        let mode = match first {
+            "once" => Some(MacroMode::Once),
+            "hold" => Some(MacroMode::WhileHeld),
+            "times" => Some(MacroMode::Times),
+            "toggle" => Some(MacroMode::Toggle),
+            "delay" => None,
+            other => bail!(
+                "'{other}' is not a way to play a macro: once (the default), hold, times N or toggle"
+            ),
+        };
+        if let Some(mode) = mode {
+            b.set_mode(mode);
+            rest = after;
+        }
+        if mode == Some(MacroMode::Times) {
+            let (n, after) = rest
+                .split_first()
+                .context("times needs how many: times 3 (1 to 255)")?;
+            b.times = n
+                .parse()
+                .ok()
+                .filter(|&n| n >= 1)
+                .with_context(|| format!("'{n}' is not a number of times (1 to 255)"))?;
+            rest = after;
+        }
+    }
+    match rest {
+        [] => {}
+        ["delay", ms] if b.mode.waits() => {
+            b.repeat_delay_ms = ms
+                .trim_end_matches("ms")
+                .parse()
+                .ok()
+                .filter(|&ms| ms >= 1)
+                .with_context(|| format!("'{ms}' is not a wait (1 to 65535 ms)"))?;
+        }
+        ["delay", ..] if !b.mode.waits() => bail!(
+            "a wait between plays goes with times and toggle only: GG's saves show {} ms for the others",
+            MacroBinding::DEFAULT_DELAY_MS
+        ),
+        _ => bail!("{USAGE}"),
+    }
+    Ok(b)
 }
 
 /// A slot as the user counts it, 1 to 5, as the keyboard's 0 to 4.
@@ -111,16 +154,13 @@ impl Edit {
                 }
                 library.bindings.retain(|b| &b.name != name);
             }
-            Edit::Bind { code, name, mode } => {
+            Edit::Bind(binding) => {
+                let name = &binding.name;
                 if library.find(name).is_none() {
                     bail!("there's no macro called '{name}': make it first with `ggctl macro set {name} <steps>`");
                 }
-                library.bindings.retain(|b| b.code != *code);
-                library.bindings.push(MacroBinding {
-                    code: *code,
-                    name: name.clone(),
-                    mode: *mode,
-                });
+                library.bindings.retain(|b| b.code != binding.code);
+                library.bindings.push(binding.clone());
             }
             Edit::Unbind(code) => {
                 let before = library.bindings.len();
@@ -178,14 +218,11 @@ fn lines(state: &MacrosState) -> Vec<String> {
     if !lib.bindings.is_empty() {
         out.push("keys:".to_owned());
         for b in &lib.bindings {
-            let how = match b.mode {
-                MacroMode::Once => "once per press",
-                MacroMode::WhileHeld => "again and again while held",
-            };
             out.push(format!(
-                "  {} → {} ({how})",
+                "  {} → {} ({})",
                 MacroBinding::key_name(b.code),
-                b.name
+                b.name,
+                b.play_text()
             ));
         }
     }
@@ -228,19 +265,11 @@ mod tests {
         assert_eq!(command(&["write", "5"]).unwrap(), Command::Write(4));
         assert_eq!(
             edit("bind p copy hold"),
-            Edit::Bind {
-                code: 0x13,
-                name: "copy".into(),
-                mode: MacroMode::WhileHeld
-            }
+            Edit::Bind(MacroBinding::new(0x13, "copy", MacroMode::WhileHeld))
         );
         assert_eq!(
             edit("bind capslock copy"),
-            Edit::Bind {
-                code: 0x39,
-                name: "copy".into(),
-                mode: MacroMode::Once
-            }
+            Edit::Bind(MacroBinding::new(0x39, "copy", MacroMode::Once))
         );
         assert_eq!(edit("unbind menu"), Edit::Unbind(0xE7));
         assert_eq!(edit("rm copy"), Edit::Remove("copy".into()));
@@ -269,12 +298,69 @@ mod tests {
             ("bind fn+p copy", "Fn or deep-press"),
             ("bind nokey copy", "not a key name"),
             ("bind p copy twice", "hold"),
+            ("bind p copy times", "how many"),
+            ("bind p copy times 0", "1 to 255"),
+            ("bind p copy times 256", "1 to 255"),
+            ("bind p copy toggle delay 0", "1 to 65535"),
+            ("bind p copy toggle delay soon", "1 to 65535"),
+            ("bind p copy delay 100", "times and toggle only"),
+            ("bind p copy hold delay 100", "times and toggle only"),
+            ("bind p copy times 3 delay", "usage"),
+            ("bind p copy toggle 3", "usage"),
             ("frobnicate", "usage"),
         ] {
             let words: Vec<&str> = line.split_whitespace().collect();
             let e = format!("{:#}", command(&words).unwrap_err());
             assert!(e.contains(why), "{line}: {e}");
         }
+    }
+
+    /// GG's apex-30: P three times, 100 ms apart; O toggled, 200 ms apart.
+    #[test]
+    fn the_play_modes_take_their_numbers() {
+        let Edit::Bind(p) = edit("bind p copy times 3 delay 100") else {
+            panic!()
+        };
+        assert_eq!(
+            (p.mode, p.times, p.repeat_delay_ms),
+            (MacroMode::Times, 3, 100)
+        );
+        let Edit::Bind(o) = edit("bind o copy toggle delay 200ms") else {
+            panic!()
+        };
+        assert_eq!(
+            (o.mode, o.times, o.repeat_delay_ms),
+            (MacroMode::Toggle, 1, 200)
+        );
+        // Without a delay, GG's 15 ms; with once and hold, GG's numbers.
+        let Edit::Bind(t) = edit("bind p copy times 255") else {
+            panic!()
+        };
+        assert_eq!((t.times, t.repeat_delay_ms), (255, 15));
+        assert_eq!(
+            edit("bind p copy once"),
+            Edit::Bind(MacroBinding::new(0x13, "copy", MacroMode::Once))
+        );
+        let mut lib = MacroLibrary::default();
+        edit("set copy ctrl+c").apply(&mut lib).unwrap();
+        edit("bind p copy times 3 delay 100")
+            .apply(&mut lib)
+            .unwrap();
+        edit("bind o copy toggle delay 200")
+            .apply(&mut lib)
+            .unwrap();
+        lib.validate().unwrap();
+        let state = MacrosState {
+            library: lib,
+            ..MacrosState::default()
+        };
+        assert_eq!(
+            lines(&state)[3..5],
+            [
+                "  p → copy (3 times per press, 100 ms apart)",
+                "  o → copy (again and again until pressed again, 200 ms apart)"
+            ]
+        );
     }
 
     #[test]
@@ -302,11 +388,7 @@ mod tests {
                     name: "copy".into(),
                     events: Macro::parse_steps("ctrl+c").unwrap(),
                 }],
-                bindings: vec![MacroBinding {
-                    code: 0x13,
-                    name: "copy".into(),
-                    mode: MacroMode::Once,
-                }],
+                bindings: vec![MacroBinding::new(0x13, "copy", MacroMode::Once)],
             },
             written_slot: Some(4),
             note: Some("load it".into()),

@@ -8,9 +8,9 @@
 //! slots' checked transaction ([`Keyboard::write_slot`]: read, back up, write, read back,
 //! put back on any mismatch); the change rewrites only the slot's macro area, the bound
 //! keys' places and the CRC ([`gg_device_keyboard::macros::write`]). A slot whose macros
-//! gglinux can't read is left alone. Writing the slot the keyboard runs loads it again, so
-//! the macros take effect; the worker then tells the bindings and switches what a load
-//! tells them.
+//! gglinux can't read is left alone. A write never loads the slot, not even the one the
+//! keyboard runs: a load also swaps the keyboard's switch settings and bindings (review R2,
+//! K1). The answer's note says to run `ggctl onboard load N` to use it.
 //!
 //! `SetMacros` needs `keyboard_macros`; `WriteMacros` needs it and `keyboard_onboard`,
 //! each refused with [`Experimental::refusal`]'s words for the one that's off. The open
@@ -95,7 +95,9 @@ pub enum Cmd {
 }
 
 /// One command, on the keyboard worker's thread. `device` is the open keyboard, if any;
-/// `active` the slot it runs, if known. Returns whether the keyboard loaded a slot again.
+/// `active` the slot it runs, if known (for the note). Returns whether the keyboard loaded
+/// a slot: never, as a write doesn't load (see the module docs); the worker's handling of
+/// a load stays for the day loading is offered as its own step.
 pub fn on_command(
     cmd: Cmd,
     store: &mut Store,
@@ -122,13 +124,10 @@ pub fn on_command(
             reply,
             running,
         } => {
-            let (answer, loaded) = match ready(exp, device) {
-                Ok(kb) => write(store, kb, slot, active, event_tx),
-                Err(why) => (Err(why), false),
-            };
+            let answer = ready(exp, device).and_then(|kb| write(store, kb, slot, active, event_tx));
             drop(running);
             let _ = reply.send(answer);
-            loaded
+            false
         }
     }
 }
@@ -166,7 +165,8 @@ fn ready<'a>(exp: &Experimental, device: Option<&'a Keyboard>) -> Result<&'a Key
     device.ok_or_else(|| "the keyboard isn't connected".to_owned())
 }
 
-/// The library as the slot holds macros: each bound key with its macro.
+/// The library as the slot holds macros: each bound key with its macro, how it plays it
+/// and the play mode's numbers.
 fn slot_macros(library: &MacroLibrary) -> Vec<SlotMacro> {
     library
         .bindings
@@ -177,8 +177,12 @@ fn slot_macros(library: &MacroLibrary) -> Vec<SlotMacro> {
                 key: b.code,
                 mode: match b.mode {
                     MacroMode::Once => Mode::Once,
+                    MacroMode::Times => Mode::Times,
                     MacroMode::WhileHeld => Mode::WhileHeld,
+                    MacroMode::Toggle => Mode::Toggle,
                 },
+                times: b.times,
+                repeat_delay_ms: b.repeat_delay_ms,
                 events: m.events.iter().map(slot_event).collect(),
             })
         })
@@ -193,15 +197,14 @@ fn slot_event(e: &MacroEvent) -> SlotEvent {
     }
 }
 
-/// Write the library into `slot`: busy, and announced, from start to end. Returns the
-/// answer and whether the keyboard loaded the slot again.
+/// Write the library into `slot`: busy, and announced, from start to end.
 fn write(
     store: &mut Store,
     kb: &Keyboard,
     slot: u8,
     active: Option<u8>,
     event_tx: &broadcast::Sender<Event>,
-) -> (Result<MacrosState, String>, bool) {
+) -> Result<MacrosState, String> {
     store.state.busy = true;
     store.state.error = None;
     store.state.note = None;
@@ -210,14 +213,11 @@ fn write(
     store.state.busy = false;
     store.state.error = result.as_ref().err().cloned();
     announce(store, event_tx);
-    match result {
-        Ok(loaded) => (Ok(store.state.clone()), loaded),
-        Err(e) => (Err(e), false),
-    }
+    result.map(|()| store.state.clone())
 }
 
-/// The checked slot write, then the load if it's the slot the keyboard runs.
-fn flash(store: &mut Store, kb: &Keyboard, slot: u8, active: Option<u8>) -> Result<bool, String> {
+/// The checked slot write. Nothing is loaded: the note says how to load it.
+fn flash(store: &mut Store, kb: &Keyboard, slot: u8, active: Option<u8>) -> Result<(), String> {
     check(&store.state.library)?;
     let macros = slot_macros(&store.state.library);
     let n = u16::from(slot) + 1;
@@ -241,7 +241,7 @@ fn flash(store: &mut Store, kb: &Keyboard, slot: u8, active: Option<u8>) -> Resu
             info!(slot = n, "the keyboard slot already holds these macros");
             store.state.written_slot = Some(slot);
             store.save();
-            return Ok(false);
+            return Ok(());
         }
         Ok(Written::Written(answer)) => answer,
         Err(e) => {
@@ -263,25 +263,16 @@ fn flash(store: &mut Store, kb: &Keyboard, slot: u8, active: Option<u8>) -> Resu
     store.state.written_slot = Some(slot);
     store.save();
     let mut notes: Vec<String> = answer.warning().into_iter().collect();
-    let loaded = if active == Some(slot) {
-        // The keyboard runs this slot: load it again so the macros take effect.
-        match kb.load_slot(slot) {
-            Ok(()) => true,
-            Err(e) => {
-                notes.push(format!(
-                    "the slot couldn't be loaded again ({e:#}): load it with `ggctl onboard load {n}` for the macros to work"
-                ));
-                false
-            }
-        }
+    let running = if active == Some(slot) {
+        format!("slot {n} is the one running, and it plays the new macros only once loaded again: ")
     } else {
-        notes.push(format!(
-            "the keyboard plays these macros once it runs slot {n}: `ggctl onboard load {n}` (or the slot's Load button in the app)"
-        ));
-        false
+        String::new()
     };
-    store.state.note = (!notes.is_empty()).then(|| notes.join("; "));
-    Ok(loaded)
+    notes.push(format!(
+        "{running}run `ggctl onboard load {n}` to use it (or the slot's Load button in the app); gglinux doesn't load it itself, as a load also swaps the keyboard's switch settings and bindings"
+    ));
+    store.state.note = Some(notes.join("; "));
+    Ok(())
 }
 
 fn announce(store: &Store, event_tx: &broadcast::Sender<Event>) {
@@ -396,11 +387,7 @@ mod tests {
             }],
             bindings: bound
                 .iter()
-                .map(|&(code, mode)| MacroBinding {
-                    code,
-                    name: "first".into(),
-                    mode,
-                })
+                .map(|&(code, mode)| MacroBinding::new(code, "first", mode))
                 .collect(),
         }
     }
@@ -516,8 +503,45 @@ mod tests {
         assert!(!slot_ops(&rig.slots).contains(&0x02));
     }
 
+    /// GG's apex-30 save from the library it shows: its first macro on O with Toggle
+    /// Auto-Repeat, 200 ms apart, and on P three times, 100 ms apart. The slot's macro area
+    /// comes out as GG wrote it, byte for byte.
     #[tokio::test]
-    async fn writing_the_slot_the_keyboard_runs_loads_it_again() {
+    async fn play_n_times_and_toggle_go_into_the_slot_as_gg_writes_them() {
+        const GG_MODES: &str = "770409000101c8000204010104000f00020401000400390102050101020501000400730c000100010001000077020900010364000204010104000f00020401000400390102050101020501000400730c0001000100010000";
+        let rig = rig("macros-modes", gates(true, true));
+        let mut lib = library(&[(O, MacroMode::Toggle), (P, MacroMode::Times)]);
+        lib.bindings[0].repeat_delay_ms = 200;
+        lib.bindings[1].times = 3;
+        lib.bindings[1].repeat_delay_ms = 100;
+        ask(&rig, set(lib.clone())).await.unwrap();
+        assert_eq!(
+            Store::load(&rig.dir.0).state.library,
+            lib,
+            "saved with its numbers"
+        );
+        let state = ask(&rig, Request::WriteMacros { slot: 4 }).await.unwrap();
+        assert!(state.error.is_none(), "{state:?}");
+        let new = Image::parse(&rig.slots.slot(4)).unwrap();
+        let gg: Vec<u8> = (0..GG_MODES.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&GG_MODES[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(new.macros()[..gg.len()], gg[..]);
+        assert!(new.macros()[gg.len()..].iter().all(|&b| b == 0));
+        // A number GG's saves don't show for its mode is refused, and nothing changes.
+        let mut odd = lib.clone();
+        odd.bindings[0].set_mode(MacroMode::WhileHeld);
+        odd.bindings[0].repeat_delay_ms = 200;
+        let e = ask(&rig, set(odd)).await.unwrap_err();
+        assert!(e.contains("15 ms"), "{e}");
+        assert_eq!(Store::load(&rig.dir.0).state.library, lib);
+    }
+
+    /// Review R2, K1: a load swaps the keyboard's switch settings and bindings, so a write
+    /// never loads, not even the slot the keyboard runs. The note says how to load it.
+    #[tokio::test]
+    async fn writing_the_slot_the_keyboard_runs_never_loads_it() {
         let rig = rig("macros-running", gates(true, true));
         // The first command lets the worker finish opening the keyboard (its `on_connect`
         // forgets which slot runs); then slot 5 is loaded.
@@ -540,9 +564,13 @@ mod tests {
         let state = ask(&rig, Request::WriteMacros { slot: 4 }).await.unwrap();
         assert!(state.error.is_none(), "{state:?}");
         let ops = slot_ops(&rig.slots);
-        assert_eq!(ops.last(), Some(&0xB2), "{ops:x?}");
-        assert_eq!(rig.slots.loaded(), Some(4));
-        assert_eq!(state.note, None);
+        assert!(!ops.contains(&0xB2), "no load: {ops:x?}");
+        assert_eq!(ops.iter().filter(|&&op| op == 0x02).count(), 1, "written");
+        let note = state.note.unwrap_or_default();
+        assert!(
+            note.contains("run `ggctl onboard load 5` to use it"),
+            "{note}"
+        );
     }
 
     #[tokio::test]

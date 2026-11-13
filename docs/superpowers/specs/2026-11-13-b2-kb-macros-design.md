@@ -96,3 +96,61 @@ ggctl onboard load 5
 ggctl onboard restore 5 ~/backups/gglinux/onboard-2026-11-13/slot5-20261113T103122Z.bin
 ggctl onboard load 1
 ```
+
+## Addendum (unit c1-followups): GG's other play modes, and the R2 review fixes
+
+**Source.** Capture apex-30 (2026-11-13, Config 5 rebuilt in GG 123), image
+`~/projects/gg-m11/captures/apex-30.slot5-gg-modes-text.bin` (sha256
+`f88603a86f503008e4c8dd59cb82616379608f50eace7393b4ea41e172e71b4c`), GG's screenshots `lab-shots/ggwin2/ma-*.png`.
+Diffed against apex-22: only the macro area, P's start word and the CRC changed. Header =
+`77 <mode> <count u16 LE> 01 <times> <wait u16 LE ms>`:
+
+| GG mode | code | seen | GG's fields (screenshots ma-4/5/7) |
+|---|---|---|---|
+| Play Once | `01` | `… 01 01 0f 00` (every save) | wait and count greyed |
+| Play N Times | `02` | P: `77 02 09 00 01 03 64 00` (3 times, 100 ms) | wait and count |
+| Repeat While Pressed | `03` | `… 01 01 0f 00` (apex-22) | not shown in a screenshot |
+| Toggle Auto-Repeat | `04` | O: `77 04 09 00 01 01 c8 00` (200 ms) | wait; count greyed |
+| Toggle Hold | – | greyed in GG | – |
+
+P's binding points at word 11 (`71 00 00 0b 00`, 8 + 9 × 4 = 44 bytes after O's copy). I kept `51 0c`: GG's Text
+Macro isn't on the keyboard (GG types it from the PC).
+
+**What.** `MacroMode::{Once, Times, WhileHeld, Toggle}`; `MacroBinding::{times, repeat_delay_ms}` (serde defaults
+1 and 15, so older `macros.json` files read); `MacroBinding::{new, set_mode, play_text}`,
+`MacroMode::{ALL, counts, waits, describe}`. Codec `Mode` gains `Times`/`Toggle`, `SlotMacro` gains
+`times`/`repeat_delay_ms`; the header is encoded and decoded from them. ggctl:
+`ggctl macro bind KEY NAME [once|hold|times N|toggle] [delay MS]`. App: a row per key that plays the open macro,
+with a mode menu and, where the mode takes them, "Times" and "Wait … ms between plays".
+
+**Decisions.**
+- **Numbers only where a capture shows the user's own.** A count only with Play N Times (1–255); a wait only with
+  Play N Times and Toggle Auto-Repeat (1–65 535 ms). Everywhere else GG's 1 and 15 ms, and anything else is refused
+  (model, codec and ggctl). Repeat While Pressed keeps 15 ms: GG probably lets it be set, but no capture shows
+  another value with it. Byte 4 stays `01` (GG's "Play on key" switch showed "press" in the apex-30 screenshots;
+  what it writes for "release" isn't known).
+- **Decoding** takes modes `01`–`04` with any count and wait (they're plain numbers in known fields); a slot with
+  another mode or another byte 4 is still "can't read". Encoding checks the ranges above.
+- **`ggctl bind`** shows a macro key on the normal layer as `macro <name>` when gglinux's library has that key,
+  else `a macro (GG's)` (it asks the daemon for the macros only when a key shows one).
+
+**R2 review fixes** (`~/projects/gg-m11/reviews/R2-wave-b.md`):
+- K1: a write never loads the slot, not even the running one; the note says "run `ggctl onboard load N` to use it".
+  `on_command` still returns a bool for the worker, always false now.
+- K2: the app writes into slot 5 unless another slot is picked, and a pick lasts for one write; the button names
+  the target ("Write into Config 5", "(running)" when it is).
+- K3: at most 64 steps a macro (a `text:` step counts its taps), in the model and in the codec.
+- K9: the codec docs give the header's meaning; a test reads the real apex-30 area and normal layer (copied from
+  the .bin above) as the modes gglinux writes.
+
+**Unverified on hardware, two-minute check** (slot 5, gates `keyboard_macros` and `keyboard_onboard` on, switches
+and bindings off):
+
+```
+ggctl macro set t 'g wait:200'
+ggctl macro bind p t times 3 delay 300
+ggctl macro bind o t toggle delay 500
+ggctl macro write 5 && ggctl onboard load 5
+# P: "ggg" with a short pause between each g. O: g every half second until O is pressed again.
+ggctl onboard restore 5 <the backup the write printed>   # then: ggctl onboard load 1
+```

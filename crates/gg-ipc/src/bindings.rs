@@ -49,7 +49,11 @@ pub enum KeyAction {
     Firmware {
         raw: [u8; 4],
     },
-    /// A macro stored on the keyboard, by slot. Its format isn't known yet.
+    /// A key that plays a macro from the running slot's macro area (function `71`, then
+    /// `00 00` and the macro's start in 4-byte words; decoded from GG's saves, see
+    /// `gg_device_keyboard::macros` and `docs/PROTOCOLS.md` 3f). `slot` is the first code
+    /// byte, `00` in every GG save. Kept only as the keyboard reported it: gglinux's own
+    /// macros go into a slot with [`crate::Request::WriteMacros`].
     Macro {
         slot: u8,
     },

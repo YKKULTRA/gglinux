@@ -1,26 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Keyboard macros in a slot's image, stored as GG 123 stores them.
 //!
-//! From three GG 123 saves of the same slot (our captures apex-20 to apex-22,
+//! From four GG 123 saves of the same slot (our captures apex-20 to apex-22 and apex-30,
 //! `docs/PROTOCOLS.md` 3f), diffed against the slot's factory image. The macro area is
 //! Apex Control's opaque 9 600 bytes at image offset 2704 ([`at::MACROS`]): macros back to
 //! back from its start, the rest zero. Each macro is an 8-byte header,
-//! `77 <mode> <count u16 LE> 01 01 0f 00`, then `count` 4-byte steps:
+//! `77 <mode> <count u16 LE> 01 <times> <wait u16 LE>`, then `count` 4-byte steps:
 //!
 //! - a key: `02 <HID usage> 01 <01 down | 00 up>`;
 //! - a wait: `04 00 <ms u16 LE>`;
 //! - a mouse button: `00 <button> 00 <01 down | 00 up>` (only button 1 was seen).
 //!
-//! Mode `01` plays once, `03` repeats while the key is held. The header's last four bytes
-//! were the same in all three saves; what they mean isn't known, so they're written as GG
-//! wrote them. A key plays a macro through its binding on the normal layer, at
+//! Modes ([`Mode`]): `01` plays once, `02` a number of times (`times`, with `wait` ms
+//! between plays), `03` again and again while the key is held, `04` again and again from
+//! one press to the next (`wait` ms apart). The header's fifth byte was `01` in every save;
+//! what it means isn't known, so it's written as GG wrote it. `times` is 1 and `wait` GG's
+//! 15 ms wherever GG's saves don't show the user's own. A key plays a macro through its
+//! binding on the normal layer, at
 //! `80 + 5 × its place` in the firmware's key order ([`FIRMWARE_KEYS`]): function `71`,
 //! then `00 00` and where the macro starts in the area, in 4-byte words (`u16 LE`).
 //!
 //! Only that is written. A slot whose macros hold anything else (another mode or kind of
-//! step, other header bytes, a macro on the Fn or deep-press layer, a binding that points
-//! where no macro starts, bytes after the last macro) is never rewritten: the user's own
-//! GG-made macros must not be lost ([`CANT_READ`]). GG's save also rewrites unrelated
+//! step, another fifth header byte, a macro on the Fn or deep-press layer, a binding that
+//! points where no macro starts, bytes after the last macro) is never rewritten: the user's
+//! own GG-made macros must not be lost ([`CANT_READ`]). GG's save also rewrites unrelated
 //! fields (blank places, zone bytes); a write here changes only the macro area, the bound
 //! keys' places and the CRC. A key whose macro is gone types itself again
 //! (`51 <key> 00 00 00`, its factory binding).
@@ -54,12 +57,16 @@ const NO_MACRO: [u8; 7] = [0xF5, 0xF6, 0xF7, 0xF1, 0xFE, 0xFF, 0xF0];
 
 /// How many keys can have a macro. GG's saves show two; more aren't tried yet.
 pub const MAX_MACROS: usize = 2;
+/// The most steps one macro gets for now: GG's longest in our captures has 18, and no
+/// longer one has been tried on the keyboard (review R2, K3).
+pub const MAX_STEPS: usize = 64;
 
 const TAG: u8 = 0x77;
-const ONCE: u8 = 0x01;
-const WHILE_HELD: u8 = 0x03;
-/// The header's last four bytes, as all three of GG's saves have them.
-const HEADER_TAIL: [u8; 4] = [0x01, 0x01, 0x0F, 0x00];
+/// The header's fifth byte, as every GG save has it.
+const HEADER_FIFTH: u8 = 0x01;
+/// GG's number of plays and wait between them, where the mode doesn't use them.
+pub const DEFAULT_TIMES: u8 = 1;
+pub const DEFAULT_DELAY_MS: u16 = 15;
 const HEADER: usize = 8;
 const STEP: usize = 4;
 const KEY_STEP: u8 = 0x02;
@@ -81,13 +88,36 @@ pub enum Event {
     Delay { ms: u16 },
 }
 
-/// How a macro plays.
+/// How a macro plays: GG's play modes, with their codes (apex-20 to apex-22, apex-30).
+/// GG greys out its fifth, Toggle Hold, so its code is unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Once per press (GG's Play Once).
+    /// Once per press (GG's Play Once, `01`).
     Once,
-    /// Again and again while the key is held (GG's Repeat While Pressed).
+    /// `times` times per press, `wait` apart (GG's Play N Times, `02`).
+    Times,
+    /// Again and again while the key is held (GG's Repeat While Pressed, `03`).
     WhileHeld,
+    /// Again and again from one press to the next, `wait` apart (GG's Toggle
+    /// Auto-Repeat, `04`).
+    Toggle,
+}
+
+impl Mode {
+    fn code(self) -> u8 {
+        match self {
+            Mode::Once => 0x01,
+            Mode::Times => 0x02,
+            Mode::WhileHeld => 0x03,
+            Mode::Toggle => 0x04,
+        }
+    }
+
+    fn of(code: u8) -> Option<Mode> {
+        [Mode::Once, Mode::Times, Mode::WhileHeld, Mode::Toggle]
+            .into_iter()
+            .find(|m| m.code() == code)
+    }
 }
 
 /// A key and the macro it plays.
@@ -96,6 +126,12 @@ pub struct SlotMacro {
     /// The key, by HID code.
     pub key: u8,
     pub mode: Mode,
+    /// Plays per press: the user's with [`Mode::Times`] (1 to 255), else
+    /// [`DEFAULT_TIMES`].
+    pub times: u8,
+    /// The wait between plays, in ms: the user's with [`Mode::Times`] and [`Mode::Toggle`]
+    /// (1 to 65 535), else [`DEFAULT_DELAY_MS`].
+    pub repeat_delay_ms: u16,
     pub events: Vec<Event>,
 }
 
@@ -115,6 +151,8 @@ fn cant_read(why: impl std::fmt::Display) -> anyhow::Error {
 struct Entry {
     start: u16,
     mode: Mode,
+    times: u8,
+    repeat_delay_ms: u16,
     events: Vec<Event>,
 }
 
@@ -127,15 +165,12 @@ fn decode_area(area: &[u8]) -> Result<Vec<Entry>> {
         let header = area.get(at..at + HEADER).ok_or_else(|| {
             cant_read(format!("a macro's header runs past the area at byte {at}"))
         })?;
-        let mode = match header[1] {
-            ONCE => Mode::Once,
-            WHILE_HELD => Mode::WhileHeld,
-            other => return Err(cant_read(format!("a macro has play mode {other:#04x}"))),
-        };
-        if header[4..] != HEADER_TAIL {
+        let mode = Mode::of(header[1])
+            .ok_or_else(|| cant_read(format!("a macro has play mode {:#04x}", header[1])))?;
+        if header[4] != HEADER_FIFTH {
             return Err(cant_read(format!(
-                "a macro's header ends {:02x?}, not as GG writes it",
-                &header[4..]
+                "a macro's header has {:#04x} where GG writes {HEADER_FIFTH:#04x}",
+                header[4]
             )));
         }
         let count = usize::from(u16::from_le_bytes([header[2], header[3]]));
@@ -149,6 +184,8 @@ fn decode_area(area: &[u8]) -> Result<Vec<Entry>> {
         entries.push(Entry {
             start: (at / STEP) as u16,
             mode,
+            times: header[5],
+            repeat_delay_ms: u16::from_le_bytes([header[6], header[7]]),
             events,
         });
         at += HEADER + count * STEP;
@@ -223,6 +260,8 @@ pub fn read(image: &Image) -> Result<Vec<SlotMacro>> {
         out.push(SlotMacro {
             key,
             mode: entry.mode,
+            times: entry.times,
+            repeat_delay_ms: entry.repeat_delay_ms,
             events: entry.events.clone(),
         });
     }
@@ -254,23 +293,56 @@ fn encode_step(e: &Event) -> Result<[u8; STEP]> {
     })
 }
 
+/// A macro's header as GG writes it, if its numbers are ones GG's saves show for its
+/// mode: a count only with Play N Times, a wait of the user's only with that and Toggle
+/// Auto-Repeat.
+fn encode_header(m: &SlotMacro, count: u16) -> Result<[u8; HEADER]> {
+    let key = m.key;
+    let counts = m.mode == Mode::Times;
+    let waits = matches!(m.mode, Mode::Times | Mode::Toggle);
+    ensure!(
+        m.times >= 1 && (counts || m.times == DEFAULT_TIMES),
+        "key {key:#04x}'s macro plays {} times in mode {:?}: GG's saves show only 1, or 1 to 255 with Play N Times",
+        m.times,
+        m.mode
+    );
+    ensure!(
+        m.repeat_delay_ms >= 1 && (waits || m.repeat_delay_ms == DEFAULT_DELAY_MS),
+        "key {key:#04x}'s macro has a wait of {} ms in mode {:?}: GG's saves show only {DEFAULT_DELAY_MS}, or 1 to 65535 with Play N Times and Toggle Auto-Repeat",
+        m.repeat_delay_ms,
+        m.mode
+    );
+    let [lo, hi] = count.to_le_bytes();
+    let [wait_lo, wait_hi] = m.repeat_delay_ms.to_le_bytes();
+    Ok([
+        TAG,
+        m.mode.code(),
+        lo,
+        hi,
+        HEADER_FIFTH,
+        m.times,
+        wait_lo,
+        wait_hi,
+    ])
+}
+
 /// The area for `macros`, already in their order, and where each starts, in words.
 fn encode_area(macros: &[(usize, &SlotMacro)]) -> Result<(Vec<u8>, Vec<u16>)> {
     let mut area = Vec::with_capacity(at::MACRO_BYTES);
     let mut starts = Vec::new();
     for (_, m) in macros {
+        ensure!(
+            m.events.len() <= MAX_STEPS,
+            "key {:#04x}'s macro has {} steps: at most {MAX_STEPS} steps go into a slot for now, until a longer macro has been tried on the keyboard",
+            m.key,
+            m.events.len()
+        );
         let count = u16::try_from(m.events.len())
             .ok()
             .filter(|&c| c > 0)
             .ok_or_else(|| anyhow!("key {:#04x}'s macro has no steps, or too many", m.key))?;
         starts.push((area.len() / STEP) as u16);
-        let mode = match m.mode {
-            Mode::Once => ONCE,
-            Mode::WhileHeld => WHILE_HELD,
-        };
-        let [lo, hi] = count.to_le_bytes();
-        area.extend([TAG, mode, lo, hi]);
-        area.extend(HEADER_TAIL);
+        area.extend(encode_header(m, count)?);
         for e in &m.events {
             area.extend(encode_step(e)?);
         }
@@ -368,6 +440,10 @@ mod tests {
         "7701090001010f000204010104000f00020401000400390102050101020501000400730c0001000100010000";
     const GG_TWO: &str = "7701120001010f00021b0101021b01000400db00021c0101021c01000400db00021d0101021d01000400a60102e001010206010104000f00020601000400100002e001000400c80b00010001000100007701090001010f000204010104000f00020401000400390102050101020501000400730c0001000100010000";
     const GG_REPEAT: &str = "7701120001010f00021b0101021b01000400db00021c0101021c01000400db00021d0101021d01000400a60102e001010206010104000f00020601000400100002e001000400c80b00010001000100007703090001010f000204010104000f00020401000400390102050101020501000400730c0001000100010000";
+    /// GG's save of capture apex-30: its first macro on O with Toggle Auto-Repeat, 200 ms
+    /// apart (`77 04 09 00 01 01 c8 00`), and on P with Play N Times, 3 times 100 ms apart
+    /// (`77 02 09 00 01 03 64 00`, at word 11).
+    const GG_MODES: &str = "770409000101c8000204010104000f00020401000400390102050101020501000400730c000100010001000077020900010364000204010104000f00020401000400390102050101020501000400730c0001000100010000";
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())
@@ -429,8 +505,33 @@ mod tests {
         e
     }
 
+    /// A macro on `key` with GG's numbers (once, 15 ms).
     fn on(key: u8, mode: Mode, events: Vec<Event>) -> SlotMacro {
-        SlotMacro { key, mode, events }
+        played(key, mode, 1, 15, events)
+    }
+
+    fn played(
+        key: u8,
+        mode: Mode,
+        times: u8,
+        repeat_delay_ms: u16,
+        events: Vec<Event>,
+    ) -> SlotMacro {
+        SlotMacro {
+            key,
+            mode,
+            times,
+            repeat_delay_ms,
+            events,
+        }
+    }
+
+    /// apex-30's two keys.
+    fn ggs_modes() -> [SlotMacro; 2] {
+        [
+            played(O, Mode::Toggle, 1, 200, first()),
+            played(P, Mode::Times, 3, 100, first()),
+        ]
     }
 
     fn binding(image: &Image, code: u8) -> [u8; 5] {
@@ -520,6 +621,58 @@ mod tests {
         assert_eq!(new.macros(), &area(GG_REPEAT)[..]);
     }
 
+    /// apex-30: Play N Times and Toggle Auto-Repeat, with their numbers, byte for byte;
+    /// I keeps typing itself, as GG's Text Macro on it isn't stored on the keyboard.
+    #[test]
+    fn play_n_times_and_toggle_on_p_and_o_are_ggs_apex30_save_byte_for_byte() {
+        let old = factory_like("Config 5");
+        let [o, p] = ggs_modes();
+        let new = write(&old, &[p, o]).unwrap();
+        assert_eq!(new.macros(), &area(GG_MODES)[..]);
+        assert_eq!(binding(&new, O), [0x71, 0, 0, 0x00, 0x00]);
+        // 8 + 9 × 4 = 44 bytes in: word 11.
+        assert_eq!(binding(&new, P), [0x71, 0, 0, 0x0B, 0x00]);
+        assert_eq!(binding(&new, 0x0C), [0x51, 0x0C, 0, 0, 0], "I");
+        only_macros_and(&old, &new, &[O, P]);
+        let bound = [(O, [0x71, 0, 0, 0, 0]), (P, [0x71, 0, 0, 0x0B, 0])];
+        assert_eq!(new, as_gg_saved(GG_MODES, &bound));
+        // And GG's bytes read back as those two.
+        assert_eq!(read(&as_gg_saved(GG_MODES, &bound)).unwrap(), ggs_modes());
+    }
+
+    /// The numbers go only where a capture shows them: a count with Play N Times, a wait
+    /// with it and with Toggle Auto-Repeat; elsewhere GG's 1 and 15 ms.
+    #[test]
+    fn a_play_modes_numbers_outside_what_gg_writes_are_refused() {
+        let old = factory_like("Config 5");
+        let cases = [
+            (played(P, Mode::Times, 0, 100, first()), "times"),
+            (played(P, Mode::Times, 3, 0, first()), "wait"),
+            (played(P, Mode::Toggle, 0, 200, first()), "times"),
+            (played(P, Mode::Toggle, 2, 200, first()), "times"),
+            (played(P, Mode::Toggle, 1, 0, first()), "wait"),
+            (played(P, Mode::Once, 3, 15, first()), "times"),
+            (played(P, Mode::Once, 1, 100, first()), "wait"),
+            (played(P, Mode::WhileHeld, 2, 15, first()), "times"),
+            (played(P, Mode::WhileHeld, 1, 200, first()), "wait"),
+        ];
+        for (m, why) in cases {
+            let what = format!("{:?} {} {}", m.mode, m.times, m.repeat_delay_ms);
+            let e = format!("{:#}", write(&old, &[m]).unwrap_err());
+            assert!(e.contains(why), "{what}: {e}");
+        }
+        // The ends of the ranges are taken.
+        for m in [
+            played(P, Mode::Times, 255, 65535, first()),
+            played(P, Mode::Times, 1, 1, first()),
+            played(P, Mode::Toggle, 1, 1, first()),
+        ] {
+            let header = write(&old, std::slice::from_ref(&m)).unwrap().macros()[..8].to_vec();
+            let [lo, hi] = m.repeat_delay_ms.to_le_bytes();
+            assert_eq!(header[4..], [0x01, m.times, lo, hi]);
+        }
+    }
+
     #[test]
     fn ggs_saves_read_back_as_the_macros_it_was_given() {
         let one = as_gg_saved(GG_ONE, &[(P, [0x71, 0, 0, 0, 0])]);
@@ -558,14 +711,14 @@ mod tests {
     fn a_slot_with_macros_it_cant_read_is_never_rewritten() {
         let bound = [(P, [0x71, 0, 0, 0, 0])];
         let mut cases: Vec<(Image, &str)> = Vec::new();
-        // Another play mode (GG's Toggle and Play N Times aren't decoded).
+        // Another play mode (Toggle Hold's code isn't known: GG greys it out).
         cases.push((
-            as_gg_saved(&GG_ONE.replacen("7701", "7702", 1), &bound),
+            as_gg_saved(&GG_ONE.replacen("7701", "7705", 1), &bound),
             "mode",
         ));
-        // Other header bytes.
+        // A header whose fifth byte isn't GG's 01.
         cases.push((
-            as_gg_saved(&GG_ONE.replacen("01010f00", "01010f01", 1), &bound),
+            as_gg_saved(&GG_ONE.replacen("01010f00", "02010f00", 1), &bound),
             "header",
         ));
         // A kind of step not seen.
@@ -636,14 +789,40 @@ mod tests {
                 "button",
             ),
             (vec![on(P, Mode::Once, tap(0xF0).to_vec())], "usage"),
-            (vec![on(P, Mode::Once, vec![wait(1); 2399])], "9600"),
+            // Review R2, K3: no macro longer than 64 steps until one has been tried.
+            (vec![on(P, Mode::Once, vec![wait(1); 65])], "64 steps"),
         ];
         for (macros, why) in cases {
             let e = format!("{:#}", write(&old, &macros).unwrap_err());
             assert!(e.contains(why), "{why}: {e}");
         }
-        // The area holds exactly 2 398 steps with one header.
-        write(&old, &[on(P, Mode::Once, vec![wait(1); 2398])]).unwrap();
+        // 64 steps on each of two keys are taken.
+        let both = [
+            on(O, Mode::Once, vec![wait(1); 64]),
+            on(P, Mode::Once, vec![wait(1); 64]),
+        ];
+        let new = write(&old, &both).unwrap();
+        assert_eq!(read(&new).unwrap(), both);
+    }
+
+    /// Review R2, K9: the real apex-30 area and normal layer, copied byte for byte from
+    /// `~/projects/gg-m11/captures/apex-30.slot5-gg-modes-text.bin` (area = bytes 2704 to
+    /// 12304, [`GG_MODES`] then zeros; layer = bytes 80 to 580), read as the modes this
+    /// codec writes. Its I key stays `51 0c`: GG's Text Macro on it isn't on the keyboard.
+    #[test]
+    fn the_real_apex30_image_reads_as_play_n_times_and_toggle() {
+        // sha256 of the .bin: f88603a86f503008e4c8dd59cb82616379608f50eace7393b4ea41e172e71b4c
+        const APEX30_NORMAL: &str = "5135000000511e000000511f00000051200000005121000000512200000051230000005124000000512500000051260000005127000000512d000000512e0000005189000000512b0000005114000000511a000000510800000051150000005117000000511c0000005118000000510c00000071000000007100000b00512f0000005130000000513100000051390000005104000000511600000051070000005109000000510a000000510b000000510d000000510e000000510f000000513300000051340000005132000000512800000051e10000005164000000511d000000511b00000051060000005119000000510500000051110000005110000000513600000051370000005138000000518700000051e500000051e000000051e300000051e2000000518b000000512c000000518a000000518800000051e600000051e700000051f000000051e4000000512a000000000000000000000000005129000000513a000000513b000000513c000000513d000000513e000000513f0000005140000000514100000051420000005143000000514400000051450000005149000000514a000000514b000000514c000000514d000000514e000000515200000051500000005151000000514f000000000000000061cd00000061b500000061b600000061e200000061e900000061ea000000";
+        let mut bytes = factory_like("Config 5").serialize();
+        let layer = hex(APEX30_NORMAL);
+        assert_eq!(layer.len(), 500);
+        bytes[at::NORMAL_BINDINGS..at::NORMAL_BINDINGS + 500].copy_from_slice(&layer);
+        bytes[at::MACROS..at::MACROS + at::MACRO_BYTES].copy_from_slice(&area(GG_MODES));
+        let crc = crate::onboard::crc32_stm32(&bytes[..crate::onboard::BODY_BYTES]);
+        bytes[at::CRC..].copy_from_slice(&crc.to_le_bytes());
+        let image = Image::parse(&bytes).unwrap();
+        assert_eq!(read(&image).unwrap(), ggs_modes());
+        assert_eq!(binding(&image, 0x0C), [0x51, 0x0C, 0, 0, 0], "I");
     }
 
     #[test]
@@ -657,9 +836,9 @@ mod tests {
 
     #[test]
     fn a_refusal_names_what_wasnt_known() {
-        let image = as_gg_saved(&GG_ONE.replacen("7701", "7702", 1), &[]);
+        let image = as_gg_saved(&GG_ONE.replacen("7701", "7705", 1), &[]);
         let e = format!("{:#}", read(&image).unwrap_err());
-        assert!(e.contains("mode 0x02"), "{e}");
+        assert!(e.contains("mode 0x05"), "{e}");
     }
 
     /// Through the slot transaction: with the onboard family off, the allowlist lets

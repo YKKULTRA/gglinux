@@ -7,8 +7,9 @@
 //! `docs/PROTOCOLS.md` 3f), so a macro works only once it's written into a slot
 //! ([`crate::Request::WriteMacros`]).
 //!
-//! Only what GG's saves show is offered: key, wait and left-button steps, Play Once and
-//! Repeat While Held, keys on the normal layer, and at most two keys with a macro. The
+//! Only what GG's saves show is offered: key, wait and left-button steps, GG's play modes
+//! but the one it greys out (Toggle Hold), keys on the normal layer, and at most two keys
+//! with a macro. The
 //! steps can be written as words ([`Macro::parse_steps`], [`Macro::steps_text`]): `a`,
 //! `ctrl+c`, `down:shift`, `up:shift`, `wait:100`, `click:1`, `text:"hello"`. Key names
 //! are the ones `ggctl bind` takes ([`MacroEvent::usage_by_name`]).
@@ -29,15 +30,55 @@ pub enum MacroEvent {
     Delay { ms: u16 },
 }
 
-/// How a macro plays when its key is pressed.
+/// How a macro plays when its key is pressed: GG 123's play modes, in its order (their
+/// codes in the slot are `01` to `04`; capture apex-30, `docs/PROTOCOLS.md` 3f). GG's fifth,
+/// Toggle Hold, is greyed out in GG and isn't offered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MacroMode {
-    /// Once per press.
+    /// Once per press (GG's Play Once).
     #[default]
     Once,
-    /// Again and again while the key is held.
+    /// [`MacroBinding::times`] times per press, [`MacroBinding::repeat_delay_ms`] apart
+    /// (GG's Play N Times).
+    Times,
+    /// Again and again while the key is held (GG's Repeat While Pressed).
     WhileHeld,
+    /// Again and again from one press until the next, [`MacroBinding::repeat_delay_ms`]
+    /// apart (GG's Toggle Auto-Repeat).
+    Toggle,
+}
+
+impl MacroMode {
+    /// Every mode, in GG's order.
+    pub const ALL: [MacroMode; 4] = [
+        MacroMode::Once,
+        MacroMode::Times,
+        MacroMode::WhileHeld,
+        MacroMode::Toggle,
+    ];
+
+    /// It plays a set number of times: [`MacroBinding::times`] counts.
+    pub fn counts(self) -> bool {
+        self == MacroMode::Times
+    }
+
+    /// Its wait between plays can be set ([`MacroBinding::repeat_delay_ms`]): the modes a
+    /// capture shows with a wait of the user's (Play N Times at 100 ms, Toggle Auto-Repeat
+    /// at 200 ms). Repeat While Pressed was only seen with GG's 15 ms, so it keeps that.
+    pub fn waits(self) -> bool {
+        matches!(self, MacroMode::Times | MacroMode::Toggle)
+    }
+
+    /// How it plays, in words.
+    pub fn describe(self) -> &'static str {
+        match self {
+            MacroMode::Once => "once per press",
+            MacroMode::Times => "a set number of times per press",
+            MacroMode::WhileHeld => "again and again while held",
+            MacroMode::Toggle => "again and again until pressed again",
+        }
+    }
 }
 
 /// A named sequence of steps.
@@ -47,7 +88,7 @@ pub struct Macro {
     pub events: Vec<MacroEvent>,
 }
 
-/// A key that plays a macro (on the normal layer), by HID code.
+/// A key that plays a macro (on the normal layer), by HID code, and how.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacroBinding {
     pub code: u8,
@@ -55,6 +96,22 @@ pub struct MacroBinding {
     pub name: String,
     #[serde(default)]
     pub mode: MacroMode,
+    /// How many times a press plays it with [`MacroMode::Times`], 1 to 255; 1 with the
+    /// other modes, as GG writes them.
+    #[serde(default = "default_times")]
+    pub times: u8,
+    /// The wait between two plays, in ms, with the modes that let it be set
+    /// ([`MacroMode::waits`]); GG's 15 with the others.
+    #[serde(default = "default_delay")]
+    pub repeat_delay_ms: u16,
+}
+
+fn default_times() -> u8 {
+    MacroBinding::DEFAULT_TIMES
+}
+
+fn default_delay() -> u16 {
+    MacroBinding::DEFAULT_DELAY_MS
 }
 
 /// The macros and the keys that play them.
@@ -95,9 +152,13 @@ impl MacroLibrary {
     pub const MAX_NAME: usize = 32;
     /// How many keys may have a macro. GG's saves show two; more aren't tried yet.
     pub const MAX_BOUND: usize = 2;
+    /// The most steps a macro may have for now: GG's longest in our captures has 18, and
+    /// nothing shows what the keyboard does with a long one (review R2, K3). A `text:`
+    /// step counts as the taps it makes.
+    pub const MAX_STEPS: usize = 64;
     /// Bytes of a slot's macro area (Apex Control's "macro events", 9 600 bytes).
     pub const AREA_BYTES: usize = 9_600;
-    /// Bytes of a macro's header in the area (`77 <mode> <count u16> 01 01 0f 00`).
+    /// Bytes of a macro's header in the area (`77 <mode> <count u16> 01 <times> <wait u16>`).
     pub const HEADER_BYTES: usize = 8;
     /// Bytes of one step in the area.
     pub const EVENT_BYTES: usize = 4;
@@ -146,6 +207,7 @@ impl MacroLibrary {
             if self.find(&b.name).is_none() {
                 return Err(format!("key {key} plays no macro called '{}'", b.name));
             }
+            b.check_play()?;
         }
         if keys.len() > Self::MAX_BOUND {
             return Err(format!(
@@ -188,6 +250,13 @@ impl Macro {
     pub fn check_steps(name: &str, events: &[MacroEvent]) -> Result<(), String> {
         if events.is_empty() {
             return Err(format!("'{name}' needs at least one step"));
+        }
+        if events.len() > MacroLibrary::MAX_STEPS {
+            return Err(format!(
+                "'{name}' has {} steps, and a macro has at most {} for now, until a longer one has been tried on the keyboard (a text step counts each key going down and up)",
+                events.len(),
+                MacroLibrary::MAX_STEPS
+            ));
         }
         // What's held: keys by usage, buttons as 0x100 + button.
         let mut held: Vec<u16> = Vec::new();
@@ -298,6 +367,75 @@ impl MacroEvent {
 }
 
 impl MacroBinding {
+    /// What GG writes for the number of plays where it doesn't count.
+    pub const DEFAULT_TIMES: u8 = 1;
+    /// GG's wait between plays, in ms, where it isn't set (every save of apex-20 to
+    /// apex-22, and the Play Once and Repeat While Pressed keys of apex-30).
+    pub const DEFAULT_DELAY_MS: u16 = 15;
+
+    /// Key `code` playing macro `name` in `mode`, with GG's numbers.
+    pub fn new(code: u8, name: impl Into<String>, mode: MacroMode) -> MacroBinding {
+        MacroBinding {
+            code,
+            name: name.into(),
+            mode,
+            times: Self::DEFAULT_TIMES,
+            repeat_delay_ms: Self::DEFAULT_DELAY_MS,
+        }
+    }
+
+    /// Play in `mode`, the numbers it doesn't use put back to GG's.
+    pub fn set_mode(&mut self, mode: MacroMode) {
+        self.mode = mode;
+        if !mode.counts() {
+            self.times = Self::DEFAULT_TIMES;
+        }
+        if !mode.waits() {
+            self.repeat_delay_ms = Self::DEFAULT_DELAY_MS;
+        }
+    }
+
+    /// How it plays, in words: "once per press", "3 times per press, 100 ms apart".
+    pub fn play_text(&self) -> String {
+        let how = match self.mode {
+            MacroMode::Times if self.times == 1 => "1 time per press".to_owned(),
+            MacroMode::Times => format!("{} times per press", self.times),
+            mode => mode.describe().to_owned(),
+        };
+        if self.mode.waits() {
+            format!("{how}, {} ms apart", self.repeat_delay_ms)
+        } else {
+            how
+        }
+    }
+
+    /// The play mode's numbers: only those the mode uses may differ from GG's, as no
+    /// capture shows another.
+    fn check_play(&self) -> Result<(), String> {
+        let key = Self::key_name(self.code);
+        let how = self.mode.describe();
+        if self.times == 0 {
+            return Err(format!("key {key}: a macro plays 1 to 255 times"));
+        }
+        if !self.mode.counts() && self.times != Self::DEFAULT_TIMES {
+            return Err(format!(
+                "key {key} plays its macro {how}, so it takes no number of times"
+            ));
+        }
+        if self.repeat_delay_ms == 0 {
+            return Err(format!(
+                "key {key}: the wait between plays is 1 to 65535 ms"
+            ));
+        }
+        if !self.mode.waits() && self.repeat_delay_ms != Self::DEFAULT_DELAY_MS {
+            return Err(format!(
+                "key {key} plays its macro {how}, so it keeps GG's {} ms between plays",
+                Self::DEFAULT_DELAY_MS
+            ));
+        }
+        Ok(())
+    }
+
     /// A key by the name `ggctl bind` takes for it: as [`MacroEvent::usage_by_name`], and
     /// `menu` and `fn` are the keys with those labels.
     pub fn key_by_name(name: &str) -> Option<u8> {
@@ -739,11 +877,7 @@ mod tests {
                 .collect(),
             bindings: bound
                 .iter()
-                .map(|&(code, name)| MacroBinding {
-                    code,
-                    name: name.into(),
-                    mode: MacroMode::Once,
-                })
+                .map(|&(code, name)| MacroBinding::new(code, name, MacroMode::Once))
                 .collect(),
         }
     }
@@ -901,25 +1035,25 @@ mod tests {
         }
     }
 
+    /// Review R2, K3: at most 64 steps a macro until a long one has been tried on the
+    /// keyboard (GG's longest in our captures has 18); a text counts as the taps it makes.
     #[test]
-    fn the_bound_macros_must_fit_the_slots_area() {
-        // One key: a header and 2 398 steps fill the 9 600 bytes exactly.
+    fn a_macro_has_at_most_64_steps_for_now() {
         let mut long = Vec::new();
-        for _ in 0..1199 {
+        for _ in 0..32 {
             long.extend(tap(0x04));
         }
         let lib = library(&[("long", long.clone())], &[(0x13, "long")]);
-        assert_eq!(lib.slot_bytes(), MacroLibrary::AREA_BYTES);
         lib.validate().unwrap();
-        // The same macro on two keys is two copies, which don't fit.
-        let e = library(&[("long", long)], &[(0x12, "long"), (0x13, "long")])
-            .validate()
-            .unwrap_err();
-        assert!(e.contains("9600") && e.contains("19200"), "{e}");
-        // An unbound macro isn't written, so it takes no room.
-        let mut longer = vec![wait(1); 2400];
-        longer.extend(tap(0x04));
-        library(&[("longer", longer)], &[]).validate().unwrap();
+        assert_eq!(lib.slot_bytes(), 8 + 64 * 4);
+        long.push(wait(5));
+        let e = library(&[("long", long)], &[]).validate().unwrap_err();
+        assert!(e.contains("65 steps") && e.contains("at most 64"), "{e}");
+        // 22 capitals are 4 steps each: 88.
+        let text = parse(r#"text:"ABCDEFGHIJKLMNOPQRSTUV""#).unwrap();
+        assert_eq!(text.len(), 88);
+        let e = library(&[("shout", text)], &[]).validate().unwrap_err();
+        assert!(e.contains("88 steps"), "{e}");
     }
 
     #[test]
@@ -950,5 +1084,82 @@ mod tests {
         assert_eq!(state.note, None);
         let json = serde_json::to_string(&MacroEvent::Delay { ms: 15 }).unwrap();
         assert_eq!(json, r#"{"kind":"delay","ms":15}"#);
+    }
+
+    /// A binding saved before the play modes had numbers reads with GG's defaults, and the
+    /// new modes have plain names.
+    #[test]
+    fn a_binding_without_its_numbers_reads_with_ggs_defaults() {
+        let b: MacroBinding =
+            serde_json::from_str(r#"{"code":19,"name":"x","mode":"while_held"}"#).unwrap();
+        assert_eq!(
+            b,
+            MacroBinding {
+                code: 0x13,
+                name: "x".into(),
+                mode: MacroMode::WhileHeld,
+                times: 1,
+                repeat_delay_ms: 15,
+            }
+        );
+        assert_eq!(b, MacroBinding::new(0x13, "x", MacroMode::WhileHeld));
+        let json = serde_json::to_value(MacroMode::ALL).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!(["once", "times", "while_held", "toggle"])
+        );
+    }
+
+    /// GG's apex-30 save: P plays Macro 1 three times, 100 ms apart; O toggles it with
+    /// 200 ms between plays. Both check out; the numbers a mode doesn't use stay GG's.
+    #[test]
+    fn the_play_modes_numbers_check_out_where_the_mode_uses_them() {
+        let mut p = MacroBinding::new(0x13, "x", MacroMode::Times);
+        p.times = 3;
+        p.repeat_delay_ms = 100;
+        let mut o = MacroBinding::new(0x12, "x", MacroMode::Toggle);
+        o.repeat_delay_ms = 200;
+        let mut lib = library(&[("x", parse("a").unwrap())], &[]);
+        lib.bindings = vec![o.clone(), p.clone()];
+        lib.validate().unwrap();
+        assert_eq!(p.play_text(), "3 times per press, 100 ms apart");
+        assert_eq!(
+            o.play_text(),
+            "again and again until pressed again, 200 ms apart"
+        );
+        let once = MacroBinding::new(0x13, "x", MacroMode::Once);
+        assert_eq!(once.play_text(), "once per press");
+        let mut one = p.clone();
+        one.times = 1;
+        assert_eq!(one.play_text(), "1 time per press, 100 ms apart");
+        let bad = |b: MacroBinding| {
+            let mut lib = lib.clone();
+            lib.bindings = vec![b];
+            lib.validate().unwrap_err()
+        };
+        let mut zero = p.clone();
+        zero.times = 0;
+        assert!(bad(zero).contains("1 to 255 times"));
+        let mut no_wait = o.clone();
+        no_wait.repeat_delay_ms = 0;
+        assert!(bad(no_wait).contains("1 to 65535 ms"));
+        for mode in [MacroMode::Once, MacroMode::WhileHeld, MacroMode::Toggle] {
+            let mut b = MacroBinding::new(0x13, "x", mode);
+            b.times = 3;
+            let e = bad(b);
+            assert!(e.contains("takes no number of times"), "{mode:?}: {e}");
+        }
+        for mode in [MacroMode::Once, MacroMode::WhileHeld] {
+            let mut b = MacroBinding::new(0x13, "x", mode);
+            b.repeat_delay_ms = 100;
+            let e = bad(b);
+            assert!(e.contains("keeps GG's 15 ms"), "{mode:?}: {e}");
+        }
+        // A new mode puts back the numbers it doesn't use.
+        let mut back = p.clone();
+        back.set_mode(MacroMode::Toggle);
+        assert_eq!((back.times, back.repeat_delay_ms), (1, 100));
+        back.set_mode(MacroMode::Once);
+        assert_eq!(back, MacroBinding::new(0x13, "x", MacroMode::Once));
     }
 }
