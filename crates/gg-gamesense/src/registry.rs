@@ -1,21 +1,47 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Every game that has talked to the server, its events and their handlers,
-//! and what the active one paints. Time is passed in (`now`, monotonic seconds),
-//! so all of it is testable without a clock.
+//! and what the active one paints on the keys and shows on the screen. Time is
+//! passed in (`now`, monotonic seconds), so all of it is testable without a clock.
 
 use std::collections::{BTreeMap, HashMap};
 
+use gg_device_keyboard::Bitmap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::bitmap;
 use crate::paint::{paint, Reading};
 use crate::proto::{
     parse_rgb, valid_name, BindEvent, GameEvent, GameMetadata, Handler, MultipleEvents,
-    RegisterEvent, Rgb,
+    RegisterEvent, Rgb, Target,
 };
+use crate::screen::{self, Data, Show};
 
 /// Colours by HID code: what a game paints over the lighting.
 pub type Layer = HashMap<u8, Rgb>;
+
+/// What one handler of an event draws on, for the user to see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Draws {
+    /// Keys.
+    Keys,
+    /// The keyboard's screen, with what it asks for that isn't drawn.
+    Screen { notes: Vec<String> },
+    /// Every key, from the event's colour grid.
+    Bitmap,
+    /// Every key but those of these events (unless the event names others).
+    PartialBitmap { excluded: Vec<String> },
+    /// A device this machine doesn't have, by its device-type.
+    Elsewhere { device: String },
+}
+
+/// What the active game shows on the keyboard's screen now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenNow {
+    pub picture: Bitmap,
+    /// Seconds until that changes by itself: the next frame, or the game going quiet.
+    pub next_change: Option<f64>,
+}
 
 pub const MAX_GAMES: usize = 64;
 pub const MAX_EVENTS: usize = 128;
@@ -58,18 +84,51 @@ pub struct GameSummary {
     pub enabled: bool,
     pub active: bool,
     pub events: Vec<String>,
+    /// `(event, what the handler draws on)`, a pair per handler, in event order.
+    pub handlers: Vec<(String, Draws)>,
+    /// Drawing on the keyboard's screen now.
+    pub on_screen: bool,
 }
 
 struct Event {
     saved: SavedEvent,
     handlers: Vec<Handler>,
+    /// What each handler draws on, for the summaries.
+    draws: Vec<Draws>,
     /// The size of `saved.handlers`, counted against [`MAX_HANDLER_BYTES`].
     bytes: usize,
     value: Option<i64>,
     frame: Option<Map<String, Value>>,
+    /// What the last frame carried for a picture or a bitmap handler.
+    extras: Extras,
     received: bool,
     /// When the value last changed (or, with `value_optional`, last arrived).
     changed_at: f64,
+}
+
+impl Event {
+    fn new(saved: SavedEvent) -> Event {
+        Event {
+            saved,
+            handlers: Vec::new(),
+            draws: Vec::new(),
+            bytes: 0,
+            value: None,
+            frame: None,
+            extras: Extras::default(),
+            received: false,
+            changed_at: 0.0,
+        }
+    }
+}
+
+/// From an event's frame: its own screen picture, its colour grid and the events a
+/// background leaves alone, each kept only when one of its handlers reads it.
+#[derive(Default)]
+struct Extras {
+    image: Option<Vec<u8>>,
+    bitmap: Option<Vec<Option<Rgb>>>,
+    excluded: Option<Vec<String>>,
 }
 
 struct Game {
@@ -80,6 +139,9 @@ struct Game {
     events: BTreeMap<String, Event>,
     last_activity: Option<f64>,
     stopped: bool,
+    /// The screen frames playing, and the event that started them: the last event that
+    /// wrote the screen.
+    screen: Option<(String, Show)>,
 }
 
 #[derive(Default)]
@@ -184,11 +246,14 @@ impl Registry {
     }
 
     pub fn remove_event(&mut self, game: &str, event: &str) -> Result<(), String> {
-        self.game_mut(game)?
-            .events
+        let g = self.game_mut(game)?;
+        g.events
             .remove(event)
-            .map(|_| ())
-            .ok_or_else(|| format!("unknown event {event}"))
+            .ok_or_else(|| format!("unknown event {event}"))?;
+        if g.screen.as_ref().is_some_and(|(e, _)| e == event) {
+            g.screen = None;
+        }
+        Ok(())
     }
 
     pub fn set_enabled(&mut self, game: &str, enabled: bool) -> Result<(), String> {
@@ -230,10 +295,33 @@ impl Registry {
                 age: (now - e.changed_at).max(0.0),
             };
             for h in &e.handlers {
-                layer.extend(paint(h, &reading));
+                match &h.target {
+                    Target::Bitmap(partial) => paint_bitmap(game, e, partial.as_ref(), &mut layer),
+                    _ => layer.extend(paint(h, &reading)),
+                }
             }
         }
         (!layer.is_empty()).then_some(layer)
+    }
+
+    /// What the active game shows on the keyboard's screen now; `None` when no game is
+    /// active, or its frames have played out (the screen goes back to the user's own).
+    pub fn screen(&self, now: f64) -> Option<ScreenNow> {
+        let game = &self.games[self.active_game(now)?];
+        let (_, show) = game.screen.as_ref()?;
+        let (picture, next) = show.picture(now)?;
+        // Just past the moment it goes quiet, so it's gone when asked again.
+        let quiet = game
+            .last_activity
+            .map(|t| t + f64::from(game.timer_ms) / 1000.0 - now + 0.005);
+        let next_change = match (next, quiet) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        Some(ScreenNow {
+            picture,
+            next_change: next_change.map(|s| s.max(0.0)),
+        })
     }
 
     pub fn summaries(&self, now: f64) -> Vec<GameSummary> {
@@ -247,6 +335,13 @@ impl Registry {
                 enabled: g.enabled,
                 active: active == Some(name.as_str()),
                 events: g.events.keys().cloned().collect(),
+                handlers: g
+                    .events
+                    .iter()
+                    .flat_map(|(event, e)| e.draws.iter().map(|d| (event.clone(), d.clone())))
+                    .collect(),
+                on_screen: active == Some(name.as_str())
+                    && g.screen.as_ref().is_some_and(|(_, s)| s.at(now).is_some()),
             })
             .collect()
     }
@@ -278,24 +373,20 @@ impl Registry {
                     .filter(|e| valid_name(&e.name))
                     .take(MAX_EVENTS)
                     .map(|e| {
-                        let handlers = e
+                        let (kinds, handlers): (Vec<Draws>, Vec<Handler>) = e
                             .handlers
                             .iter()
-                            .filter_map(|h| Handler::parse(h).ok())
-                            .collect();
+                            .filter_map(|h| {
+                                let parsed = Handler::parse(h).ok()?;
+                                Some((draws(h, &parsed), parsed))
+                            })
+                            .unzip();
                         let bytes = json_bytes(&e.handlers);
-                        (
-                            e.name.clone(),
-                            Event {
-                                saved: e,
-                                handlers,
-                                bytes,
-                                value: None,
-                                frame: None,
-                                received: false,
-                                changed_at: 0.0,
-                            },
-                        )
+                        let mut event = Event::new(e);
+                        event.handlers = handlers;
+                        event.draws = kinds;
+                        event.bytes = bytes;
+                        (event.saved.name.clone(), event)
                     })
                     .collect();
                 let game = Game {
@@ -308,6 +399,7 @@ impl Registry {
                     events,
                     last_activity: None,
                     stopped: false,
+                    screen: None,
                 };
                 (g.name, game)
             })
@@ -345,6 +437,7 @@ impl Registry {
             events: BTreeMap::new(),
             last_activity: None,
             stopped: false,
+            screen: None,
         }))
     }
 
@@ -371,27 +464,22 @@ impl Registry {
         if !g.events.contains_key(event) && g.events.len() >= MAX_EVENTS {
             return Err(format!("at most {MAX_EVENTS} events per game"));
         }
-        let e = g.events.entry(event.to_owned()).or_insert_with(|| Event {
-            saved: SavedEvent {
+        let e = g.events.entry(event.to_owned()).or_insert_with(|| {
+            Event::new(SavedEvent {
                 name: event.to_owned(),
                 min_value: 0,
                 max_value: 100,
                 icon_id: 0,
                 value_optional: false,
                 handlers: Vec::new(),
-            },
-            handlers: Vec::new(),
-            bytes: 0,
-            value: None,
-            frame: None,
-            received: false,
-            changed_at: 0.0,
+            })
         });
         e.saved.min_value = min;
         e.saved.max_value = max;
         e.saved.icon_id = icon.unwrap_or(0);
         e.saved.value_optional = value_optional;
         if let Some((raw, parsed, bytes)) = handlers {
+            e.draws = raw.iter().zip(&parsed).map(|(r, p)| draws(r, p)).collect();
             e.saved.handlers = raw;
             e.handlers = parsed;
             e.bytes = bytes;
@@ -400,7 +488,31 @@ impl Registry {
     }
 }
 
-/// Record one event's data on its game.
+/// What a handler draws on, from its parsed form (and its JSON, for another device's name).
+fn draws(raw: &Value, h: &Handler) -> Draws {
+    match &h.target {
+        Target::Keys(_) => Draws::Keys,
+        Target::Screen(s) => Draws::Screen {
+            notes: s.notes.clone(),
+        },
+        Target::Bitmap(None) => Draws::Bitmap,
+        Target::Bitmap(Some(excluded)) => Draws::PartialBitmap {
+            excluded: excluded.clone(),
+        },
+        Target::Unsupported => Draws::Elsewhere {
+            device: raw
+                .get("device-type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(64)
+                .collect(),
+        },
+    }
+}
+
+/// Record one event's data on its game. A change (a new value, or any event with
+/// `value_optional`) starts its screen frames, over what the screen showed.
 fn apply(
     game: &mut Game,
     event: &str,
@@ -418,21 +530,138 @@ fn apply(
     if value.is_none() && !e.saved.value_optional {
         return Err(format!("event {event} needs data.value"));
     }
-    if e.saved.value_optional || value != e.value || !e.received {
+    // Without `value_optional` the same value again is no change: the SDK doc warns that
+    // this caching keeps new frame text off the screen.
+    let changed = e.saved.value_optional || value != e.value || !e.received;
+    if changed {
         e.changed_at = now;
     }
     if value.is_some() {
         e.value = value;
     }
-    e.frame = data.frame.map(|f| colours_read(&e.handlers, &f));
+    e.extras = data
+        .frame
+        .as_ref()
+        .map(|f| extras(&e.handlers, f))
+        .unwrap_or_default();
+    e.frame = data.frame.map(|f| frame_read(&e.handlers, &f));
     e.received = true;
+    let show = changed.then(|| start_show(e, now)).flatten();
     game.last_activity = Some(now);
     game.stopped = false;
+    if let Some(show) = show {
+        game.screen = Some((event.to_owned(), show));
+    }
     Ok(())
 }
 
-/// The frame entries an event's handlers read, each cut down to its colour: a
-/// frame can be as large as the request, and nothing else in it is painted.
+/// The screen frames an event starts: those of its `screened-128x40` handler, else its
+/// `screened` one, for its value; `None` if it has neither or no frames for the value.
+fn start_show(e: &Event, now: f64) -> Option<Show> {
+    let specs = || {
+        e.handlers.iter().filter_map(|h| match &h.target {
+            Target::Screen(s) => Some(s.as_ref()),
+            _ => None,
+        })
+    };
+    let spec = specs().find(|s| s.exact).or_else(|| specs().next())?;
+    Some(Show {
+        frames: spec.frames(e.value.unwrap_or(0))?.to_vec(),
+        data: Data {
+            value: e.value,
+            frame: e.frame.clone().unwrap_or_default(),
+            image: e.extras.image.clone(),
+        },
+        started: now,
+    })
+}
+
+/// Paint an event's colour grid on the keys, all of them for `bitmap`, and for
+/// `partial-bitmap` all but the keys of the events it leaves alone: the frame's
+/// `excluded-events` if it sent them, else the handler's.
+fn paint_bitmap(game: &Game, e: &Event, partial: Option<&Vec<String>>, layer: &mut Layer) {
+    let Some(colours) = &e.extras.bitmap else {
+        return;
+    };
+    let left_alone: Vec<u8> = partial
+        .map(|defaults| e.extras.excluded.as_ref().unwrap_or(defaults))
+        .into_iter()
+        .flatten()
+        .filter_map(|name| game.events.get(name))
+        .flat_map(|other| &other.handlers)
+        .filter_map(|h| match &h.target {
+            Target::Keys(keys) => Some(keys.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    for &(cell, code) in bitmap::cells() {
+        if let Some(Some(c)) = colours.get(cell) {
+            if !left_alone.contains(&code) {
+                layer.insert(code, *c);
+            }
+        }
+    }
+}
+
+/// What an event's handlers read from its frame besides colours and text: its own
+/// screen picture, its colour grid and the events a background leaves alone.
+fn extras(handlers: &[Handler], frame: &Map<String, Value>) -> Extras {
+    let image = handlers
+        .iter()
+        .any(|h| matches!(&h.target, Target::Screen(s) if s.has_image()));
+    let grid = handlers
+        .iter()
+        .any(|h| matches!(h.target, Target::Bitmap(_)));
+    let partial = handlers
+        .iter()
+        .any(|h| matches!(h.target, Target::Bitmap(Some(_))));
+    Extras {
+        image: frame
+            .get(screen::IMAGE_KEY)
+            .filter(|_| image)
+            .and_then(screen::picture)
+            .filter(|b| b.len() == screen::IMAGE_BYTES),
+        bitmap: frame
+            .get("bitmap")
+            .filter(|_| grid)
+            .and_then(bitmap::colours),
+        excluded: frame
+            .get("excluded-events")
+            .filter(|_| partial)
+            .and_then(|v| bitmap::excluded(v).ok())
+            .map(|names| {
+                names
+                    .into_iter()
+                    .filter(|n| valid_name(n))
+                    .take(MAX_EVENTS)
+                    .collect()
+            }),
+    }
+}
+
+/// The frame entries an event's handlers read: colours cut down to their colour, and
+/// the text, numbers and switches its screen lines show (text cut at
+/// [`screen::MAX_TEXT`]). A frame can be as large as the request; nothing else in it is
+/// shown.
+fn frame_read(handlers: &[Handler], frame: &Map<String, Value>) -> Map<String, Value> {
+    let mut kept = colours_read(handlers, frame);
+    let screen_keys = handlers.iter().filter_map(|h| match &h.target {
+        Target::Screen(s) => Some(s.frame_keys()),
+        _ => None,
+    });
+    for key in screen_keys.flatten() {
+        let value = match frame.get(&key) {
+            Some(Value::String(s)) => Value::String(s.chars().take(screen::MAX_TEXT).collect()),
+            Some(v @ (Value::Number(_) | Value::Bool(_))) => v.clone(),
+            _ => continue,
+        };
+        kept.entry(key).or_insert(value);
+    }
+    kept
+}
+
+/// The colours an event's handlers read, each cut down to its colour.
 fn colours_read(handlers: &[Handler], frame: &Map<String, Value>) -> Map<String, Value> {
     handlers
         .iter()
@@ -685,17 +914,18 @@ mod tests {
         let mut r = Registry::default();
         r.bind_event(bind(
             "G",
-            "SCREEN",
-            json!([{ "device-type": "screened", "zone": "one", "mode": "screen" }]),
+            "RUMBLE",
+            json!([{ "device-type": "tactile", "zone": "one", "mode": "vibrate" }]),
         ))
         .unwrap();
-        send(&mut r, "G", "SCREEN", 1.0, 0.0).unwrap();
+        send(&mut r, "G", "RUMBLE", 1.0, 0.0).unwrap();
         assert_eq!(r.active_game(0.1), Some("G"));
         assert_eq!(
             r.paint(0.1),
             None,
             "an empty layer would take the keyboard for nothing"
         );
+        assert_eq!(r.screen(0.1), None);
     }
 
     #[test]
@@ -752,3 +982,6 @@ mod tests {
         assert!(r.remove_game("G").is_err());
     }
 }
+
+#[cfg(test)]
+mod screen_tests;

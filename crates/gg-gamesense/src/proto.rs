@@ -8,7 +8,8 @@ use serde_json::{Map, Value};
 
 pub use gg_device_keyboard::Rgb;
 
-use crate::zones;
+use crate::screen::ScreenSpec;
+use crate::{bitmap, zones};
 
 /// Longest game or event name accepted.
 pub const MAX_NAME: usize = 128;
@@ -98,8 +99,12 @@ pub struct RemoveEvent {
 pub enum Target {
     /// HID codes on this keyboard, in zone order.
     Keys(Vec<u8>),
-    /// What this machine can't show: a screen, tactile, mouse, headset, zoned
-    /// RGB, or a keyboard bitmap.
+    /// The keyboard's 128 × 40 screen.
+    Screen(Box<ScreenSpec>),
+    /// Every key, from the event's 22 × 6 `bitmap`: `None` for `bitmap`, and for
+    /// `partial-bitmap` the events whose keys it leaves alone unless the event says others.
+    Bitmap(Option<Vec<String>>),
+    /// What this machine can't show: another screen, tactile, mouse, headset or zoned RGB.
     Unsupported,
 }
 
@@ -151,10 +156,21 @@ pub struct Handler {
 const KEY_DEVICES: [&str; 2] = ["keyboard", "rgb-per-key-zones"];
 
 impl Handler {
-    /// Parse one handler. Handlers for devices this machine can't show, and the
-    /// SDK's `bitmap` and `partial-bitmap` modes, become [`Target::Unsupported`]
-    /// without further checks; a malformed key handler is an error, so a game's
-    /// bug is reported rather than silently dark.
+    /// A handler that paints no keys of its own: a screen, a bitmap, another device.
+    fn painting(target: Target) -> Handler {
+        Handler {
+            target,
+            mode: Mode::Color,
+            color: None,
+            rate: None,
+            context_frame_key: None,
+        }
+    }
+
+    /// Parse one handler. Handlers for devices this machine can't show become
+    /// [`Target::Unsupported`] without further checks; a malformed handler for the keys,
+    /// the screen or a bitmap is an error, so a game's bug is reported rather than
+    /// silently dark.
     pub fn parse(v: &Value) -> Result<Handler, String> {
         let o = v.as_object().ok_or("a handler must be an object")?;
         let device = o
@@ -162,14 +178,22 @@ impl Handler {
             .and_then(Value::as_str)
             .ok_or("a handler needs a device-type")?;
         let mode = o.get("mode").and_then(Value::as_str).unwrap_or("color");
+        if device == "screened" || device.starts_with("screened-") {
+            return Ok(Handler::painting(match ScreenSpec::parse(device, o)? {
+                Some(spec) => Target::Screen(Box::new(spec)),
+                None => Target::Unsupported,
+            }));
+        }
+        if device == "rgb-per-key-zones" && matches!(mode, "bitmap" | "partial-bitmap") {
+            let excluded = match (mode, o.get("excluded-events")) {
+                ("bitmap", _) => None,
+                (_, Some(list)) => Some(bitmap::excluded(list)?),
+                (_, None) => Some(Vec::new()),
+            };
+            return Ok(Handler::painting(Target::Bitmap(excluded)));
+        }
         if !KEY_DEVICES.contains(&device) || matches!(mode, "bitmap" | "partial-bitmap") {
-            return Ok(Handler {
-                target: Target::Unsupported,
-                mode: Mode::Color,
-                color: None,
-                rate: None,
-                context_frame_key: None,
-            });
+            return Ok(Handler::painting(Target::Unsupported));
         }
         let target = match (
             o.get("custom-zone-keys"),
@@ -365,10 +389,11 @@ mod tests {
     #[test]
     fn handlers_for_other_devices_are_kept_as_unsupported() {
         for v in [
-            json!({ "device-type": "screened", "zone": "one", "mode": "screen", "datas": [] }),
+            json!({ "device-type": "screened-128x36", "zone": "one", "mode": "screen", "datas": [] }),
             json!({ "device-type": "tactile", "zone": "one", "mode": "vibrate", "pattern": [] }),
             json!({ "device-type": "mouse", "zone": "wheel", "color": { "red": 1, "green": 2, "blue": 3 } }),
             json!({ "device-type": "rgb-2-zone", "zone": "two", "color": { "red": 1, "green": 2, "blue": 3 } }),
+            json!({ "device-type": "keyboard", "mode": "bitmap" }),
         ] {
             assert_eq!(
                 Handler::parse(&v).unwrap().target,
@@ -379,17 +404,35 @@ mod tests {
     }
 
     #[test]
-    fn the_sdk_bitmap_modes_are_kept_as_unsupported() {
-        for v in [
-            json!({ "device-type": "rgb-per-key-zones", "mode": "bitmap" }),
-            json!({ "device-type": "rgb-per-key-zones", "mode": "partial-bitmap", "excluded-events": ["HEALTH"] }),
-        ] {
-            assert_eq!(
-                Handler::parse(&v).unwrap().target,
-                Target::Unsupported,
-                "{v}"
-            );
+    fn screen_handlers_for_this_screen_are_parsed() {
+        for device in ["screened", "screened-128x40"] {
+            let h = Handler::parse(&json!({ "device-type": device, "zone": "one", "mode": "screen",
+                "datas": [{ "has-text": true }] }))
+            .unwrap();
+            let Target::Screen(spec) = h.target else {
+                panic!("{device}: {:?}", h.target)
+            };
+            assert_eq!(spec.exact, device == "screened-128x40");
         }
+        let empty = json!({ "device-type": "screened", "zone": "one", "mode": "screen", "datas": [] });
+        assert!(Handler::parse(&empty).is_err(), "a screen handler with no frames");
+    }
+
+    #[test]
+    fn the_sdk_bitmap_modes_are_parsed_with_their_exclusions() {
+        let full = Handler::parse(&json!({ "device-type": "rgb-per-key-zones", "mode": "bitmap" }));
+        assert_eq!(full.unwrap().target, Target::Bitmap(None));
+        // The doc's example: "write to all keys except those used by AMMO and HEALTH events".
+        let partial = Handler::parse(&json!({ "device-type": "rgb-per-key-zones",
+            "mode": "partial-bitmap", "excluded-events": ["AMMO", "HEALTH"] }));
+        assert_eq!(
+            partial.unwrap().target,
+            Target::Bitmap(Some(vec!["AMMO".into(), "HEALTH".into()]))
+        );
+        let none = Handler::parse(&json!({ "device-type": "rgb-per-key-zones", "mode": "partial-bitmap" }));
+        assert_eq!(none.unwrap().target, Target::Bitmap(Some(Vec::new())));
+        let bad = json!({ "device-type": "rgb-per-key-zones", "mode": "partial-bitmap", "excluded-events": "AMMO" });
+        assert!(Handler::parse(&bad).is_err());
     }
 
     #[test]
