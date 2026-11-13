@@ -1,6 +1,6 @@
 # B4-HEADSET-EXTRAS report
 
-Unit b4-headset-extras, branch `m11-b4-headset-extras` (from `aeb0193`), commits `8762bdb` … `2f76b8e`.
+Unit b4-headset-extras, branch `m11-b4-headset-extras` (from `aeb0193`), code commits `8762bdb` … `2f76b8e`, this report in the commit after.
 Built against fakes only. Nothing was sent to any device. Every new write and the new `06 80` query need the
 `headset_extras` gate (off by default).
 
