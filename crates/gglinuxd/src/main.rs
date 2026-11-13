@@ -738,6 +738,9 @@ async fn dispatch(
         | Request::ReadOnboard { .. }
         | Request::LoadOnboard { .. }
         | Request::WriteOnboard { .. }) => keyboard::onboard::serve(req, &workers.keyboard).await,
+        req @ (Request::GetMacros | Request::SetMacros { .. } | Request::WriteMacros { .. }) => {
+            keyboard::macros::handle(req, &workers.keyboard).await
+        }
         req @ (Request::GetActions | Request::SetActions { .. }) => {
             actions::serve(req, &workers.actions).await
         }

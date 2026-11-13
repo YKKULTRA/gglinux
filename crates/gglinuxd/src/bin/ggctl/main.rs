@@ -23,7 +23,9 @@ mod care;
 mod clip;
 mod experimental;
 mod gamesense;
+mod headset;
 mod keyboard;
+mod macros;
 mod mouse;
 mod onboard;
 mod parts;
@@ -221,6 +223,8 @@ fn parse(args: &[String]) -> Result<Action> {
         Some((&"clip", rest)) => clip::request(rest)?,
         Some((&"profile", rest)) => profile::request(rest)?,
         Some((&"gamesense", rest)) => gamesense::request(rest)?,
+        Some((&"headset", rest)) => headset::request(rest)?,
+        Some((&"macro", rest)) => macros::request(rest)?,
         Some((&"keyboard", [])) => Request::GetKeyboardState,
         Some((&"switches", rest)) => return keyboard::switches_action(rest),
         Some((&"screen", ["care", rest @ ..])) => return care::action(rest),

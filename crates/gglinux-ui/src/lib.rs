@@ -205,6 +205,8 @@ pub fn show(ui: &AppWindow, what: Changed, s: &State) {
         Changed::Bindings => bindings::show(ui, s),
         Changed::Onboard => onboard::show(ui, s),
         Changed::Actions => actions::show(ui, s),
+        // No panel yet: the macros unit adds it.
+        Changed::Macros => {}
     }
 }
 

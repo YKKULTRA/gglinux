@@ -28,6 +28,7 @@
 mod audio;
 pub mod bindings;
 mod effects;
+pub mod macros;
 mod mic;
 pub mod onboard;
 mod reader;

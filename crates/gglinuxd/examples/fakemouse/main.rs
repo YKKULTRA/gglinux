@@ -60,6 +60,7 @@ mod gamesense;
 mod headset;
 mod keyboard;
 mod keyboard_bindings;
+mod keyboard_macros;
 mod keyboard_onboard;
 mod keyboard_screen;
 mod log;

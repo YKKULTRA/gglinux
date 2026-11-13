@@ -5,7 +5,7 @@
 use gg_device_keyboard::layout::US;
 use gg_ipc::{KeyInfo, KeyboardState, Lighting, ReactiveStatus, Request, ResponseData};
 
-use crate::{keyboard_bindings, keyboard_onboard, keyboard_screen, Fake};
+use crate::{keyboard_bindings, keyboard_macros, keyboard_onboard, keyboard_screen, Fake};
 
 pub fn handle(req: Request, s: &mut Fake) -> ResponseData {
     match req {
@@ -39,6 +39,9 @@ pub fn handle(req: Request, s: &mut Fake) -> ResponseData {
         | Request::ReadOnboard { .. }
         | Request::LoadOnboard { .. }
         | Request::WriteOnboard { .. }) => keyboard_onboard::handle(req, s),
+        req @ (Request::GetMacros | Request::SetMacros { .. } | Request::WriteMacros { .. }) => {
+            keyboard_macros::handle(req, s)
+        }
         other => crate::error(format!(
             "{} is not a keyboard request",
             crate::log::method_name(&other)

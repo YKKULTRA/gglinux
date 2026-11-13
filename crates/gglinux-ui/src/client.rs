@@ -83,6 +83,7 @@ pub struct State {
     pub bindings: Option<BindingsState>,
     pub onboard: Option<OnboardState>,
     pub actions: Option<ActionsState>,
+    pub macros: Option<gg_ipc::MacrosState>,
     /// Kept while the daemon is away: a restart for a change of parts shouldn't
     /// bring the hidden pages back for a moment.
     pub parts: Option<Parts>,
@@ -152,6 +153,10 @@ impl State {
             ResponseData::Actions { state } => {
                 self.actions = Some(state.clone());
                 Changed::Actions
+            }
+            ResponseData::Macros { state } => {
+                self.macros = Some(state.clone());
+                Changed::Macros
             }
             ResponseData::Pong | ResponseData::Success | ResponseData::Error { .. } => return None,
         })
@@ -224,6 +229,10 @@ impl State {
                 self.actions = Some(state);
                 Changed::Actions
             }
+            Event::MacrosChanged { state } => {
+                self.macros = Some(state);
+                Changed::Macros
+            }
         }
     }
 
@@ -255,10 +264,11 @@ pub enum Changed {
     Bindings,
     Onboard,
     Actions,
+    Macros,
 }
 
 impl Changed {
-    pub const ALL: [Changed; 14] = [
+    pub const ALL: [Changed; 15] = [
         Changed::Connection,
         Changed::Devices,
         Changed::Mouse,
@@ -273,6 +283,7 @@ impl Changed {
         Changed::Bindings,
         Changed::Onboard,
         Changed::Actions,
+        Changed::Macros,
     ];
 }
 

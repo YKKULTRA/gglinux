@@ -10,12 +10,14 @@ use serde::{Deserialize, Serialize};
 mod actions;
 mod bindings;
 mod experimental;
+mod macros;
 pub mod mouse_keys;
 mod onboard;
 
 pub use actions::{validate as validate_actions, Action, ActionBinding, ActionsState};
 pub use bindings::{Bindings, BindingsState, KeyAction, KeyBinding, Layer};
 pub use experimental::{Experimental, Feature};
+pub use macros::{Macro, MacroBinding, MacroEvent, MacroLibrary, MacroMode, MacrosState};
 pub use onboard::{check_slot, OnboardSlot, OnboardSource, OnboardState, SLOTS as ONBOARD_SLOTS};
 
 /// Broad device category, used by the UI to pick the right panel.
@@ -1457,6 +1459,19 @@ pub enum Request {
     SetActions {
         bindings: Vec<ActionBinding>,
     },
+    /// The keyboard macros and the keys that play them.
+    GetMacros,
+    /// Replace the macros and their keys. Saved; nothing is sent to the keyboard. Needs
+    /// [`Feature::KeyboardMacros`].
+    SetMacros {
+        library: MacroLibrary,
+    },
+    /// Write the macros and their keys into onboard slot `slot` (0..=4), as one checked
+    /// transaction like [`Request::WriteOnboard`]. Needs [`Feature::KeyboardMacros`] and
+    /// [`Feature::KeyboardOnboard`].
+    WriteMacros {
+        slot: u8,
+    },
 }
 
 impl Request {
@@ -1507,7 +1522,10 @@ impl Request {
             | R::GetOnboard
             | R::ReadOnboard { .. }
             | R::LoadOnboard { .. }
-            | R::WriteOnboard { .. } => Part::Keyboard,
+            | R::WriteOnboard { .. }
+            | R::GetMacros
+            | R::SetMacros { .. }
+            | R::WriteMacros { .. } => Part::Keyboard,
             R::GetGamesenseState
             | R::SetGamesenseEnabled { .. }
             | R::SetGameEnabled { .. }
@@ -1691,6 +1709,9 @@ pub enum ResponseData {
     Actions {
         state: ActionsState,
     },
+    Macros {
+        state: MacrosState,
+    },
     /// A command was accepted and applied.
     Success,
     Error {
@@ -1753,6 +1774,10 @@ pub enum Event {
     /// The actions changed, or one ran or failed.
     ActionsChanged {
         state: ActionsState,
+    },
+    /// The macros changed, or a write of them started or ended.
+    MacrosChanged {
+        state: MacrosState,
     },
 }
 
