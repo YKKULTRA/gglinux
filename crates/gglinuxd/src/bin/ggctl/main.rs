@@ -60,6 +60,7 @@ ggctl profile apply <name>
 ggctl gamesense test|on|off
 ggctl keyboard                          # switch settings and screen, as the daemon has them
 ggctl switches on|off                   # gglinux's switch settings, or leave them alone
+ggctl switches resend                   # send all of gglinux's switch settings to the keyboard again
 ggctl switches actuation 1.5            # every key's actuation point, 0.1 to 4.0 mm
 ggctl switches rapid-trigger on [0.2]|off   # optional re-trigger distance, 0.1 to 2.0 mm
 ggctl switches protection on|off        # Protection Mode on every key (needs keyboard_protection)
@@ -121,6 +122,11 @@ fn main() -> Result<()> {
                 bail!("the daemon did not send the keyboard state");
             };
             let mut switches = state.switches;
+            if edit == keyboard::SwitchEdit::Resend {
+                return keyboard::resend(switches, |switches| {
+                    send(connect()?, Request::SetSwitches { switches }).map(|_| ())
+                });
+            }
             edit.apply(&mut switches);
             Request::SetSwitches { switches }
         }

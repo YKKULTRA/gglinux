@@ -64,12 +64,16 @@ pub enum SwitchEdit {
     },
     /// Protection Mode, on every adjustable key.
     Protection(bool),
+    /// The same settings off and on again, so the daemon sends all five reports
+    /// ([`resend`]); changes nothing in them.
+    Resend,
 }
 
 impl SwitchEdit {
     pub fn apply(self, s: &mut Switches) {
         match self {
             SwitchEdit::Enable(on) => s.enabled = on,
+            SwitchEdit::Resend => {}
             SwitchEdit::Actuation(tenths) => {
                 s.enabled = true;
                 s.actuation = tenths;
@@ -103,11 +107,34 @@ fn tenths(mm: &str) -> Result<u8> {
     Ok(t as u8)
 }
 
+/// `ggctl switches resend`: gglinux's switch settings `on`, sent off and then on again
+/// through `set`, unchanged. A change that turns them on makes the daemon send all five
+/// switch reports, so this puts gglinux's settings back on a keyboard that may hold
+/// others now (a config picked on the keyboard itself, or GG).
+pub fn resend(on: Switches, set: impl Fn(Switches) -> Result<()>) -> Result<()> {
+    if !on.enabled {
+        bail!(
+            "gglinux's switch settings are off, so the keyboard keeps its own: there's nothing \
+             to send again (`ggctl switches on` sends gglinux's)"
+        );
+    }
+    set(Switches {
+        enabled: false,
+        ..on.clone()
+    })?;
+    set(on).context(
+        "gglinux's switch settings were turned off but not on again: run `ggctl switches on`",
+    )?;
+    println!("ok: all five switch reports go to the keyboard again");
+    Ok(())
+}
+
 pub fn switches_action(rest: &[&str]) -> Result<Action> {
     Ok(match rest {
         [] => Action::Send(Request::GetKeyboardState),
         ["on"] => Action::EditSwitches(SwitchEdit::Enable(true)),
         ["off"] => Action::EditSwitches(SwitchEdit::Enable(false)),
+        ["resend"] => Action::EditSwitches(SwitchEdit::Resend),
         ["actuation", mm] => Action::EditSwitches(SwitchEdit::Actuation(tenths(mm)?)),
         ["protection", "on"] => Action::EditSwitches(SwitchEdit::Protection(true)),
         ["protection", "off"] => Action::EditSwitches(SwitchEdit::Protection(false)),
@@ -130,7 +157,7 @@ pub fn switches_action(rest: &[&str]) -> Result<Action> {
             sensitivity: None,
         }),
         _ => bail!(
-            "usage: ggctl switches on|off | actuation 1.5 | rapid-trigger on [0.2]|off | protection on|off"
+            "usage: ggctl switches on|off|resend | actuation 1.5 | rapid-trigger on [0.2]|off | protection on|off"
         ),
     })
 }
@@ -188,5 +215,51 @@ mod tests {
         }
         .apply(&mut s);
         assert!(s.rapid_trigger.enabled && s.rapid_trigger.sensitivity == 5);
+    }
+
+    #[test]
+    fn resend_turns_the_switch_settings_off_and_on_again_unchanged() {
+        assert_eq!(edits("switches resend"), SwitchEdit::Resend);
+        let on = Switches {
+            enabled: true,
+            actuation: 18,
+            ..Switches::default()
+        };
+        let mut s = on.clone();
+        SwitchEdit::Resend.apply(&mut s);
+        assert_eq!(s, on, "nothing changed in them");
+
+        // Off and then on again, the same settings: the daemon sends all five.
+        let sent = std::cell::RefCell::new(Vec::new());
+        let record = |s: Switches| {
+            sent.borrow_mut().push(s);
+            Ok(())
+        };
+        resend(on.clone(), record).unwrap();
+        let off = Switches {
+            enabled: false,
+            ..on.clone()
+        };
+        assert_eq!(*sent.borrow(), [off, on.clone()]);
+
+        // Off: the keyboard runs its own, nothing to send again and nothing sent.
+        sent.borrow_mut().clear();
+        let e = resend(Switches::default(), record).unwrap_err();
+        assert!(e.to_string().contains("ggctl switches on"), "{e}");
+        assert!(sent.borrow().is_empty());
+
+        // Turned off but not on again: it says how to get them back.
+        let e = resend(on, |s| {
+            if s.enabled {
+                bail!("the daemon went away")
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        let e = format!("{e:#}");
+        assert!(
+            e.contains("turned off but not on again") && e.contains("ggctl switches on"),
+            "{e}"
+        );
     }
 }

@@ -8,6 +8,13 @@
 //! slot load all five go. The analog keys the board doesn't have (it depends on the
 //! region) get what GG leaves there, whatever the settings say.
 //!
+//! What was last sent can go stale without gglinux seeing it: a config picked on the
+//! keyboard's own menu, GG, or a report the keyboard dropped without a word (switch
+//! tables have no read-back). So all five go again when the settings are turned on (also
+//! with nothing changed: `ggctl switches resend` turns them off and on), and with the
+//! first change [`FULL_SEND_AGE`] or more after the last time all five went. Nothing goes
+//! on a timer alone: a change, a connect or a slot load sends.
+//!
 //! Keys may also have a second (deep-press) actuation point. Its table goes after the
 //! others, and only while the keyboard lets the bindings family out (`keyboard_bindings`
 //! on); with the gate off exactly the same reports go out as without deep-press points.
@@ -21,12 +28,17 @@
 //! ([`check_deeper`]).
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gg_device_keyboard::layout::{Key, US};
 use gg_device_keyboard::proto::{self, ANALOG_KEYS};
 use gg_device_keyboard::{Keyboard, SentSwitches, SwitchReports};
 use gg_ipc::{Switches, TapMode};
 use tracing::{debug, info, warn};
+
+/// How long after all five reports went the next change sends all five again, not only
+/// the ones that differ (review R2, S1): what the keyboard holds may have changed since.
+pub const FULL_SEND_AGE: Duration = Duration::from_secs(5 * 60);
 
 /// The switch settings as the keyboard worker keeps them, and what sending them gave.
 pub struct SwitchesState {
@@ -36,6 +48,8 @@ pub struct SwitchesState {
     sent: Option<Result<(), String>>,
     /// The five switch reports as last sent to the open keyboard.
     reports: SentSwitches,
+    /// When all five last went to the open keyboard; `None`: the next send is all five.
+    full_at: Option<Instant>,
     /// The analog keys the board lacks, as the last reports were made for: they're made
     /// again when the board turns out to be another.
     absent: Option<Vec<u8>>,
@@ -62,6 +76,7 @@ impl SwitchesState {
             path,
             sent: None,
             reports: SentSwitches::default(),
+            full_at: None,
             absent: None,
             second: None,
             protection: None,
@@ -76,6 +91,10 @@ impl SwitchesState {
             .validate()
             .and_then(|()| check_analog(&switches))
             .and_then(|()| check_deeper(&switches))?;
+        // Turned on: all five go, even if none changed since they last went.
+        if switches.enabled && !self.switches.enabled {
+            self.full_at = None;
+        }
         self.switches = switches;
         super::save(&self.path, &self.switches, "switch");
         // Sent again, to the keyboard that has the old ones (and maybe deep-press points).
@@ -88,13 +107,23 @@ impl SwitchesState {
     /// isn't known. The worker passes the board; tests use this.
     #[cfg(test)]
     pub fn sync(&mut self, device: Option<&Keyboard>) {
-        self.sync_board(device, gg_device_keyboard::layout::for_region(None));
+        self.sync_at(device, Instant::now());
+    }
+
+    /// [`SwitchesState::sync`] as if the time were `now`: the tests' fake clock.
+    #[cfg(test)]
+    pub fn sync_at(&mut self, device: Option<&Keyboard>, now: Instant) {
+        self.sync_board_at(device, gg_device_keyboard::layout::for_region(None), now);
     }
 
     /// Send the switch settings to a keyboard that hasn't had them since it connected or
     /// since they changed, for the keys `board` has: only the reports that differ from
-    /// what it was last sent.
+    /// what it was last sent, or all five ([`FULL_SEND_AGE`]).
     pub fn sync_board(&mut self, device: Option<&Keyboard>, board: &[Key]) {
+        self.sync_board_at(device, board, Instant::now());
+    }
+
+    fn sync_board_at(&mut self, device: Option<&Keyboard>, board: &[Key], now: Instant) {
         if !self.switches.enabled {
             return;
         }
@@ -106,13 +135,20 @@ impl SwitchesState {
         let follows = !self.switches.protection.enabled || self.protection == Some(protection);
         let absent = absent(board);
         if self.sent.is_none() || !follows || self.absent.as_ref() != Some(&absent) {
-            self.send(device, absent);
+            self.send(device, absent, now);
         }
         self.sync_second(device);
     }
 
-    /// The actuation points, Rapid Trigger and Rapid Tap: the reports that changed.
-    fn send(&mut self, device: &Keyboard, absent: Vec<u8>) {
+    /// The actuation points, Rapid Trigger and Rapid Tap: the reports that changed, or all
+    /// five when they were just turned on or last went whole [`FULL_SEND_AGE`] ago.
+    fn send(&mut self, device: &Keyboard, absent: Vec<u8>, now: Instant) {
+        let full = self
+            .full_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= FULL_SEND_AGE);
+        if full {
+            self.reports = SentSwitches::default();
+        }
         let s = &self.switches;
         let pairs: Vec<gg_device_keyboard::TapPair> = s
             .rapid_tap
@@ -142,8 +178,12 @@ impl SwitchesState {
             .map_err(|e| format!("{e:#}"));
         match &result {
             Ok(0) => debug!("keyboard switch settings unchanged: nothing sent"),
-            Ok(n) => info!(reports = n, "keyboard switch settings sent"),
+            Ok(n) => info!(reports = n, full, "keyboard switch settings sent"),
             Err(e) => warn!(error = %e, "the keyboard did not take the switch settings"),
+        }
+        // A whole send that failed part-way goes whole again next time.
+        if full && result.is_ok() {
+            self.full_at = Some(now);
         }
         self.sent = Some(result.map(|_| ()));
         self.absent = Some(absent);
@@ -195,6 +235,7 @@ impl SwitchesState {
     pub fn forget(&mut self) {
         self.sent = None;
         self.reports = SentSwitches::default();
+        self.full_at = None;
         self.absent = None;
         self.second = None;
         self.protection = None;
@@ -338,6 +379,7 @@ mod tests {
             path: PathBuf::new(),
             sent: None,
             reports: SentSwitches::default(),
+            full_at: None,
             absent: None,
             second: None,
             protection: None,
@@ -451,6 +493,132 @@ mod tests {
             "the changed table and the four that never got there"
         );
         assert_eq!(s.error(), None);
+    }
+
+    const ALL_FIVE: [(Kind, u8, u8); 5] = [
+        (Kind::Feature, 0x38, 0x61),
+        (Kind::Feature, 0x38, 0x62),
+        (Kind::Feature, 0x38, 0x65),
+        (Kind::Output, 0x38, 0x67),
+        (Kind::Output, 0x38, 0x66),
+    ];
+
+    #[test]
+    fn turning_them_on_sends_all_five_even_with_nothing_changed() {
+        let d = Scratch::new("switches-on-again");
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        let mut s = SwitchesState::load(&d.0);
+        s.set(all_at(15, false)).unwrap();
+        s.sync(Some(&kb));
+        assert_eq!(sent_ops(&fake), ALL_FIVE);
+
+        // Off sends nothing. On again with the same settings sends all five: the keyboard
+        // may have had anything meanwhile (a config picked on it, GG).
+        fake.clear_sent();
+        let off = Switches {
+            enabled: false,
+            ..all_at(15, false)
+        };
+        s.set(off).unwrap();
+        s.sync(Some(&kb));
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        s.set(all_at(15, false)).unwrap();
+        s.sync(Some(&kb));
+        assert_eq!(sent_ops(&fake), ALL_FIVE);
+
+        // A change while they're on still sends only what differs.
+        fake.clear_sent();
+        s.set(all_at(18, false)).unwrap();
+        s.sync(Some(&kb));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x38, 0x61)]);
+        assert_eq!(s.error(), None);
+    }
+
+    #[test]
+    fn a_change_five_minutes_or_more_after_the_last_full_send_sends_all_five() {
+        let d = Scratch::new("switches-full-again");
+        let fake = FakeTransport::new();
+        let kb = fake.keyboard();
+        let mut s = SwitchesState::load(&d.0);
+        let start = Instant::now();
+        let at = |min: u64, sec: u64| start + std::time::Duration::from_secs(min * 60 + sec);
+        s.set(all_at(15, false)).unwrap();
+        s.sync_at(Some(&kb), at(0, 0));
+        assert_eq!(sent_ops(&fake), ALL_FIVE);
+
+        // Within five minutes of it: only what differs.
+        fake.clear_sent();
+        s.set(all_at(18, false)).unwrap();
+        s.sync_at(Some(&kb), at(4, 59));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x38, 0x61)]);
+
+        // Five minutes after the last full send: the next change sends all five.
+        fake.clear_sent();
+        s.set(all_at(20, false)).unwrap();
+        s.sync_at(Some(&kb), at(5, 0));
+        assert_eq!(sent_ops(&fake), ALL_FIVE);
+        assert_eq!(
+            fake.sent()[0].report,
+            proto::actuation_table_for(us_board, |_| 20)
+        );
+
+        // The five minutes count from that one.
+        fake.clear_sent();
+        s.set(all_at(15, false)).unwrap();
+        s.sync_at(Some(&kb), at(9, 59));
+        assert_eq!(sent_ops(&fake), [(Kind::Feature, 0x38, 0x61)]);
+
+        // Nothing goes on its own, however long it's been: only with a change.
+        fake.clear_sent();
+        s.sync_at(Some(&kb), at(40, 0));
+        assert!(fake.sent().is_empty(), "{:?}", sent_ops(&fake));
+        s.set(all_at(18, false)).unwrap();
+        s.sync_at(Some(&kb), at(40, 0));
+        assert_eq!(sent_ops(&fake), ALL_FIVE);
+        assert_eq!(s.error(), None);
+    }
+
+    #[tokio::test]
+    async fn switches_turned_off_and_on_again_go_to_the_keyboard_whole() {
+        use super::super::{spawn_fake, Command};
+        let d = Scratch::new("switches-resend");
+        std::fs::write(
+            d.0.join("switches.json"),
+            r#"{"enabled":true,"actuation":20}"#,
+        )
+        .unwrap();
+        let fake = FakeTransport::new();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let kb = spawn_fake(
+            fake.keyboard(),
+            d.0.clone(),
+            tx,
+            gg_ipc::Experimental::default(),
+        );
+        kb.send(Command::GetState).await.unwrap();
+        kb.send(Command::GetState).await.unwrap();
+        assert_eq!(sent_ops(&fake), ALL_FIVE, "sent once on connect");
+
+        // What `ggctl switches resend` sends: the same settings, off and then on again.
+        fake.clear_sent();
+        let on = Switches {
+            enabled: true,
+            actuation: 20,
+            ..Switches::default()
+        };
+        let off = Switches {
+            enabled: false,
+            ..on.clone()
+        };
+        for switches in [off, on] {
+            kb.send(|reply| Command::SetSwitches { switches, reply })
+                .await
+                .unwrap();
+        }
+        kb.send(Command::GetState).await.unwrap();
+        assert_eq!(sent_ops(&fake), ALL_FIVE);
+        kb.send::<()>(Command::Shutdown).await.unwrap();
     }
 
     #[test]
