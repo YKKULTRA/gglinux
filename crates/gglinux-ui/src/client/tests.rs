@@ -91,7 +91,7 @@ impl Peer {
     }
 
     /// Answer the reads a connection starts with: `parts` (only the clips run),
-    /// no devices, and `clips` for the recorder.
+    /// no devices, `clips` for the recorder, and the states outside the parts.
     fn warm_up(&mut self, clips: &str) {
         let r = self.request();
         assert!(matches!(r.req, Request::GetParts), "{:?}", r.req);
@@ -101,13 +101,25 @@ impl Peer {
                 parts: clips_only(),
             },
         );
-        for _ in 0..2 {
+        for _ in 0..4 {
             let r = self.request();
             match r.req {
                 Request::ListDevices => {
                     self.answer(r.id, ResponseData::Devices { devices: vec![] })
                 }
                 Request::GetClipsState => self.answer(r.id, clips_answer(clips)),
+                Request::GetExperimental => self.answer(
+                    r.id,
+                    ResponseData::Experimental {
+                        experimental: gg_ipc::Experimental::default(),
+                    },
+                ),
+                Request::GetActions => self.answer(
+                    r.id,
+                    ResponseData::Actions {
+                        state: gg_ipc::ActionsState::default(),
+                    },
+                ),
                 other => panic!("a read it shouldn't make: {other:?}"),
             }
         }
@@ -206,6 +218,40 @@ fn answers_and_notifications_land_in_the_order_they_came() {
     });
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(c.state().clips.unwrap().dir, "newer");
+}
+
+#[test]
+fn the_macros_are_read_at_connect_when_the_keyboard_runs() {
+    let fake = Fake::new();
+    let (_c, changes) = client(&fake);
+    let mut peer = fake.accept();
+    let r = peer.request();
+    assert!(matches!(r.req, Request::GetParts), "{:?}", r.req);
+    let parts = Parts {
+        keyboard: true,
+        ..clips_only()
+    };
+    peer.answer(r.id, ResponseData::Parts { parts });
+    // Every other read gets an error, as from a daemon without that state.
+    let mut asked = Vec::new();
+    while !asked.contains(&"get_macros".to_owned()) {
+        let r = peer.request();
+        asked.push(method(&r.req).to_string());
+        let answer = match r.req {
+            Request::GetMacros => ResponseData::Macros {
+                state: gg_ipc::MacrosState {
+                    written_slot: Some(4),
+                    ..gg_ipc::MacrosState::default()
+                },
+            },
+            _ => ResponseData::Error {
+                message: "not here".into(),
+            },
+        };
+        peer.answer(r.id, answer);
+    }
+    let s = until(&changes, |w, _| w == Changed::Macros);
+    assert_eq!(s.macros.unwrap().written_slot, Some(4));
 }
 
 #[test]
@@ -411,6 +457,7 @@ fn a_battery_alone_is_not_a_mouse_state() {
         connected: true,
         battery: None,
         applied: None,
+        ..MouseState::default()
     });
     s.apply(Event::MouseBattery { battery });
     assert_eq!(s.mouse.unwrap().battery, battery);

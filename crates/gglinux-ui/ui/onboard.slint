@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The Apex Pro TKL Gen 3's onboard profile slots: a panel at the end of the
+// keyboard card (placed in app.slint). Shown once the daemon has said anything
+// about the slots; greyed, with the reason, while keyboard_onboard is off.
+
+import { Theme } from "theme.slint";
+import { Hint, ErrorLine, Button, Head } from "widgets.slint";
+import { Opt } from "keyboard.slint";
+
+export global OnboardUi {
+    /// Show the panel: at the end of the keyboard card, with a divider above
+    /// it. Off, it takes no room.
+    in property <bool> shown: false;
+    /// keyboard_onboard is on: the buttons work.
+    in property <bool> enabled;
+    /// Why they don't, while it's off.
+    in property <string> refused;
+    /// One entry per slot, slot 1 first: its name ("not read yet" before a
+    /// read), what's known about it, and whether it read back bad.
+    in property <[string]> names;
+    in property <[string]> notes;
+    in property <[bool]> bad;
+    /// The slot whose write waits for a yes; -1 for none.
+    in-out property <int> confirm: -1;
+    /// The daemon is reading or writing (its own word, or ours while we wait).
+    in property <bool> busy;
+    in property <string> error;
+    /// What the last operation noticed though it went through; empty for nothing.
+    in property <string> note;
+    /// The terminal command that puts a backup back into each slot that doesn't check
+    /// out; empty while they all do.
+    in property <string> recovery;
+    callback read-all();
+    callback load(int);
+    callback write(int);
+}
+
+/// The controls work only with the gate on and nothing under way.
+component SlotButton inherits Button {
+    small: true;
+    enabled: OnboardUi.enabled && !OnboardUi.busy;
+}
+
+export component OnboardPanel {
+    VerticalLayout {
+        Head { text: "ONBOARD SLOTS"; }
+        Opt { Hint { text: "The keyboard keeps five profiles in its own memory and runs one of them when it powers up. What gglinux sets lives in the keyboard's RAM and is sent again each time gglinux connects; written into a slot, it stays when gglinux isn't running."; } }
+        Opt { shown: !OnboardUi.enabled; Hint { text: OnboardUi.refused; color: Theme.accent; } }
+        Opt { gap: 12px; VerticalLayout {
+            spacing: 8px;
+            for name[i] in OnboardUi.names : HorizontalLayout {
+                spacing: 10px;
+                Text { text: "Slot " + (i + 1); width: 48px; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; }
+                // The name, and under it what's known; both give way in a narrow window.
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text { text: name; min-width: 0; color: OnboardUi.enabled ? Theme.text : Theme.text-dim; overflow: elide; }
+                    Text { text: OnboardUi.notes[i]; min-width: 0; color: OnboardUi.bad[i] ? Theme.danger : Theme.text-dim; font-size: Theme.tiny; overflow: elide; }
+                }
+                VerticalLayout { alignment: center; horizontal-stretch: 0; SlotButton { text: "Load"; clicked => { OnboardUi.load(i); } } }
+                VerticalLayout { alignment: center; horizontal-stretch: 0; SlotButton { text: "Write gglinux's settings into this slot…"; clicked => { OnboardUi.confirm = i; } } }
+            }
+        } }
+        Opt { shown: OnboardUi.confirm >= 0; gap: 12px; Rectangle {
+            background: Theme.surface-2;
+            border-radius: 8px;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+                Text {
+                    text: "Write gglinux's settings into slot \{OnboardUi.confirm + 1} (" + OnboardUi.names[OnboardUi.confirm] + ")? A backup of the slot is saved first, and written back if anything goes wrong.";
+                    color: Theme.text;
+                    font-size: Theme.small;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Button { text: "Write slot \{OnboardUi.confirm + 1}"; small: true; primary: true; enabled: OnboardUi.enabled && !OnboardUi.busy; clicked => { OnboardUi.write(OnboardUi.confirm); } }
+                    Button { text: "Keep it as it is"; small: true; clicked => { OnboardUi.confirm = -1; } }
+                }
+            }
+        } }
+        Opt { gap: 12px; HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            SlotButton { text: "Back up all"; small: false; clicked => { OnboardUi.read-all(); } }
+            Hint { text: OnboardUi.busy ? "Working with the keyboard's memory…" : "Reads each slot and saves a copy of it."; vertical-alignment: center; }
+        } }
+        Opt { Hint { text: "gglinux writes its screen picture and Rapid Tap pairs into a slot. Actuation points, Rapid Trigger and key bindings stay as the slot has them for now: the keyboard keeps them in its own key order, which isn't known yet."; } }
+        Opt { shown: OnboardUi.recovery != ""; Hint { text: OnboardUi.recovery; color: Theme.danger; } }
+        Opt { shown: OnboardUi.note != ""; Hint { text: OnboardUi.note; } }
+        Opt { shown: OnboardUi.error != ""; ErrorLine { text: OnboardUi.error; } }
+    }
+}

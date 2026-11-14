@@ -31,5 +31,6 @@ libc.workspace = true
 zbus.workspace = true
 
 [dev-dependencies]
+gg-device-keyboard = { path = "../gg-device-keyboard", features = ["testing"] }
 tower.workspace = true
 http-body-util.workspace = true

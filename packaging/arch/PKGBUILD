@@ -73,5 +73,11 @@ package() {
   sed 's|^Exec=.*|Exec=/usr/bin/gglinux|' data/io.github.ykk.gglinux.desktop \
     | install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/io.github.ykk.gglinux.desktop"
   install -Dm644 data/icons/128x128.png "$pkgdir/usr/share/icons/hicolor/128x128/apps/gglinux.png"
+  # KDE Plasma only, and off until the user enables it: a KWin script that tells gglinuxd which
+  # window has the focus, for profile rules that act on focus. Its Id is its folder name.
+  local kwin=crates/gglinuxd/src/profiles/kwin/gglinux-focus
+  install -Dm644 "$kwin/metadata.json" "$pkgdir/usr/share/kwin/scripts/gglinux-focus/metadata.json"
+  install -Dm644 "$kwin/contents/code/main.js" \
+    "$pkgdir/usr/share/kwin/scripts/gglinux-focus/contents/code/main.js"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

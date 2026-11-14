@@ -1,0 +1,1604 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! The Rival 3 Wireless Gen 2 panel on the Engine page: DPI stages, polling
+//! rate, sleep timer, buttons and wheel, and the onboard save.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gg_ipc::mouse_keys::{self, KEYS, MEDIA, WHEEL_FACTORY};
+use gg_ipc::{
+    DpiStage, Experimental, Feature, MouseRadio, MouseSettings, Request, MOUSE_SLEEP_MINUTES,
+};
+use slint::{ComponentHandle, SharedString};
+
+use crate::client::{Client, State};
+use crate::engine::ints;
+use crate::{act, sync_rows, AppWindow, Forms, MouseUi};
+
+/// How long a mouse request may take. The daemon gives the mouse up to three seconds after
+/// some commands (polling rate, wireless mode) before the next, so two of those in a row,
+/// one of them saved, take over six.
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Mirrors gg-device-mouse: DPI_MIN, DPI_MAX, DPI_STEP, MAX_PRESETS.
+const DPI_MIN: i32 = 100;
+const DPI_MAX: i32 = 18000;
+const DPI_STEP: i32 = 100;
+const MAX_STAGES: usize = 5;
+
+/// The `ButtonAction::parse` names offered, in the menu's order (`MouseUi.actions`). The
+/// wheel's rows offer the same, as GG does (captures rival-8 to rival-10).
+pub const ACTIONS: [&str; 16] = [
+    "button1",
+    "button2",
+    "button3",
+    "button4",
+    "button5",
+    "button6",
+    "dpi",
+    "scrollup",
+    "scrolldown",
+    "playpause",
+    "next",
+    "previous",
+    "mute",
+    "volumeup",
+    "volumedown",
+    "disable",
+];
+/// The menu's two entries after [`ACTIONS`]: each opens a list to pick a key from.
+pub const KEY_ITEM: usize = ACTIONS.len();
+pub const MEDIA_ITEM: usize = ACTIONS.len() + 1;
+/// proto::default_buttons(): each button itself, the sixth cycling DPI.
+const FACTORY_BUTTONS: [&str; 6] = ["button1", "button2", "button3", "button4", "button5", "dpi"];
+/// The rows the actions menu and the key lists serve are counted as the buttons (0 to 5),
+/// then the wheel turned up (this one), as [`KeyPicker::button`] is.
+pub const WHEEL_ROW: usize = FACTORY_BUTTONS.len();
+/// What the wheel turned down offers, in its menu's order (`MouseUi.down-actions`): only
+/// the two entries a capture shows there, GG's default and Button 4 (review R2, M1).
+pub const WHEEL_DOWN: [&str; 2] = ["scrolldown", "button4"];
+
+/// One DPI stage as typed: X is side to side, Y up and down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stage {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Stage {
+    pub const fn both(dpi: i32) -> Stage {
+        Stage { x: dpi, y: dpi }
+    }
+}
+
+/// Which of a stage's numbers a box sets.
+#[derive(Clone, Copy)]
+enum Axis {
+    X,
+    Y,
+}
+
+/// Which list the key picker shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyList {
+    Keys,
+    Media,
+}
+
+impl KeyList {
+    fn table(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            KeyList::Keys => KEYS,
+            KeyList::Media => MEDIA,
+        }
+    }
+
+    /// Its entry in the button menu.
+    fn item(self) -> usize {
+        match self {
+            KeyList::Keys => KEY_ITEM,
+            KeyList::Media => MEDIA_ITEM,
+        }
+    }
+}
+
+/// The open key list: under which row, which list, and the search typed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyPicker {
+    /// A button, or a wheel direction ([`WHEEL_ROW`] and after).
+    pub button: usize,
+    pub list: KeyList,
+    pub filter: String,
+}
+
+/// What will be written: the panel's working copy. Seeded once from what the
+/// daemon applied, then it's the user's, and a refresh never overwrites it.
+/// A daemon that went away takes it with it ([`MouseForm::default`] again), as
+/// what it applied went with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MouseForm {
+    /// As typed: snapped to the mouse's steps once typing is done, and before
+    /// they're sent.
+    pub stages: Vec<Stage>,
+    /// X and Y are set apart. While they're together a stage has one number,
+    /// used for both.
+    pub split: bool,
+    pub active: usize,
+    pub polling: u16,
+    /// One `ButtonAction::parse` name per button: one of [`ACTIONS`], a key
+    /// from [`KEYS`], or a name set elsewhere (ggctl), kept as it is so
+    /// applying doesn't replace it.
+    pub buttons: Vec<String>,
+    /// The key list under a button, while it's open.
+    pub picker: Option<KeyPicker>,
+    /// What the wheel does turned up, then down: names as a button has them.
+    pub wheel: [String; 2],
+    /// `mouse_wheel` is on: the wheel goes out with the buttons. Followed from the daemon.
+    pub wheel_gate: bool,
+    /// The sleep timer to send, in minutes ([`MOUSE_SLEEP_MINUTES`]).
+    pub sleep: u8,
+    /// The wireless mode to send.
+    pub radio: MouseRadio,
+    seeded: bool,
+    /// The sleep timer was taken from the mouse (or from what was written) once.
+    sleep_seeded: bool,
+    /// And so was the wireless mode.
+    radio_seeded: bool,
+}
+
+impl Default for MouseForm {
+    fn default() -> Self {
+        MouseForm {
+            stages: vec![Stage::both(800), Stage::both(1600)],
+            split: false,
+            active: 0,
+            polling: 1000,
+            buttons: FACTORY_BUTTONS.map(String::from).to_vec(),
+            picker: None,
+            wheel: WHEEL_FACTORY.map(String::from),
+            wheel_gate: false,
+            // GG's own default.
+            sleep: 5,
+            radio: MouseRadio::Normal,
+            seeded: false,
+            sleep_seeded: false,
+            radio_seeded: false,
+        }
+    }
+}
+
+/// A DPI the mouse takes: in range, on a step.
+fn snap(dpi: i32) -> i32 {
+    (((dpi as f32) / DPI_STEP as f32).round() as i32 * DPI_STEP).clamp(DPI_MIN, DPI_MAX)
+}
+
+impl MouseForm {
+    /// Keep the form in step with the daemon: seeded once from what it applied,
+    /// and started over while there's no state (not read yet, or the daemon went
+    /// away, and what it applied went with it), as the old panel did.
+    pub fn follow(&mut self, mouse: Option<&gg_ipc::MouseState>) {
+        match mouse {
+            None => *self = MouseForm::default(),
+            Some(m) => {
+                // Each part from what the mouse reports, or else what was written. What
+                // an asleep mouse said before it slept isn't taken: it can't be checked.
+                let applied = m.applied.clone().unwrap_or_default();
+                let reports = !asleep(m);
+                let known = MouseSettings {
+                    dpi: m.reported_dpi.clone().filter(|_| reports).or(applied.dpi),
+                    polling_hz: m
+                        .reported_polling_hz
+                        .filter(|_| reports)
+                        .or(applied.polling_hz),
+                    buttons: applied.buttons,
+                    ..MouseSettings::default()
+                };
+                if known != MouseSettings::default() {
+                    self.seed(&known);
+                }
+                self.seed_sleep(m);
+                if let (false, Some(radio)) = (
+                    self.radio_seeded,
+                    m.radio
+                        .filter(|_| reports)
+                        .or(m.applied.as_ref().and_then(|a| a.radio)),
+                ) {
+                    self.radio = radio;
+                    self.radio_seeded = true;
+                }
+            }
+        }
+    }
+
+    /// A pick from the wireless modes, by its place in [`MouseRadio::ALL`].
+    pub fn pick_radio(&mut self, index: usize) {
+        if let Some(radio) = MouseRadio::ALL.get(index) {
+            self.radio = *radio;
+        }
+    }
+
+    pub fn radio_request(&mut self, save: bool) -> Request {
+        Request::SetMouseRadio {
+            radio: self.radio,
+            save,
+        }
+    }
+
+    /// The sleep timer once, from what the mouse reports, or else what was written.
+    fn seed_sleep(&mut self, m: &gg_ipc::MouseState) {
+        if self.sleep_seeded {
+            return;
+        }
+        let minutes = m
+            .sleep_secs
+            .filter(|_| !asleep(m))
+            .map(|s| (s / 60) as u8)
+            .or_else(|| m.applied.as_ref().and_then(|a| a.sleep_minutes));
+        if let Some(minutes) = minutes {
+            self.set_sleep(minutes as i32);
+            self.sleep_seeded = true;
+        }
+    }
+
+    /// A sleep timer from the box, kept to what the mouse takes.
+    pub fn set_sleep(&mut self, minutes: i32) {
+        let (lo, hi) = (*MOUSE_SLEEP_MINUTES.start(), *MOUSE_SLEEP_MINUTES.end());
+        self.sleep = minutes.clamp(lo.into(), hi.into()) as u8;
+    }
+
+    /// The sleep timer's request; it always saves (see [`Request::SetMouseSleep`]).
+    pub fn sleep_request(&mut self, _save: bool) -> Request {
+        Request::SetMouseSleep {
+            minutes: self.sleep,
+        }
+    }
+
+    pub fn seed(&mut self, applied: &gg_ipc::MouseSettings) {
+        if self.seeded {
+            return;
+        }
+        self.seeded = true;
+        if let Some(dpi) = &applied.dpi {
+            self.stages = dpi
+                .stages
+                .iter()
+                .map(|s| Stage {
+                    x: s.x as i32,
+                    y: s.y as i32,
+                })
+                .collect();
+            // Shown together, a setup with different axes would be flattened.
+            self.split = self.stages.iter().any(|s| s.x != s.y);
+            self.active = dpi.active.min(self.stages.len().saturating_sub(1));
+        }
+        if let Some(hz) = applied.polling_hz {
+            self.polling = hz;
+        }
+        if let Some(buttons) = &applied.buttons {
+            self.buttons = FACTORY_BUTTONS
+                .iter()
+                .enumerate()
+                .map(|(i, factory)| buttons.get(i).map_or(*factory, String::as_str).to_owned())
+                .collect();
+            // The wheel's two follow the six buttons, once they've been written.
+            if let [up, down] = &buttons[FACTORY_BUTTONS.len().min(buttons.len())..] {
+                self.wheel = [up.clone(), down.clone()];
+            }
+        }
+    }
+
+    /// A pick from a wheel direction's menu: turned up (0) the buttons' menu (see
+    /// [`MouseForm::pick_button`]), turned down (1) a place in [`WHEEL_DOWN`].
+    pub fn pick_wheel(&mut self, direction: usize, action: usize) {
+        match direction {
+            0 => self.pick_button(WHEEL_ROW, action),
+            1 => {
+                if let Some(name) = WHEEL_DOWN.get(action) {
+                    self.wheel[1] = (*name).to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Each wheel direction's place in its menu: turned up as [`MouseForm::button_menu`]
+    /// gives it, turned down in [`WHEEL_DOWN`]; -1 for a name the menu doesn't offer.
+    pub fn wheel_menu(&self) -> Vec<i32> {
+        vec![self.menu_at(WHEEL_ROW), down_index(&self.wheel[1])]
+    }
+
+    /// The line under each wheel direction: as [`button_text`] gives it turned up; turned
+    /// down, a name set elsewhere that its menu doesn't offer.
+    pub fn wheel_keys(&self) -> Vec<String> {
+        let down = &self.wheel[1];
+        let down_text = if down_index(down) < 0 {
+            format!("Set elsewhere: {}", down.trim())
+        } else {
+            String::new()
+        };
+        vec![button_text(&self.wheel[0]), down_text]
+    }
+
+    /// A row's name: a button's, or a wheel direction's.
+    fn name(&self, row: usize) -> Option<&String> {
+        match row.checked_sub(WHEEL_ROW) {
+            None => self.buttons.get(row),
+            Some(direction) => self.wheel.get(direction),
+        }
+    }
+
+    fn name_mut(&mut self, row: usize) -> Option<&mut String> {
+        match row.checked_sub(WHEEL_ROW) {
+            None => self.buttons.get_mut(row),
+            Some(direction) => self.wheel.get_mut(direction),
+        }
+    }
+
+    /// A row's place in the menu: the open list's entry under it, an action's own entry or
+    /// its key list's, or -1 for a name set elsewhere that the menu doesn't offer.
+    fn menu_at(&self, row: usize) -> i32 {
+        match &self.picker {
+            Some(p) if p.button == row => p.list.item() as i32,
+            _ => self
+                .name(row)
+                .and_then(|n| menu_index(n))
+                .map_or(-1, |i| i as i32),
+        }
+    }
+
+    /// A stage's number (both of them while X and Y are together).
+    fn put(&mut self, i: usize, axis: Axis, dpi: i32) {
+        let split = self.split;
+        if let Some(s) = self.stages.get_mut(i) {
+            match (split, axis) {
+                (false, _) => *s = Stage::both(dpi),
+                (true, Axis::X) => s.x = dpi,
+                (true, Axis::Y) => s.y = dpi,
+            }
+        }
+    }
+
+    /// A stage while it's typed: only kept in range, so the box isn't fought.
+    pub fn edit_stage(&mut self, i: usize, dpi: i32) {
+        self.put(i, Axis::X, dpi.clamp(DPI_MIN, DPI_MAX));
+    }
+
+    /// A stage once typed: snapped to what the mouse takes.
+    pub fn set_stage(&mut self, i: usize, dpi: i32) {
+        self.put(i, Axis::X, snap(dpi));
+    }
+
+    pub fn edit_stage_y(&mut self, i: usize, dpi: i32) {
+        self.put(i, Axis::Y, dpi.clamp(DPI_MIN, DPI_MAX));
+    }
+
+    pub fn set_stage_y(&mut self, i: usize, dpi: i32) {
+        self.put(i, Axis::Y, snap(dpi));
+    }
+
+    /// X and Y apart, or together again: then each stage's Y becomes its X, so
+    /// the one box shows all that's sent.
+    pub fn set_split(&mut self, on: bool) {
+        self.split = on;
+        if !on {
+            for s in &mut self.stages {
+                s.y = s.x;
+            }
+        }
+    }
+
+    pub fn add_stage(&mut self) {
+        if self.stages.len() < MAX_STAGES {
+            self.stages
+                .push(*self.stages.last().unwrap_or(&Stage::both(800)));
+        }
+    }
+
+    pub fn remove_stage(&mut self, i: usize) {
+        if self.stages.len() <= 1 || i >= self.stages.len() {
+            return;
+        }
+        self.stages.remove(i);
+        // The picked stage moves down a place when one before it goes, and the
+        // daemon refuses a pick past the end.
+        if i < self.active {
+            self.active -= 1;
+        } else if self.active >= self.stages.len() {
+            self.active = self.stages.len() - 1;
+        }
+    }
+
+    pub fn pick_stage(&mut self, i: usize) {
+        self.active = i.min(self.stages.len().saturating_sub(1));
+    }
+
+    /// A pick from a row's menu (a button, or a wheel direction from [`WHEEL_ROW`]): an
+    /// action is that row's name at once; "Keyboard key…" or "Media key…" opens that list
+    /// under it instead.
+    pub fn pick_button(&mut self, i: usize, action: usize) {
+        // The wheel turned down has its own short menu ([`MouseForm::pick_wheel`]).
+        if i > WHEEL_ROW || self.name(i).is_none() {
+            return;
+        }
+        let list = match action {
+            KEY_ITEM => KeyList::Keys,
+            MEDIA_ITEM => KeyList::Media,
+            _ => {
+                if let (Some(a), Some(name)) = (ACTIONS.get(action), self.name_mut(i)) {
+                    *name = (*a).to_owned();
+                    if self.picker.as_ref().is_some_and(|p| p.button == i) {
+                        self.picker = None;
+                    }
+                }
+                return;
+            }
+        };
+        self.picker = Some(KeyPicker {
+            button: i,
+            list,
+            filter: String::new(),
+        });
+    }
+
+    /// The factory buttons, and the factory wheel with them.
+    pub fn factory_buttons(&mut self) {
+        self.buttons = FACTORY_BUTTONS.map(String::from).to_vec();
+        self.wheel = WHEEL_FACTORY.map(String::from);
+        self.picker = None;
+    }
+
+    pub fn filter_keys(&mut self, text: &str) {
+        if let Some(p) = &mut self.picker {
+            p.filter = text.to_owned();
+        }
+    }
+
+    pub fn close_keys(&mut self) {
+        self.picker = None;
+    }
+
+    /// The open list's keys, as the search leaves them: `(name, label)`.
+    pub fn key_choices(&self) -> Vec<(&'static str, &'static str)> {
+        self.picker
+            .as_ref()
+            .map_or_else(Vec::new, |p| choices(p.list, &p.filter))
+    }
+
+    /// A key from the open list (by its place in [`MouseForm::key_choices`])
+    /// becomes the row's name, and the list closes.
+    pub fn pick_key(&mut self, index: usize) {
+        let Some(p) = &self.picker else { return };
+        let row = p.button;
+        let Some((key, _)) = choices(p.list, &p.filter).get(index).copied() else {
+            return;
+        };
+        if let Some(name) = self.name_mut(row) {
+            *name = key.to_owned();
+        }
+        self.picker = None;
+    }
+
+    /// Each button's place in the menu: an action, "Keyboard key…" for a key
+    /// (and for the button whose list is open), or -1 for a name set elsewhere
+    /// that the menu doesn't offer.
+    pub fn button_menu(&self) -> Vec<i32> {
+        (0..self.buttons.len().min(WHEEL_ROW))
+            .map(|row| self.menu_at(row))
+            .collect()
+    }
+
+    /// The DPI request; the stages are snapped first, so what's shown is what's sent.
+    pub fn dpi_request(&mut self, save: bool) -> Request {
+        for s in &mut self.stages {
+            *s = Stage {
+                x: snap(s.x),
+                y: snap(s.y),
+            };
+        }
+        Request::SetMouseDpi {
+            stages: self
+                .stages
+                .iter()
+                .map(|s| DpiStage {
+                    x: s.x as u16,
+                    y: s.y as u16,
+                })
+                .collect(),
+            active: self.active,
+            save,
+        }
+    }
+
+    pub fn polling_request(&mut self, save: bool) -> Request {
+        Request::SetMousePolling {
+            hz: self.polling,
+            save,
+        }
+    }
+
+    /// The six buttons, and the wheel's two after them while `mouse_wheel` is on. Off,
+    /// the request is the six alone, as before the wheel: the daemon leaves the wheel be.
+    pub fn buttons_request(&mut self, save: bool) -> Request {
+        let mut actions = self.buttons.clone();
+        if self.wheel_gate {
+            actions.extend(self.wheel.iter().cloned());
+        }
+        Request::SetMouseButtons { actions, save }
+    }
+}
+
+/// Where a name is in the wheel's down menu ([`WHEEL_DOWN`]), any case, or -1.
+fn down_index(name: &str) -> i32 {
+    let name = name.trim().to_ascii_lowercase();
+    WHEEL_DOWN
+        .iter()
+        .position(|n| *n == name)
+        .map_or(-1, |i| i as i32)
+}
+
+/// Where a button name is in the menu. The daemon reads names without regard
+/// to case, and takes "disabled" as well.
+fn action_index(name: &str) -> Option<usize> {
+    let name = name.trim().to_ascii_lowercase();
+    let name = if name == "disabled" { "disable" } else { &name };
+    ACTIONS.iter().position(|a| *a == name)
+}
+
+/// Which key list a name is in (any case), if it's in one.
+fn key_list(name: &str) -> Option<KeyList> {
+    let name = name.trim().to_ascii_lowercase();
+    [KeyList::Keys, KeyList::Media]
+        .into_iter()
+        .find(|l| l.table().iter().any(|(n, _)| *n == name))
+}
+
+/// Where a button name is in the menu: an action's own entry, or the entry of
+/// the list its key is in.
+fn menu_index(name: &str) -> Option<usize> {
+    action_index(name).or_else(|| key_list(name).map(KeyList::item))
+}
+
+/// A list's keys whose label or name holds `filter` (any case): the exact
+/// match first, then those starting with it (or with a word starting with
+/// it), then the rest, each group in the list's order. Enter takes the first.
+pub fn choices(list: KeyList, filter: &str) -> Vec<(&'static str, &'static str)> {
+    let filter = filter.trim().to_lowercase();
+    let mut found: Vec<(u8, (&'static str, &'static str))> = list
+        .table()
+        .iter()
+        .filter_map(|&(name, label)| match_rank(&filter, name, label).map(|r| (r, (name, label))))
+        .collect();
+    found.sort_by_key(|(rank, _)| *rank);
+    found.into_iter().map(|(_, key)| key).collect()
+}
+
+/// How well a key matches a search, lowest best, or `None` for no match.
+fn match_rank(filter: &str, name: &str, label: &str) -> Option<u8> {
+    let label = label.to_lowercase();
+    if filter.is_empty() || name == filter || label == filter {
+        Some(0)
+    } else if name.starts_with(filter) || label.split(' ').any(|w| w.starts_with(filter)) {
+        Some(1)
+    } else if name.contains(filter) || label.contains(filter) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// The line under a button: the key it's bound to, a name set elsewhere that
+/// the menu doesn't know (kept as it is), or nothing for one of [`ACTIONS`].
+pub fn button_text(name: &str) -> String {
+    if action_index(name).is_some() {
+        return String::new();
+    }
+    match (key_list(name), mouse_keys::label(name)) {
+        (Some(KeyList::Keys), Some(label)) => format!("Key: {label}"),
+        (Some(KeyList::Media), Some(label)) => format!("Media key: {label}"),
+        _ => format!("Set elsewhere: {}", name.trim()),
+    }
+}
+
+/// A stage as the summary shows it: one number, or X×Y where they differ.
+fn stage_text(s: &DpiStage) -> String {
+    if s.x == s.y {
+        s.x.to_string()
+    } else {
+        format!("{}×{}", s.x, s.y)
+    }
+}
+
+/// Only the parts written: the others aren't known, so they aren't shown.
+pub fn summarise(a: &gg_ipc::MouseSettings) -> String {
+    let mut parts = Vec::new();
+    if let Some(dpi) = &a.dpi {
+        let list: Vec<String> = dpi.stages.iter().map(stage_text).collect();
+        parts.push(format!(
+            "{} dpi · stage {}",
+            list.join(" / "),
+            dpi.active + 1
+        ));
+    }
+    if let Some(hz) = a.polling_hz {
+        parts.push(format!("{hz} Hz"));
+    }
+    match a.buttons.as_ref().map(Vec::len) {
+        Some(n) if n > FACTORY_BUTTONS.len() => parts.push("button layout and wheel".into()),
+        Some(_) => parts.push("button layout".into()),
+        None => {}
+    }
+    parts.join(" · ")
+}
+
+/// What the mouse itself reports, as the line at the top of its card shows it; "" while
+/// nothing is read.
+pub fn reported_summary(m: &gg_ipc::MouseState) -> String {
+    let mut parts = Vec::new();
+    if let Some(dpi) = &m.reported_dpi {
+        let list: Vec<String> = dpi.stages.iter().map(stage_text).collect();
+        parts.push(format!(
+            "{} dpi · stage {}",
+            list.join(" / "),
+            dpi.active + 1
+        ));
+    }
+    if let Some(hz) = m.reported_polling_hz {
+        parts.push(format!("{hz} Hz"));
+    }
+    if let Some(secs) = m.sleep_secs {
+        parts.push(match secs % 60 {
+            0 => format!("sleep after {} min", secs / 60),
+            s => format!("sleep after {} min {s} s", secs / 60),
+        });
+    }
+    if let Some(radio) = m.radio {
+        parts.push(format!("wireless: {}", radio.label()));
+    }
+    parts.join(" · ")
+}
+
+/// The mouse is there but asleep: it answers nothing, not even the battery. What it
+/// reported before isn't shown then, as it can't be checked until it wakes.
+pub fn asleep(m: &gg_ipc::MouseState) -> bool {
+    m.connected && m.battery.is_none()
+}
+
+/// The first line of the card's note: what the mouse reports, or why nothing is read.
+pub fn reported_note(gated: bool, mouse: Option<&gg_ipc::MouseState>) -> String {
+    let summary = mouse.map(reported_summary).unwrap_or_default();
+    if !gated {
+        "Only the battery is read from this mouse while “Mouse: sleep timer and power settings” is off in Settings → Experimental.".into()
+    } else if mouse.is_some_and(asleep) {
+        "The mouse is asleep, so its settings aren't known until it wakes. Move it to wake it."
+            .into()
+    } else if summary.is_empty() {
+        "The mouse hasn't reported its settings yet: it answers once it's awake.".into()
+    } else {
+        format!("The mouse reports: {summary}.")
+    }
+}
+
+fn show_mouse_form(ui: &AppWindow, f: &MouseForm) {
+    let g = ui.global::<MouseUi>();
+    let xs = f.stages.iter().map(|s| s.x).collect();
+    sync_rows(g.get_stages(), xs, |m| g.set_stages(m));
+    let ys = f.stages.iter().map(|s| s.y).collect();
+    sync_rows(g.get_stages_y(), ys, |m| g.set_stages_y(m));
+    g.set_split(f.split);
+    g.set_active(f.active as i32);
+    g.set_polling(f.polling as i32);
+    g.set_sleep(f.sleep as i32);
+    let radio = MouseRadio::ALL.iter().position(|r| *r == f.radio);
+    g.set_radio(radio.map_or(-1, |i| i as i32));
+    g.set_buttons(ints(f.button_menu()));
+    sync_rows(g.get_wheel(), f.wheel_menu(), |m| g.set_wheel(m));
+    let keys: Vec<SharedString> = f.buttons.iter().map(|b| button_text(b).into()).collect();
+    sync_rows(g.get_button_keys(), keys, |m| g.set_button_keys(m));
+    let wheel_keys = f.wheel_keys().into_iter().map(SharedString::from).collect();
+    sync_rows(g.get_wheel_keys(), wheel_keys, |m| g.set_wheel_keys(m));
+    show_picker(&g, f);
+}
+
+/// The key list: where it's open, what it shows, and the search.
+fn show_picker(g: &MouseUi, f: &MouseForm) {
+    let (button, media, filter, current) = match &f.picker {
+        Some(p) => (
+            p.button as i32,
+            p.list == KeyList::Media,
+            p.filter.as_str(),
+            f.name(p.button)
+                .and_then(|b| mouse_keys::label(b))
+                .unwrap_or(""),
+        ),
+        None => (-1, false, "", ""),
+    };
+    g.set_key_button(button);
+    g.set_key_media(media);
+    // The box is bound both ways: only push a search it doesn't show yet, so
+    // typing isn't disturbed.
+    if g.get_key_filter() != filter {
+        g.set_key_filter(filter.into());
+    }
+    g.set_key_current(current.into());
+    let labels = f
+        .key_choices()
+        .into_iter()
+        .map(|(_, label)| SharedString::from(label))
+        .collect();
+    sync_rows(g.get_key_choices(), labels, |m| g.set_key_choices(m));
+}
+
+/// What the sleep timer line says the mouse reports, or "" while it isn't read.
+pub fn sleep_read(secs: Option<u16>) -> String {
+    match secs {
+        Some(s) if s % 60 == 0 => format!("The mouse reports {} min.", s / 60),
+        Some(s) => format!("The mouse reports {} min {} s.", s / 60, s % 60),
+        None => String::new(),
+    }
+}
+
+pub fn show_mouse(ui: &AppWindow, s: &State, form: &RefCell<MouseForm>) {
+    let g = ui.global::<MouseUi>();
+    g.set_known(s.mouse.is_some());
+    g.set_power_gated(s.experimental.is_some_and(|e| e.on(Feature::MousePower)));
+    g.set_power_refusal(
+        Experimental::default()
+            .refusal(Feature::MousePower)
+            .unwrap_or_default()
+            .into(),
+    );
+    let wheel_gate = s.experimental.is_some_and(|e| e.on(Feature::MouseWheel));
+    g.set_wheel_gated(wheel_gate);
+    g.set_wheel_refusal(
+        Experimental::default()
+            .refusal(Feature::MouseWheel)
+            .unwrap_or_default()
+            .into(),
+    );
+    let awake = s.mouse.as_ref().filter(|m| !asleep(m));
+    g.set_sleep_read(sleep_read(awake.and_then(|m| m.sleep_secs)).into());
+    g.set_reported(
+        reported_note(
+            s.experimental.is_some_and(|e| e.on(Feature::MousePower)),
+            s.mouse.as_ref(),
+        )
+        .into(),
+    );
+    form.borrow_mut().follow(s.mouse.as_ref());
+    form.borrow_mut().wheel_gate = wheel_gate;
+    let Some(m) = s.mouse.as_ref() else {
+        // Onboard writes start off again too: they can't be undone.
+        g.set_persist(false);
+        g.set_connected(false);
+        g.set_battery(-1);
+        g.set_charging(false);
+        g.set_applied(SharedString::new());
+        show_mouse_form(ui, &form.borrow());
+        return;
+    };
+    g.set_connected(m.connected);
+    g.set_battery(m.battery.map_or(-1, |b| b.level as i32));
+    g.set_charging(m.battery.is_some_and(|b| b.charging));
+    g.set_applied(m.applied.as_ref().map(summarise).unwrap_or_default().into());
+    show_mouse_form(ui, &form.borrow());
+}
+
+pub fn bind_mouse(ui: &AppWindow, client: &Client, form: Rc<RefCell<MouseForm>>) {
+    let g = ui.global::<MouseUi>();
+    let edit = |f: fn(&mut MouseForm, i32, i32)| {
+        let weak = ui.as_weak();
+        let form = form.clone();
+        move |a: i32, b: i32| {
+            f(&mut form.borrow_mut(), a, b);
+            if let Some(ui) = weak.upgrade() {
+                show_mouse_form(&ui, &form.borrow());
+            }
+        }
+    };
+    g.on_edit_stage(edit(|f, i, v| f.edit_stage(i as usize, v)));
+    g.on_set_stage(edit(|f, i, v| f.set_stage(i as usize, v)));
+    g.on_edit_stage_y(edit(|f, i, v| f.edit_stage_y(i as usize, v)));
+    g.on_set_stage_y(edit(|f, i, v| f.set_stage_y(i as usize, v)));
+    let split = edit(|f, on, _| f.set_split(on != 0));
+    g.on_set_split(move |on| split(on as i32, 0));
+    let add = edit(|f, _, _| f.add_stage());
+    g.on_add_stage(move || add(0, 0));
+    let remove = edit(|f, i, _| f.remove_stage(i as usize));
+    g.on_remove_stage(move |i| remove(i, 0));
+    let pick = edit(|f, i, _| f.pick_stage(i as usize));
+    g.on_pick_stage(move |i| pick(i, 0));
+    let polling = edit(|f, hz, _| f.polling = hz as u16);
+    g.on_pick_polling(move |hz| polling(hz, 0));
+    let sleep = edit(|f, m, _| f.set_sleep(m));
+    g.on_pick_sleep(move |m| sleep(m, 0));
+    let radio = edit(|f, i, _| f.pick_radio(i as usize));
+    g.on_pick_radio(move |i| radio(i, 0));
+    g.on_pick_button(edit(|f, i, a| f.pick_button(i as usize, a as usize)));
+    g.on_pick_wheel(edit(|f, i, a| f.pick_wheel(i as usize, a as usize)));
+    let factory = edit(|f, _, _| f.factory_buttons());
+    g.on_factory_buttons(move || factory(0, 0));
+    let pick_key = edit(|f, j, _| f.pick_key(j as usize));
+    g.on_pick_key(move |j| pick_key(j, 0));
+    let close = edit(|f, _, _| f.close_keys());
+    g.on_close_keys(move || close(0, 0));
+    {
+        let weak = ui.as_weak();
+        let form = form.clone();
+        g.on_filter_keys(move |text| {
+            form.borrow_mut().filter_keys(&text);
+            if let Some(ui) = weak.upgrade() {
+                show_mouse_form(&ui, &form.borrow());
+            }
+        });
+    }
+
+    let send = |tag: &'static str, make: fn(&mut MouseForm, bool) -> Request| {
+        let weak = ui.as_weak();
+        let client = client.clone();
+        let form = form.clone();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let save = ui.global::<MouseUi>().get_persist();
+            let req = make(&mut form.borrow_mut(), save);
+            show_mouse_form(&ui, &form.borrow());
+            act(&ui, &client, req, TIMEOUT, move |ui, busy, error| {
+                let g = ui.global::<MouseUi>();
+                g.set_busy(if busy {
+                    tag.into()
+                } else {
+                    SharedString::new()
+                });
+                g.set_error(error);
+            });
+        }
+    };
+    g.on_apply_dpi(send("dpi", MouseForm::dpi_request));
+    g.on_apply_polling(send("polling", MouseForm::polling_request));
+    g.on_apply_sleep(send("sleep", MouseForm::sleep_request));
+    g.on_apply_radio(send("radio", MouseForm::radio_request));
+    g.on_apply_buttons(send("buttons", MouseForm::buttons_request));
+    g.on_save(send("save", |_, _| Request::SaveMouse));
+}
+
+/// Start the panel's working copy afresh (see [`Forms::reset`]).
+pub fn reset(forms: &Forms) {
+    *forms.mouse.borrow_mut() = MouseForm::default();
+}
+
+/// The `shot` example's scripted steps for this panel (see [`crate::poke`]). A
+/// step with a place in a list takes it in the name (`mouse.set-stage1:3200`,
+/// `mouse.stage-y1:800`; a bare `mouse.stage-y:800` is the picked stage's), and
+/// a search its text after `=` (`mouse.key-filter=f1`).
+pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
+    let m = ui.global::<MouseUi>();
+    let indexed = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .and_then(|i| i.parse::<i32>().ok())
+    };
+    if let Some(i) = indexed("mouse.set-stage") {
+        m.invoke_set_stage(i, n);
+    } else if let Some(i) = indexed("mouse.stage-y") {
+        m.invoke_set_stage_y(i, n);
+    } else if let Some(i) = indexed("mouse.pick-button") {
+        m.invoke_pick_button(i, n);
+    } else if let Some(i) = indexed("mouse.pick-wheel") {
+        m.invoke_pick_wheel(i, n);
+    } else if let Some(text) = name.strip_prefix("mouse.key-filter=") {
+        m.invoke_filter_keys(text.into());
+    } else {
+        match name {
+            "mouse.split" => m.invoke_set_split(n != 0),
+            "mouse.stage-y" => m.invoke_set_stage_y(m.get_active(), n),
+            // The button menu's "Keyboard key…" / "Media key…" for button `n`.
+            "mouse.key-menu" => m.invoke_pick_button(n, KEY_ITEM as i32),
+            "mouse.media-menu" => m.invoke_pick_button(n, MEDIA_ITEM as i32),
+            "mouse.pick-key" => m.invoke_pick_key(n),
+            "mouse.close-keys" => m.invoke_close_keys(),
+            "mouse.add-stage" => m.invoke_add_stage(),
+            "mouse.remove-stage" => m.invoke_remove_stage(n),
+            "mouse.pick-stage" => m.invoke_pick_stage(n),
+            "mouse.pick-polling" => m.invoke_pick_polling(n),
+            "mouse.factory-buttons" => m.invoke_factory_buttons(),
+            "mouse.persist" => m.set_persist(n != 0),
+            "mouse.apply-dpi" => m.invoke_apply_dpi(),
+            "mouse.apply-polling" => m.invoke_apply_polling(),
+            "mouse.pick-sleep" => m.invoke_pick_sleep(n),
+            "mouse.apply-sleep" => m.invoke_apply_sleep(),
+            "mouse.pick-radio" => m.invoke_pick_radio(n),
+            "mouse.apply-radio" => m.invoke_apply_radio(),
+            "mouse.apply-buttons" => m.invoke_apply_buttons(),
+            "mouse.save" => m.invoke_save(),
+            _ => return false,
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gg_ipc::{MouseDpi, MouseSettings};
+
+    fn both(v: &[i32]) -> Vec<Stage> {
+        v.iter().map(|d| Stage::both(*d)).collect()
+    }
+
+    fn applied_dpi(stages: &[(u16, u16)], active: usize) -> MouseSettings {
+        MouseSettings {
+            dpi: Some(MouseDpi {
+                stages: stages.iter().map(|&(x, y)| DpiStage { x, y }).collect(),
+                active,
+            }),
+            ..MouseSettings::default()
+        }
+    }
+
+    #[test]
+    fn a_stage_is_left_alone_while_typed_and_snapped_once_done() {
+        let mut f = MouseForm::default();
+        // Typing 1250 passes through 125 on the way: snapping that to 100 would
+        // fight the box.
+        f.edit_stage(0, 125);
+        assert_eq!(f.stages[0], Stage::both(125));
+        f.edit_stage(0, 1250);
+        assert_eq!(f.stages[0], Stage::both(1250));
+        f.set_stage(0, 1250);
+        assert_eq!(f.stages[0], Stage::both(1300));
+        f.set_stage(1, 50);
+        assert_eq!(f.stages[1], Stage::both(DPI_MIN));
+        f.set_stage(1, 99_999);
+        assert_eq!(f.stages[1], Stage::both(DPI_MAX));
+        f.edit_stage(1, 99_999);
+        assert_eq!(
+            f.stages[1],
+            Stage::both(DPI_MAX),
+            "even typed, a stage stays in range"
+        );
+    }
+
+    #[test]
+    fn what_is_sent_is_snapped_and_shown_so() {
+        // Apply without leaving the box: the typed number is snapped on the way out.
+        let mut f = MouseForm::default();
+        f.edit_stage(1, 1650);
+        let Request::SetMouseDpi {
+            stages,
+            active,
+            save,
+        } = f.dpi_request(true)
+        else {
+            panic!("not a DPI request");
+        };
+        let sent: Vec<u16> = stages.iter().map(|s| s.x).collect();
+        assert_eq!((sent, active, save), (vec![800, 1700], 0, true));
+        assert!(stages.iter().all(|s| s.x == s.y));
+        assert_eq!(f.stages, both(&[800, 1700]), "the form shows what was sent");
+    }
+
+    #[test]
+    fn stages_come_and_go_within_bounds() {
+        let mut f = MouseForm::default();
+        f.set_stage(1, 3200);
+        for _ in 0..10 {
+            f.add_stage();
+        }
+        assert_eq!(f.stages, both(&[800, 3200, 3200, 3200, 3200]));
+        f.pick_stage(9);
+        assert_eq!(f.active, 4, "a pick past the end is the last stage");
+    }
+
+    #[test]
+    fn removing_a_stage_keeps_the_pick_on_the_same_stage() {
+        let mut f = MouseForm {
+            stages: both(&[400, 800, 1600]),
+            active: 2,
+            ..MouseForm::default()
+        };
+        f.remove_stage(0);
+        assert_eq!((f.stages.clone(), f.active), (both(&[800, 1600]), 1));
+        f.remove_stage(1);
+        assert_eq!((f.stages.clone(), f.active), (both(&[800]), 0));
+        f.remove_stage(0);
+        assert_eq!(f.stages, both(&[800]), "the last stage stays");
+    }
+
+    #[test]
+    fn the_form_is_seeded_once() {
+        let applied = MouseSettings {
+            dpi: Some(MouseDpi {
+                stages: vec![DpiStage { x: 400, y: 400 }],
+                active: 0,
+            }),
+            polling_hz: Some(500),
+            buttons: Some(
+                ["button2", "button1", "button3", "button4", "button5", "dpi"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+            ..MouseSettings::default()
+        };
+        let mut f = MouseForm::default();
+        f.seed(&applied);
+        assert_eq!(
+            (f.stages.clone(), f.polling, f.button_menu()),
+            (both(&[400]), 500, vec![1, 0, 2, 3, 4, 6])
+        );
+        assert!(!f.split, "equal axes keep X and Y together");
+        f.set_stage(0, 3200);
+        f.seed(&applied);
+        assert_eq!(
+            f.stages,
+            both(&[3200]),
+            "a later refresh leaves the edit alone"
+        );
+        assert_eq!(
+            summarise(&applied),
+            "400 dpi · stage 1 · 500 Hz · button layout"
+        );
+    }
+
+    #[test]
+    fn a_part_never_written_keeps_the_forms_own() {
+        let mut f = MouseForm::default();
+        f.seed(&MouseSettings {
+            polling_hz: Some(250),
+            ..MouseSettings::default()
+        });
+        assert_eq!((f.stages.clone(), f.polling), (both(&[800, 1600]), 250));
+        assert_eq!(f.buttons, FACTORY_BUTTONS.map(String::from).to_vec());
+    }
+
+    #[test]
+    fn a_key_set_elsewhere_is_kept_until_picked_over() {
+        let mut f = MouseForm::default();
+        f.seed(&MouseSettings {
+            buttons: Some(
+                ["button1", "Button2", "bksp", "button4", "disabled"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+            ..MouseSettings::default()
+        });
+        // Case and the "disabled" spelling are the daemon's too; a short list
+        // gets the factory action for the rest. "bksp" is a name the daemon
+        // takes that the menu and the key lists don't offer.
+        assert_eq!(f.button_menu(), vec![0, 1, -1, 3, 15, 6]);
+        assert_eq!(button_text(&f.buttons[2]), "Set elsewhere: bksp");
+        let Request::SetMouseButtons { actions, .. } = f.buttons_request(false) else {
+            panic!("not a buttons request");
+        };
+        assert_eq!(actions[2], "bksp", "applying doesn't replace it");
+        f.pick_button(2, 9);
+        assert_eq!(f.buttons[2], "playpause");
+        f.factory_buttons();
+        assert_eq!(f.button_menu(), vec![0, 1, 2, 3, 4, 6]);
+    }
+
+    #[test]
+    fn seeding_keeps_y_and_sets_x_and_y_apart_when_they_differ() {
+        let mut f = MouseForm::default();
+        f.seed(&applied_dpi(&[(400, 800), (1600, 1600)], 1));
+        assert_eq!(
+            (f.stages.clone(), f.active, f.split),
+            (vec![Stage { x: 400, y: 800 }, Stage::both(1600)], 1, true)
+        );
+        let mut g = MouseForm::default();
+        g.seed(&applied_dpi(&[(400, 400), (3200, 3200)], 0));
+        assert!(!g.split, "equal axes keep them together");
+    }
+
+    #[test]
+    fn with_x_and_y_together_an_edit_sets_both() {
+        let mut f = MouseForm::default();
+        f.edit_stage(0, 1250);
+        assert_eq!(f.stages[0], Stage::both(1250));
+        f.set_stage(0, 1250);
+        assert_eq!(f.stages[0], Stage::both(1300));
+        // The Y steps aren't on screen then, but they'd set both as well.
+        f.set_stage_y(1, 2450);
+        assert_eq!(f.stages[1], Stage::both(2500));
+    }
+
+    #[test]
+    fn with_x_and_y_apart_an_edit_sets_one_snapped_on_its_own() {
+        let mut f = MouseForm::default();
+        f.set_split(true);
+        f.edit_stage(0, 1250);
+        assert_eq!(f.stages[0], Stage { x: 1250, y: 800 });
+        f.set_stage(0, 1250);
+        f.edit_stage_y(0, 125);
+        assert_eq!(
+            f.stages[0],
+            Stage { x: 1300, y: 125 },
+            "Y typed isn't fought"
+        );
+        f.set_stage_y(0, 2450);
+        assert_eq!(f.stages[0], Stage { x: 1300, y: 2500 });
+        f.edit_stage_y(1, 99_999);
+        assert_eq!(
+            f.stages[1],
+            Stage {
+                x: 1600,
+                y: DPI_MAX
+            }
+        );
+        f.set_stage_y(1, 50);
+        assert_eq!(
+            f.stages[1],
+            Stage {
+                x: 1600,
+                y: DPI_MIN
+            }
+        );
+    }
+
+    #[test]
+    fn putting_x_and_y_back_together_gives_y_the_x() {
+        // Otherwise the one box would show X and a hidden Y would be sent.
+        let mut f = MouseForm::default();
+        f.seed(&applied_dpi(&[(400, 800), (1600, 3200)], 0));
+        f.set_split(false);
+        assert_eq!(f.stages, both(&[400, 1600]));
+        f.set_split(true);
+        assert_eq!(
+            f.stages,
+            both(&[400, 1600]),
+            "setting them apart changes nothing"
+        );
+    }
+
+    #[test]
+    fn both_axes_are_sent_snapped() {
+        let mut f = MouseForm::default();
+        f.set_split(true);
+        f.edit_stage(0, 420);
+        f.edit_stage_y(0, 2450);
+        let Request::SetMouseDpi { stages, .. } = f.dpi_request(false) else {
+            panic!("not a DPI request");
+        };
+        assert_eq!(
+            stages,
+            vec![DpiStage { x: 400, y: 2500 }, DpiStage { x: 1600, y: 1600 }]
+        );
+        assert_eq!(
+            f.stages[0],
+            Stage { x: 400, y: 2500 },
+            "the form shows what was sent"
+        );
+    }
+
+    #[test]
+    fn the_summary_shows_both_axes_only_where_they_differ() {
+        assert_eq!(
+            summarise(&applied_dpi(&[(400, 800), (1600, 1600)], 0)),
+            "400×800 / 1600 dpi · stage 1"
+        );
+    }
+
+    #[test]
+    fn stages_added_and_removed_keep_both_axes_and_the_pick() {
+        let mut f = MouseForm::default();
+        f.seed(&applied_dpi(&[(400, 800), (800, 1600), (1600, 3200)], 2));
+        f.add_stage();
+        assert_eq!(
+            f.stages[3],
+            Stage { x: 1600, y: 3200 },
+            "a new stage copies the last"
+        );
+        f.remove_stage(0);
+        assert_eq!(f.active, 1);
+        assert_eq!(f.stages[f.active], Stage { x: 1600, y: 3200 });
+    }
+
+    #[test]
+    fn a_key_picked_from_the_list_becomes_the_buttons_name() {
+        let mut f = MouseForm::default();
+        f.pick_button(3, KEY_ITEM);
+        assert_eq!(
+            f.buttons[3], "button4",
+            "opening the list changes nothing yet"
+        );
+        assert_eq!(
+            f.button_menu()[3],
+            KEY_ITEM as i32,
+            "the menu shows the entry picked"
+        );
+        assert_eq!(f.key_choices().len(), KEYS.len());
+        f.filter_keys("F13");
+        assert_eq!(f.key_choices(), vec![("f13", "F13")]);
+        f.pick_key(0);
+        assert_eq!(f.buttons[3], "f13");
+        assert_eq!(f.picker, None, "picking closes the list");
+        assert_eq!(f.button_menu()[3], KEY_ITEM as i32);
+        assert_eq!(button_text(&f.buttons[3]), "Key: F13");
+        let Request::SetMouseButtons { actions, .. } = f.buttons_request(false) else {
+            panic!("not a buttons request");
+        };
+        assert_eq!(actions[3], "f13");
+    }
+
+    #[test]
+    fn a_media_key_is_picked_from_its_own_list() {
+        let mut f = MouseForm::default();
+        f.pick_button(5, MEDIA_ITEM);
+        assert_eq!(f.button_menu()[5], MEDIA_ITEM as i32);
+        assert_eq!(f.key_choices().len(), MEDIA.len());
+        f.filter_keys("vol");
+        assert_eq!(
+            f.key_choices(),
+            vec![("volumeup", "Volume up"), ("volumedown", "Volume down")]
+        );
+        f.pick_key(1);
+        assert_eq!(f.buttons[5], "volumedown");
+        // The menu has that one as an action already.
+        assert_eq!(f.button_menu()[5], 14);
+        assert_eq!(button_text(&f.buttons[5]), "");
+    }
+
+    #[test]
+    fn a_key_name_points_the_menu_at_keyboard_key() {
+        let mut f = MouseForm::default();
+        f.seed(&MouseSettings {
+            buttons: Some(["F13", "leftctrl", "playpause"].map(String::from).to_vec()),
+            ..MouseSettings::default()
+        });
+        assert_eq!(
+            f.button_menu(),
+            vec![KEY_ITEM as i32, KEY_ITEM as i32, 9, 3, 4, 6]
+        );
+        assert_eq!(button_text("F13"), "Key: F13");
+        assert_eq!(button_text("leftctrl"), "Key: Left Ctrl");
+        assert_eq!(button_text("Button1"), "");
+        assert_eq!(button_text("macro7"), "Set elsewhere: macro7");
+    }
+
+    #[test]
+    fn the_search_puts_exact_and_leading_matches_first() {
+        let labels = |f: &str| -> Vec<&str> {
+            choices(KeyList::Keys, f)
+                .into_iter()
+                .map(|(_, l)| l)
+                .collect()
+        };
+        assert_eq!(
+            labels("f1"),
+            vec!["F1", "F10", "F11", "F12", "F13", "F14", "F15", "F16", "F17", "F18", "F19"]
+        );
+        assert_eq!(labels("ALT"), vec!["Left Alt", "Right Alt"]);
+        assert_eq!(labels("enter"), vec!["Enter", "Keypad Enter"]);
+        assert_eq!(labels(" page "), vec!["Page Up", "Page Down"]);
+        assert!(labels("zzz").is_empty());
+        assert_eq!(choices(KeyList::Keys, "").len(), KEYS.len());
+    }
+
+    #[test]
+    fn closing_the_list_puts_the_menu_back() {
+        let mut f = MouseForm::default();
+        f.pick_button(2, KEY_ITEM);
+        f.filter_keys("f");
+        f.pick_key(999);
+        assert!(f.picker.is_some(), "a pick past the list leaves it open");
+        assert_eq!(f.buttons[2], "button3");
+        f.close_keys();
+        assert_eq!((f.picker.clone(), f.button_menu()[2]), (None, 2));
+        // Opened on another button, it moves there; an action picked on that
+        // button closes it; reset to factory closes it too.
+        f.pick_button(0, KEY_ITEM);
+        f.pick_button(1, MEDIA_ITEM);
+        assert_eq!(f.button_menu()[..2], [0, MEDIA_ITEM as i32]);
+        f.pick_button(1, 7);
+        assert_eq!(
+            (f.picker.clone(), f.buttons[1].as_str()),
+            (None, "scrollup")
+        );
+        f.pick_button(4, KEY_ITEM);
+        f.factory_buttons();
+        assert_eq!(f.picker, None);
+    }
+
+    #[test]
+    fn a_name_set_elsewhere_survives_picking_keys_for_other_buttons() {
+        let mut f = MouseForm::default();
+        f.seed(&MouseSettings {
+            buttons: Some(["button1", "bksp"].map(String::from).to_vec()),
+            ..MouseSettings::default()
+        });
+        f.pick_button(0, KEY_ITEM);
+        f.filter_keys("space");
+        f.pick_key(0);
+        let Request::SetMouseButtons { actions, .. } = f.buttons_request(false) else {
+            panic!("not a buttons request");
+        };
+        assert_eq!(actions[..2], ["space", "bksp"]);
+    }
+
+    #[test]
+    fn a_daemon_gone_takes_the_working_copy_with_it() {
+        let state = |applied: Option<MouseSettings>| gg_ipc::MouseState {
+            connected: true,
+            applied,
+            ..gg_ipc::MouseState::default()
+        };
+        let first = MouseSettings {
+            polling_hz: Some(500),
+            ..MouseSettings::default()
+        };
+        let mut f = MouseForm::default();
+        f.follow(Some(&state(Some(first))));
+        f.add_stage();
+        // A battery notification, or the answer after a write: the edit stays.
+        f.follow(Some(&state(None)));
+        assert_eq!((f.polling, f.stages.len()), (500, 3));
+        // The daemon went away; the one that comes back applied nothing yet.
+        f.follow(None);
+        assert_eq!(f, MouseForm::default());
+        f.follow(Some(&state(None)));
+        assert_eq!(f, MouseForm::default());
+        // And what it applies later seeds the form again.
+        f.follow(Some(&state(Some(MouseSettings {
+            polling_hz: Some(125),
+            ..MouseSettings::default()
+        }))));
+        assert_eq!(f.polling, 125);
+    }
+
+    /// An awake mouse (it has a battery reading) that reports `sleep_secs`.
+    fn reporting(sleep_secs: Option<u16>, written: Option<u8>) -> gg_ipc::MouseState {
+        gg_ipc::MouseState {
+            connected: true,
+            battery: Some(gg_ipc::BatteryState {
+                level: 50,
+                charging: false,
+            }),
+            applied: written.map(|m| MouseSettings {
+                sleep_minutes: Some(m),
+                ..MouseSettings::default()
+            }),
+            sleep_secs,
+            ..gg_ipc::MouseState::default()
+        }
+    }
+
+    #[test]
+    fn what_the_mouse_reports_fills_the_form_where_nothing_was_written() {
+        let mut m = reporting(Some(1200), None);
+        m.radio = Some(MouseRadio::Stable);
+        m.reported_polling_hz = Some(125);
+        m.reported_dpi = Some(MouseDpi {
+            stages: vec![DpiStage { x: 400, y: 400 }, DpiStage { x: 500, y: 400 }],
+            active: 1,
+        });
+        let mut f = MouseForm::default();
+        f.follow(Some(&m));
+        assert_eq!(
+            (f.stages.clone(), f.split, f.active, f.polling, f.radio),
+            (
+                vec![Stage::both(400), Stage { x: 500, y: 400 }],
+                true,
+                1,
+                125,
+                MouseRadio::Stable
+            )
+        );
+        assert_eq!(
+            reported_summary(&m),
+            "400 / 500×400 dpi · stage 2 · 125 Hz · sleep after 20 min · wireless: Wireless Stability"
+        );
+        // What the mouse reports wins over what was written; what it doesn't report
+        // comes from what was written.
+        m.applied = Some(MouseSettings {
+            polling_hz: Some(500),
+            radio: Some(MouseRadio::Normal),
+            ..MouseSettings::default()
+        });
+        let mut g = MouseForm::default();
+        g.follow(Some(&m));
+        assert_eq!(
+            (g.polling, g.stages.len(), g.radio),
+            (125, 2, MouseRadio::Stable)
+        );
+        m.reported_polling_hz = None;
+        m.radio = None;
+        let mut g = MouseForm::default();
+        g.follow(Some(&m));
+        assert_eq!((g.polling, g.radio), (500, MouseRadio::Normal));
+        // A pick is sent as it is; the modes are in the menu's order.
+        g.pick_radio(2);
+        assert!(matches!(
+            g.radio_request(true),
+            Request::SetMouseRadio {
+                radio: MouseRadio::HighEfficiency,
+                save: true
+            }
+        ));
+        g.pick_radio(9);
+        assert_eq!(g.radio, MouseRadio::HighEfficiency);
+    }
+
+    #[test]
+    fn the_cards_note_says_what_is_read_or_why_not() {
+        let m = reporting(Some(600), None);
+        assert!(reported_note(false, Some(&m)).starts_with("Only the battery is read"));
+        assert_eq!(
+            reported_note(true, Some(&m)),
+            "The mouse reports: sleep after 10 min."
+        );
+        let asleep = reporting(None, None);
+        assert!(reported_note(true, Some(&asleep)).contains("once it's awake"));
+        assert!(reported_note(true, None).contains("once it's awake"));
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn the_wheel_goes_with_the_buttons_only_while_its_gate_is_on() {
+        let mut f = MouseForm::default();
+        let Request::SetMouseButtons { actions, .. } = f.buttons_request(false) else {
+            panic!("not a buttons request");
+        };
+        assert_eq!(
+            actions, FACTORY_BUTTONS,
+            "gate off: the six alone, as before"
+        );
+        f.pick_wheel(0, 3);
+        f.pick_wheel(5, 0);
+        f.pick_wheel(1, 99);
+        assert_eq!(
+            f.wheel,
+            ["button4", "scrolldown"],
+            "picks past the menus change nothing"
+        );
+        assert_eq!(f.wheel_menu(), [3, 0]);
+        assert_eq!(f.buttons, FACTORY_BUTTONS, "the buttons are left alone");
+        f.wheel_gate = true;
+        let Request::SetMouseButtons { actions, save } = f.buttons_request(true) else {
+            panic!("not a buttons request");
+        };
+        assert_eq!((actions.len(), save), (8, true));
+        assert_eq!(actions[6..], ["button4", "scrolldown"]);
+    }
+
+    /// Turned up, the wheel's row offers what a button's does, as GG's wheel menu does
+    /// (captures rival-8 to rival-10): every action, and a key or a media key from the
+    /// lists. Turned down, only the two entries a capture shows there (review R2, M1).
+    #[test]
+    fn the_wheel_rows_offer_what_a_capture_shows_for_each_direction() {
+        let mut f = MouseForm::default();
+        f.pick_wheel(0, 5);
+        assert_eq!(f.wheel[0], "button6");
+        f.pick_wheel(0, KEY_ITEM);
+        assert_eq!(
+            f.picker.as_ref().map(|p| (p.button, p.list)),
+            Some((WHEEL_ROW, KeyList::Keys))
+        );
+        assert_eq!(f.wheel_menu()[0], KEY_ITEM as i32);
+        assert_eq!(
+            f.button_menu(),
+            [0, 1, 2, 3, 4, 6],
+            "no button's list is open"
+        );
+        f.filter_keys("a");
+        f.pick_key(0);
+        assert_eq!((f.wheel[0].as_str(), f.picker.clone()), ("a", None));
+        assert_eq!(f.wheel_keys(), ["Key: A", ""]);
+        f.pick_wheel(0, MEDIA_ITEM);
+        f.filter_keys("Volume up");
+        f.pick_key(0);
+        assert_eq!(f.wheel[0], "volumeup");
+        assert_eq!(f.wheel_menu(), [13, 0]);
+        // Turned down: scroll down or Button 4, nothing else, and no key lists.
+        f.pick_wheel(1, 1);
+        assert_eq!(f.wheel[1], "button4");
+        f.pick_wheel(1, 2);
+        f.pick_button(WHEEL_ROW + 1, KEY_ITEM);
+        assert_eq!((f.wheel[1].as_str(), f.picker.clone()), ("button4", None));
+        assert_eq!(f.wheel_menu(), [13, 1]);
+        assert_eq!(f.buttons, FACTORY_BUTTONS, "the buttons are left alone");
+        f.wheel[1] = "scrollup".into();
+        assert_eq!(f.wheel_menu()[1], -1);
+        assert_eq!(f.wheel_keys()[1], "Set elsewhere: scrollup");
+        // An action picked on the row with the open list closes it.
+        f.pick_wheel(0, KEY_ITEM);
+        f.pick_wheel(0, 15);
+        assert_eq!((f.wheel[0].as_str(), f.picker.clone()), ("disable", None));
+    }
+
+    #[test]
+    fn the_wheel_is_seeded_from_what_was_written_and_reset_with_the_buttons() {
+        let eight = names(&[
+            "button1",
+            "button2",
+            "button3",
+            "button4",
+            "button5",
+            "dpi",
+            "button4",
+            "scrolldown",
+        ]);
+        let mut f = MouseForm::default();
+        f.seed(&MouseSettings {
+            buttons: Some(eight.clone()),
+            ..MouseSettings::default()
+        });
+        assert_eq!((f.buttons.len(), f.wheel_menu()), (6, vec![3, 0]));
+        f.factory_buttons();
+        assert_eq!(
+            f.wheel_menu(),
+            [7, 0],
+            "reset to factory resets the wheel too"
+        );
+        assert_eq!(
+            summarise(&MouseSettings {
+                buttons: Some(eight),
+                ..MouseSettings::default()
+            }),
+            "button layout and wheel"
+        );
+        let mut g = MouseForm::default();
+        g.seed(&MouseSettings {
+            buttons: Some(names(&FACTORY_BUTTONS)),
+            ..MouseSettings::default()
+        });
+        assert_eq!(
+            g.wheel_menu(),
+            [7, 0],
+            "six written: the wheel stays factory"
+        );
+    }
+
+    /// The app's copy of the state keeps the old readings when only the battery goes to
+    /// none (that notification carries nothing else): they aren't shown or taken.
+    #[test]
+    fn an_asleep_mouse_shows_none_of_what_it_said_before() {
+        let mut m = reporting(Some(1200), Some(10));
+        m.reported_polling_hz = Some(125);
+        m.battery = None;
+        assert!(asleep(&m));
+        let note = reported_note(true, Some(&m));
+        assert!(note.contains("asleep") && !note.contains("125"), "{note}");
+        let mut f = MouseForm::default();
+        f.follow(Some(&m));
+        assert_eq!(f.polling, 1000, "not taken from an asleep mouse");
+        assert_eq!(f.sleep, 10, "what was written seeds it instead");
+        // Not connected isn't asleep: there's nothing to wake.
+        m.connected = false;
+        assert!(!asleep(&m));
+    }
+
+    #[test]
+    fn the_sleep_timer_comes_from_the_mouse_once_and_then_stays_as_edited() {
+        let mut f = MouseForm::default();
+        assert_eq!(f.sleep, 5, "GG's default before anything is known");
+        f.follow(Some(&reporting(None, None)));
+        assert_eq!(f.sleep, 5);
+        f.follow(Some(&reporting(Some(1200), None)));
+        assert_eq!(f.sleep, 20);
+        f.set_sleep(10);
+        // A later reading (a poll) doesn't undo what's being edited.
+        f.follow(Some(&reporting(Some(1200), None)));
+        assert_eq!(f.sleep, 10);
+        // Without a reading (gate off), what was written seeds it.
+        let mut g = MouseForm::default();
+        g.follow(Some(&reporting(None, Some(15))));
+        assert_eq!(g.sleep, 15);
+    }
+
+    #[test]
+    fn the_sleep_timer_sent_is_kept_to_what_the_mouse_takes() {
+        let mut f = MouseForm::default();
+        for (typed, kept) in [(0, 1), (1, 1), (20, 20), (99, 20), (-3, 1)] {
+            f.set_sleep(typed);
+            assert_eq!(f.sleep, kept, "{typed}");
+        }
+        f.set_sleep(12);
+        assert!(matches!(
+            f.sleep_request(false),
+            Request::SetMouseSleep { minutes: 12 }
+        ));
+        assert_eq!(sleep_read(Some(600)), "The mouse reports 10 min.");
+        assert_eq!(sleep_read(Some(90)), "The mouse reports 1 min 30 s.");
+        assert_eq!(sleep_read(None), "");
+    }
+}

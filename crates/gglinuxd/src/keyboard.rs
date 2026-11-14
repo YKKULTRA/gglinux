@@ -11,25 +11,47 @@
 //! so the OLED doesn't burn in. The switch settings live in the keyboard's
 //! RAM, so they're sent once each time it connects. All off by default: a fresh
 //! install never touches the keyboard.
+//!
+//! The board drawn follows the keyboard's region (US, ISO or JIS). It's asked once a
+//! connection, the first time gglinux takes the keyboard anyway ([`read_region`]), so
+//! a fresh install still sends nothing; the US board is drawn until then.
+//!
+//! This file keeps the loop, the lighting, opening and closing the keyboard and the
+//! routing of [`Command`]s. The screen is [`screen`] (with its [`screen::ScreenSource`]s)
+//! and the switches [`switches`]. Key bindings and the onboard slots each have a module
+//! their unit fills in without touching this one: [`bindings`] and [`onboard`], each a
+//! `Store` the worker holds, an `on_command` for its `Cmd`s, an `on_connect` run once the
+//! keyboard has opened and had its switches again, and a `handle` for `main`'s requests.
+//! The open keyboard lets a gated command family out only while its experimental gate
+//! is on ([`Command::SetExperimental`]).
 
 mod audio;
+pub mod bindings;
 mod effects;
+mod idle;
+pub mod macros;
 mod mic;
+pub mod onboard;
 mod reader;
+mod reflect;
+mod screen;
 mod spectrum;
+mod switches;
+mod zones;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gg_device_keyboard::layout::ANSI_TKL;
+use gg_device_keyboard::layout::{for_region, Key, REGIONS};
 use gg_device_keyboard::proto::ANALOG_KEYS;
-use gg_device_keyboard::{oled, Bitmap, Keyboard, Rgb};
+use gg_device_keyboard::{Families, Keyboard, Rgb};
 use gg_ipc::{
-    Effect, Event, KeyInfo, KeyboardState, Lighting, ReactiveStatus, Screen, ScreenCare, Switches,
-    TapMode,
+    Event, Experimental, Feature, KeyInfo, KeyboardState, Lighting, MicMuteLight, ReactiveStatus,
+    Screen, ScreenCare, Switches, Zone,
 };
 use hidapi::HidApi;
 use serde::{de::DeserializeOwned, Serialize};
@@ -39,7 +61,10 @@ use tracing::{debug, error, info, warn};
 use crate::clock::is_older_than;
 use audio::{Capture, Levels};
 use reader::{OpenError, Reader};
+pub use screen::Overlaid;
+use screen::ScreenState;
 use spectrum::BANDS;
+use switches::SwitchesState;
 
 const FRAME: Duration = Duration::from_millis(33);
 const STATIC_REFRESH: Duration = Duration::from_secs(2);
@@ -48,11 +73,6 @@ const IDLE_WAIT: Duration = Duration::from_millis(500);
 /// The most key presses held for reactive lighting; older ones are dropped first.
 const MAX_HITS: usize = 32;
 const MIC_POLL: Duration = Duration::from_millis(500);
-/// How often an unchanged screen picture is sent again, in case the keyboard's own menus
-/// (the volume roller, the media button) drew over it.
-const SCREEN_REFRESH: Duration = Duration::from_secs(10);
-/// How long the picture stays put before it moves a pixel, with screen care's shift on.
-const SHIFT_EVERY: u64 = 120;
 
 /// Colours by HID code, drawn over the lighting.
 pub type Layer = HashMap<u8, Rgb>;
@@ -62,6 +82,12 @@ pub type Layer = HashMap<u8, Rgb>;
 pub trait Overlay: Send + Sync {
     /// The keys it paints at `now`, or `None` while inactive.
     fn paint(&self, now: Instant) -> Option<Layer>;
+
+    /// What it shows on the keyboard's screen at `now`, over the screen setting, or `None`
+    /// while it shows nothing there.
+    fn screen(&self, _now: Instant) -> Option<Overlaid> {
+        None
+    }
 }
 
 type Reply<T> = oneshot::Sender<Result<T, String>>;
@@ -107,8 +133,24 @@ pub enum Command {
     /// The visualizer should listen to this output (a `node.name`), or to the
     /// default output when `None`. From Sonar; no reply.
     ListenTo(Option<String>),
+    /// For the key bindings: see [`bindings`].
+    Bindings(bindings::Cmd),
+    /// For the onboard profile slots: see [`onboard`].
+    Onboard(onboard::Cmd),
+    /// For the keyboard macros: see [`macros`].
+    Macros(macros::Cmd),
+    /// The experimental gates as they are now. The open keyboard, and every keyboard
+    /// opened from now on, lets a gated command family out only while its gate is on.
+    /// No reply.
+    SetExperimental(Experimental),
     /// Hand the lighting back and stop. Replies once the keyboard has been told.
     Shutdown(Reply<()>),
+    /// Send a feature report through the open keyboard's allowlist and read the answer.
+    #[cfg(test)]
+    Exchange {
+        report: Vec<u8>,
+        reply: Reply<Vec<u8>>,
+    },
 }
 
 /// Names only: a `Pressed` never prints its key.
@@ -127,7 +169,13 @@ impl std::fmt::Debug for Command {
             Command::AudioStopped => "AudioStopped",
             Command::MicMuted(_) => "MicMuted",
             Command::ListenTo(_) => "ListenTo",
+            Command::Bindings(_) => "Bindings",
+            Command::Onboard(_) => "Onboard",
+            Command::Macros(_) => "Macros",
+            Command::SetExperimental(_) => "SetExperimental",
             Command::Shutdown(_) => "Shutdown",
+            #[cfg(test)]
+            Command::Exchange { .. } => "Exchange",
         })
     }
 }
@@ -135,6 +183,9 @@ impl std::fmt::Debug for Command {
 #[derive(Clone)]
 pub struct Handle {
     tx: Sender<Command>,
+    /// Slot writes asked for and not ended yet, shared by every clone: `main` waits for
+    /// them before it stops the daemon.
+    slot_writes: onboard::Writes,
 }
 
 impl Handle {
@@ -142,7 +193,19 @@ impl Handle {
     /// a wake or a `listen_to` from another part goes nowhere.
     pub fn off() -> Handle {
         let (tx, _) = mpsc::channel();
-        Handle { tx }
+        Handle::on(tx)
+    }
+
+    fn on(tx: Sender<Command>) -> Handle {
+        Handle {
+            tx,
+            slot_writes: onboard::Writes::default(),
+        }
+    }
+
+    /// The onboard slot writes asked for and not ended yet.
+    pub fn slot_writes(&self) -> &onboard::Writes {
+        &self.slot_writes
     }
 
     pub async fn send<T>(&self, make: impl FnOnce(Reply<T>) -> Command) -> Result<T, String> {
@@ -165,20 +228,81 @@ impl Handle {
     pub fn listen_to(&self, output: Option<String>) {
         let _ = self.tx.send(Command::ListenTo(output));
     }
+
+    /// Tell the worker the experimental gates changed; fire and forget. Commands sent
+    /// after this one find them changed.
+    pub fn set_experimental(&self, experimental: Experimental) {
+        let _ = self.tx.send(Command::SetExperimental(experimental));
+    }
 }
 
-pub fn spawn(event_tx: broadcast::Sender<Event>, overlays: Vec<Arc<dyn Overlay>>) -> Handle {
+/// Start the keyboard worker, with the experimental gates as they are at start.
+pub fn spawn(
+    event_tx: broadcast::Sender<Event>,
+    overlays: Vec<Arc<dyn Overlay>>,
+    experimental: Experimental,
+) -> Handle {
     let (tx, rx) = mpsc::channel();
     let readers_tx = tx.clone();
     std::thread::Builder::new()
         .name("gg-keyboard".into())
-        .spawn(move || worker(rx, readers_tx, event_tx, overlays))
+        .spawn(move || worker(rx, readers_tx, event_tx, overlays, experimental))
         .expect("spawn gg-keyboard thread");
-    Handle { tx }
+    Handle::on(tx)
+}
+
+/// A worker on `device`, a keyboard over a fake transport, open from the start, with its
+/// settings in `config_dir` and no device list: it never opens anything else. The
+/// keyboard counts as asked its region already, with no answer (the US board), so a test
+/// sees only the reports of what it tests; [`spawn_fake_unasked`] opens it as a real one
+/// opens.
+#[cfg(test)]
+pub fn spawn_fake(
+    device: Keyboard,
+    config_dir: PathBuf,
+    event_tx: broadcast::Sender<Event>,
+    experimental: Experimental,
+) -> Handle {
+    spawn_fake_on(device, config_dir, event_tx, experimental, Some(None))
+}
+
+/// [`spawn_fake`] on a keyboard not asked its region yet, as every real one opens: it's
+/// asked the first time gglinux takes it.
+#[cfg(test)]
+pub fn spawn_fake_unasked(
+    device: Keyboard,
+    config_dir: PathBuf,
+    event_tx: broadcast::Sender<Event>,
+    experimental: Experimental,
+) -> Handle {
+    spawn_fake_on(device, config_dir, event_tx, experimental, None)
+}
+
+#[cfg(test)]
+fn spawn_fake_on(
+    device: Keyboard,
+    config_dir: PathBuf,
+    event_tx: broadcast::Sender<Event>,
+    experimental: Experimental,
+    region: Option<Option<u8>>,
+) -> Handle {
+    let (tx, rx) = mpsc::channel();
+    let worker_tx = tx.clone();
+    std::thread::Builder::new()
+        .name("gg-keyboard-fake".into())
+        .spawn(move || {
+            let mut state = State::new(None, &config_dir, worker_tx, Vec::new(), experimental);
+            connected(&mut state, device);
+            state.region = region;
+            run(state, &rx, &event_tx);
+        })
+        .expect("spawn gg-keyboard-fake thread");
+    Handle::on(tx)
 }
 
 struct State {
-    api: HidApi,
+    /// The device list; `None` in tests, which open nothing.
+    api: Option<HidApi>,
     device: Option<Keyboard>,
     /// Whether this handle has taken the lighting over (init sent).
     taken: bool,
@@ -212,24 +336,74 @@ struct State {
     listen_to: Option<String>,
     mic_watch: Option<mic::Watch>,
     mic_muted: bool,
-    switches: Switches,
-    switches_path: PathBuf,
-    /// What sending the switches to the open keyboard gave; `None`: not sent to it yet.
-    switches_sent: Option<Result<(), String>>,
-    screen: Screen,
-    screen_path: PathBuf,
-    /// Whether gglinux has drawn on this keyboard's screen since it connected.
-    screen_taken: bool,
-    /// The picture last sent, and when, so an unchanged one isn't sent every loop.
-    screen_shown: Option<Bitmap>,
-    screen_last: Option<Instant>,
-    screen_error: Option<String>,
-    care: ScreenCare,
-    care_path: PathBuf,
-    /// Nobody is at the computer, as [`crate::presence`] last said.
-    away: bool,
-    /// The screen is dark for that right now.
-    resting: bool,
+    /// When the desktop said nobody is there, for the idle scene.
+    idle: idle::Idle,
+    /// Whether the idle scene is drawn now.
+    idle_shown: bool,
+    /// The screen's colours for Reflect zones.
+    reflect: reflect::Reflect,
+    switches: SwitchesState,
+    screen: ScreenState,
+    bindings: bindings::Store,
+    onboard: onboard::Store,
+    macros: macros::Store,
+    /// The experimental gates, as last told; the open keyboard's families follow them.
+    experimental: Experimental,
+    /// The keyboard opened since the last loop: `on_connect` is due once its switches
+    /// have gone out again.
+    just_opened: bool,
+    /// The open keyboard's region byte, once it's been asked on this connection
+    /// (`Some(None)`: it didn't say). See [`read_region`].
+    region: Option<Option<u8>>,
+}
+
+impl State {
+    fn new(
+        api: Option<HidApi>,
+        config_dir: &Path,
+        tx: Sender<Command>,
+        overlays: Vec<Arc<dyn Overlay>>,
+        experimental: Experimental,
+    ) -> State {
+        let settings_path = config_dir.join("lighting.json");
+        State {
+            api,
+            device: None,
+            taken: false,
+            last_open_attempt: None,
+            last_frame: None,
+            lighting: on_board(load(&settings_path, "lighting"), None),
+            settings_path,
+            positions: effects::positions(board(None)),
+            started: Instant::now(),
+            published: None,
+            tx,
+            reader: None,
+            last_reader_attempt: None,
+            reactive: ReactiveStatus::Off,
+            hits: Vec::new(),
+            overlays,
+            layers: Vec::new(),
+            overlay_was_active: false,
+            levels: Arc::new(Mutex::new([0.0; BANDS])),
+            capture: None,
+            last_capture_attempt: None,
+            listen_to: None,
+            mic_watch: None,
+            mic_muted: false,
+            idle: idle::Idle::default(),
+            idle_shown: false,
+            reflect: reflect::Reflect::portal(),
+            switches: SwitchesState::load(config_dir),
+            screen: ScreenState::load(config_dir),
+            bindings: bindings::Store::load(config_dir),
+            onboard: onboard::Store::load(config_dir),
+            macros: macros::Store::load(config_dir),
+            experimental,
+            just_opened: false,
+            region: None,
+        }
+    }
 }
 
 fn worker(
@@ -237,6 +411,7 @@ fn worker(
     tx: Sender<Command>,
     event_tx: broadcast::Sender<Event>,
     overlays: Vec<Arc<dyn Overlay>>,
+    experimental: Experimental,
 ) {
     let hid = gg_hid::lock();
     let api = match HidApi::new() {
@@ -247,54 +422,15 @@ fn worker(
         }
     };
     drop(hid);
-    let settings_path = gg_ipc::config_dir().join("lighting.json");
-    let switches_path = gg_ipc::config_dir().join("switches.json");
-    let screen_path = gg_ipc::config_dir().join("screen.json");
-    let care_path = gg_ipc::config_dir().join("screen-care.json");
-    let mut state = State {
-        api,
-        device: None,
-        taken: false,
-        last_open_attempt: None,
-        last_frame: None,
-        lighting: load(&settings_path, "lighting"),
-        settings_path,
-        positions: effects::positions(),
-        started: Instant::now(),
-        published: None,
-        tx,
-        reader: None,
-        last_reader_attempt: None,
-        reactive: ReactiveStatus::Off,
-        hits: Vec::new(),
-        overlays,
-        layers: Vec::new(),
-        overlay_was_active: false,
-        levels: Arc::new(Mutex::new([0.0; BANDS])),
-        capture: None,
-        last_capture_attempt: None,
-        listen_to: None,
-        mic_watch: None,
-        mic_muted: false,
-        switches: load(&switches_path, "switch"),
-        switches_path,
-        switches_sent: None,
-        screen: load(&screen_path, "screen"),
-        screen_path,
-        screen_taken: false,
-        screen_shown: None,
-        screen_last: None,
-        screen_error: None,
-        care: load(&care_path, "screen care"),
-        care_path,
-        away: false,
-        resting: false,
-    };
+    let state = State::new(Some(api), &gg_ipc::config_dir(), tx, overlays, experimental);
+    run(state, &rx, &event_tx);
+}
 
+fn run(mut state: State, rx: &Receiver<Command>, event_tx: &broadcast::Sender<Event>) {
     loop {
         match rx.recv_timeout(next_wait(&state)) {
             Ok(command) => {
-                if !handle(command, &mut state, &event_tx) {
+                if !handle(command, &mut state, event_tx) {
                     return;
                 }
             }
@@ -303,7 +439,7 @@ fn worker(
             // which main sends on exit. Kept as a fallback.
             Err(RecvTimeoutError::Disconnected) => {
                 hand_back(&mut state);
-                release_screen(&mut state);
+                state.screen.release(state.device.as_ref());
                 return;
             }
         }
@@ -312,11 +448,21 @@ fn worker(
         }
         let now = Instant::now();
         state.layers = state.overlays.iter().filter_map(|o| o.paint(now)).collect();
+        // A game's screen frame goes over the screen setting while it's due.
+        state
+            .screen
+            .set_overlay(state.overlays.iter().find_map(|o| o.screen(now)));
         let overlay_active = !state.layers.is_empty();
         if overlay_ended(state.overlay_was_active, overlay_active) {
             state.last_frame = None;
         }
         state.overlay_was_active = overlay_active;
+        let idle_now = state.lighting.enabled && state.idle.showing(&state.lighting.idle, now);
+        if idle_now != state.idle_shown {
+            // The other scene, drawn at once.
+            state.idle_shown = idle_now;
+            state.last_frame = None;
+        }
         if should_look_for(
             state.device.is_some(),
             drawing(state.lighting.enabled, !state.layers.is_empty()),
@@ -326,6 +472,7 @@ fn worker(
         sync_reader(&mut state);
         sync_audio(&mut state);
         sync_mic(&mut state);
+        sync_reflect(&mut state);
         if should_hand_back(
             state.taken,
             state.lighting.enabled,
@@ -333,17 +480,40 @@ fn worker(
         ) {
             hand_back(&mut state);
         }
+        // Before anything below sends: lighting, switches, bindings, the screen.
+        read_region(&mut state, event_tx);
         render(&mut state);
-        sync_switches(&mut state);
-        render_screen(&mut state);
-        publish(&mut state, &event_tx);
+        state
+            .switches
+            .sync_board(state.device.as_ref(), board(state.region));
+        // A deep-press binding sticks only on a key with a point: the points go first.
+        state.bindings.set_deep_keys(state.switches.points());
+        let points_sent = state.switches.take_points_sent();
+        if std::mem::take(&mut state.just_opened) {
+            if let Some(device) = state.device.as_ref() {
+                let exp = &state.experimental;
+                bindings::on_connect(&mut state.bindings, device, exp, event_tx);
+                onboard::on_connect(&mut state.onboard, device, exp, event_tx);
+            }
+        } else if points_sent {
+            if let Some(device) = state.device.as_ref() {
+                bindings::on_points_sent(
+                    &mut state.bindings,
+                    device,
+                    &state.experimental,
+                    event_tx,
+                );
+            }
+        }
+        state.screen.render(state.device.as_ref());
+        publish(&mut state, event_tx);
     }
 }
 
-/// How often frames are due: fast for animated effects, while presses show,
-/// and while an overlay draws.
-fn interval(lighting: &Lighting, live_hits: bool, overlay_active: bool) -> Duration {
-    if effects::animated(&lighting.effect) || live_hits || overlay_active {
+/// How often frames are due: fast while a zone of the stack animates, while presses
+/// show, and while an overlay draws.
+fn interval(stack: &[Zone], live_hits: bool, overlay_active: bool) -> Duration {
+    if zones::animated(stack) || live_hits || overlay_active {
         FRAME
     } else {
         STATIC_REFRESH
@@ -358,34 +528,41 @@ fn next_wait(state: &State) -> Duration {
         } else {
             state.last_frame.map_or(Duration::ZERO, |t| {
                 interval(
-                    &state.lighting,
+                    &active_stack(state),
                     !state.hits.is_empty(),
                     !state.layers.is_empty(),
                 )
                 .saturating_sub(t.elapsed())
             })
         };
-    match screen_wait(&state.screen, state.device.is_some()) {
+    // The idle scene starts on time.
+    let idle = state
+        .idle
+        .due_in(&state.lighting.idle, Instant::now())
+        .filter(|_| state.lighting.enabled);
+    let lighting = idle.map_or(lighting, |idle| lighting.min(idle));
+    // A screen that changes by itself (a clock) wakes the loop in time.
+    match state.screen.wait(state.device.is_some()) {
         Some(screen) => lighting.min(screen),
         None => lighting,
     }
 }
 
-/// A clock on the screen wakes the loop just after each second turns.
-fn screen_wait(screen: &Screen, connected: bool) -> Option<Duration> {
-    if !connected || !matches!(screen, Screen::Clock { .. }) {
-        return None;
+/// The zone stack drawn now: the idle scene's while it shows, else the usual one.
+fn active_stack(state: &State) -> Cow<'_, [Zone]> {
+    if state.idle_shown {
+        Cow::Borrowed(&state.lighting.idle.zones)
+    } else {
+        state.lighting.stack()
     }
-    let into_second = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_millis())
-        .unwrap_or(0);
-    Some(Duration::from_millis(u64::from(1000 - into_second) + 5))
 }
 
-/// Whether key presses should be read right now.
+/// Whether key presses should be read right now: for the reactive lighting over every
+/// key, or for a reactive zone.
 fn wants_reader(lighting: &Lighting, connected: bool) -> bool {
-    lighting.enabled && lighting.reactive.enabled && connected
+    lighting.enabled
+        && (lighting.reactive.enabled || zones::reactive(&lighting.stack()))
+        && connected
 }
 
 /// Whether gglinux draws on the keyboard: its own lighting, or an overlay taking it over.
@@ -421,8 +598,8 @@ fn wake_forces_frame(last_frame: Option<Instant>) -> bool {
     is_older_than(last_frame, FRAME)
 }
 
-fn wants_audio(lighting: &Lighting, drawing: bool) -> bool {
-    drawing && matches!(lighting.effect, Effect::Visualizer { .. })
+fn wants_audio(stack: &[Zone], drawing: bool) -> bool {
+    drawing && zones::listens(stack)
 }
 
 fn wants_mic(lighting: &Lighting, connected: bool) -> bool {
@@ -438,10 +615,27 @@ fn mic_color(mic: Option<(u8, gg_ipc::Rgb)>, code: u8) -> Option<Rgb> {
     })
 }
 
+/// The board drawn for `region` as [`State::region`] keeps it: the keyboard's own once
+/// it's been asked, US until then.
+fn board(region: Option<Option<u8>>) -> &'static [Key] {
+    for_region(region.flatten())
+}
+
+/// Whether the keyboard has a key with this code: on its own board once its region has
+/// been asked, on any of the boards until then, so a key saved on an ISO board isn't
+/// lost before the keyboard is asked.
+fn has_key(region: Option<Option<u8>>, code: u8) -> bool {
+    let on = |board: &[Key]| board.iter().any(|k| k.0 == code);
+    match region {
+        Some(region) => on(for_region(region)),
+        None => REGIONS.iter().any(|&(_, r)| on(for_region(Some(r)))),
+    }
+}
+
 /// Settings that name keys must name keys this keyboard has.
-fn check_keys(lighting: &Lighting) -> Result<(), String> {
+fn check_keys(lighting: &Lighting, region: Option<Option<u8>>) -> Result<(), String> {
     let key = lighting.mic_mute.key;
-    if !ANSI_TKL.iter().any(|k| k.0 == key) {
+    if !has_key(region, key) {
         return Err(format!(
             "the mic-mute key {key:#04x} is not on this keyboard"
         ));
@@ -449,11 +643,76 @@ fn check_keys(lighting: &Lighting) -> Result<(), String> {
     Ok(())
 }
 
+/// `lighting` with its mute light on the default key if the keyboard lacks the saved one:
+/// older settings have Pause, which this keyboard doesn't have, and a change would
+/// otherwise be refused for it.
+fn on_board(mut lighting: Lighting, region: Option<Option<u8>>) -> Lighting {
+    if check_keys(&lighting, region).is_err() {
+        lighting.mic_mute.key = MicMuteLight::default().key;
+    }
+    lighting
+}
+
+/// Whether gglinux sends the open keyboard anything of its own now: its lighting or an
+/// overlay's, switches that are on, a screen of gglinux's, or key bindings that are on
+/// with their gate. The onboard slots' reads and writes don't count.
+fn takes_keyboard(state: &mut State, event_tx: &broadcast::Sender<Event>) -> bool {
+    drawing(state.lighting.enabled, !state.layers.is_empty())
+        || state.switches.settings().enabled
+        || state.screen.draws()
+        || (state.experimental.keyboard_bindings && bindings_on(state, event_tx))
+}
+
+/// Whether the key bindings are on, asked through the bindings module's own `Get`, as
+/// `main` asks.
+fn bindings_on(state: &mut State, event_tx: &broadcast::Sender<Event>) -> bool {
+    let (reply, mut answer) = oneshot::channel();
+    bindings::on_command(
+        bindings::Cmd::Get(reply),
+        &mut state.bindings,
+        None,
+        &state.experimental,
+        event_tx,
+    );
+    answer
+        .try_recv()
+        .is_ok_and(|got| got.is_ok_and(|b| b.enabled))
+}
+
+/// Ask the open keyboard its region the first time gglinux takes it on this connection
+/// ([`takes_keyboard`]), before anything else is sent. Until then nothing is, not even
+/// this question.
+fn read_region(state: &mut State, event_tx: &broadcast::Sender<Event>) {
+    if state.region.is_none() && state.device.is_some() && takes_keyboard(state, event_tx) {
+        ask_region(state);
+    }
+}
+
+/// Ask the open keyboard its region, if it hasn't been asked on this connection: the
+/// board drawn, where the effects find each key and the mute key follow it. A keyboard
+/// that doesn't answer gets the US board, and isn't asked again until it reconnects.
+fn ask_region(state: &mut State) {
+    let Some(device) = state.device.as_ref() else {
+        return;
+    };
+    if state.region.is_some() {
+        return;
+    }
+    let region = device.region().unwrap_or_else(|e| {
+        debug!(error = %format!("{e:#}"), "the keyboard did not say its region");
+        None
+    });
+    info!(?region, "keyboard region read");
+    state.region = Some(region);
+    state.positions = effects::positions(board(state.region));
+    state.lighting = on_board(std::mem::take(&mut state.lighting), state.region);
+}
+
 /// Run the visualizer's audio capture exactly while it's drawn.
 fn sync_audio(state: &mut State) {
     let on_screen =
         state.device.is_some() && drawing(state.lighting.enabled, !state.layers.is_empty());
-    if !wants_audio(&state.lighting, on_screen) {
+    if !wants_audio(&active_stack(state), on_screen) {
         if state.capture.take().is_some() {
             *state.levels.lock().unwrap_or_else(|e| e.into_inner()) = [0.0; BANDS];
         }
@@ -489,6 +748,30 @@ fn sync_mic(state: &mut State) {
     }
 }
 
+/// Look at the screen exactly while a Reflect zone is drawn, and only with its gate on.
+fn sync_reflect(state: &mut State) {
+    let drawn =
+        state.device.is_some() && state.lighting.enabled && zones::reflects(&active_stack(state));
+    let wanted = match state.experimental.refusal(Feature::LightingReflect) {
+        _ if !drawn => Ok(false),
+        Some(why) => Err(why),
+        None => Ok(true),
+    };
+    let now = Instant::now();
+    state.reflect.sync(wanted, now);
+    state.reflect.sample(board(state.region), now);
+}
+
+/// A lighting that brings Reflect in is refused while its gate is off. One that already
+/// had it may still change otherwise; its Reflect zones stay see-through until the gate
+/// is on.
+fn check_reflect(new: &Lighting, now: &Lighting, gates: &Experimental) -> Result<(), String> {
+    match gates.refusal(Feature::LightingReflect) {
+        Some(why) if new.uses_reflect() && !now.uses_reflect() => Err(why),
+        _ => Ok(()),
+    }
+}
+
 /// Keep a press, dropping the oldest past [`MAX_HITS`].
 fn push_hit(hits: &mut Vec<effects::Hit>, hit: effects::Hit) {
     if hits.len() == MAX_HITS {
@@ -510,8 +793,11 @@ fn sync_reader(state: &mut State) {
     if state.reader.is_some() || !is_older_than(state.last_reader_attempt, REOPEN_INTERVAL) {
         return;
     }
+    let Some(api) = state.api.as_ref() else {
+        return;
+    };
     state.last_reader_attempt = Some(Instant::now());
-    match Reader::start(&state.api, state.tx.clone()) {
+    match Reader::start(api, state.tx.clone()) {
         Ok(reader) => {
             info!("reading key presses for reactive lighting");
             state.reader = Some(reader);
@@ -536,45 +822,46 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             let _ = reply.send(Ok(snapshot(state)));
         }
         Command::SetSwitches { switches, reply } => {
-            if let Err(message) = switches.validate().and_then(|()| check_analog(&switches)) {
+            // The loop sends them, if they're on.
+            if let Err(message) = state.switches.set(switches) {
                 let _ = reply.send(Err(message));
                 return true;
             }
-            state.switches = switches;
-            save(&state.switches_path, &state.switches, "switch");
-            state.switches_sent = None; // the loop sends them, if they're on
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
         }
         Command::SetScreen { screen, reply } => {
-            if let Err(message) = screen.validate() {
+            if let Err(message) = state.screen.set(screen) {
                 let _ = reply.send(Err(message));
                 return true;
             }
-            state.screen = screen;
-            save(&state.screen_path, &state.screen, "screen");
-            state.screen_shown = None; // draw the change now
-            state.screen_error = None;
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
         }
         Command::SetScreenCare { care, reply } => {
-            state.care = care;
-            save(&state.care_path, &state.care, "screen care");
-            state.screen_shown = None; // draw the change now
+            state.screen.set_care(care);
             let _ = reply.send(Ok(()));
             publish(state, event_tx);
         }
         Command::SetAway { away, reply } => {
-            if away != state.away {
-                state.away = away;
-                render_screen(state); // now, not at the next loop: sleep may be next
+            state.idle.set_away(away, Instant::now());
+            if state.screen.set_away(away) {
+                // Now, not at the next loop: sleep may be next.
+                read_region(state, event_tx);
+                state.screen.render(state.device.as_ref());
                 publish(state, event_tx);
             }
             let _ = reply.send(Ok(()));
         }
         Command::SetLighting { lighting, reply } => {
-            if let Err(message) = lighting.validate().and_then(|()| check_keys(&lighting)) {
+            let checked = lighting.validate().and_then(|()| {
+                check_reflect(&lighting, &state.lighting, &state.experimental)?;
+                if lighting.enabled {
+                    ask_region(state); // lighting that's on takes the keyboard
+                }
+                check_keys(&lighting, state.region)
+            });
+            if let Err(message) = checked {
                 let _ = reply.send(Err(message));
                 return true;
             }
@@ -619,36 +906,133 @@ fn handle(command: Command, state: &mut State, event_tx: &broadcast::Sender<Even
             state.reactive = ReactiveStatus::Off;
             state.last_reader_attempt = Some(Instant::now()); // retry after REOPEN_INTERVAL
         }
+        Command::Bindings(cmd) => {
+            if state.experimental.keyboard_bindings
+                && matches!(cmd, bindings::Cmd::Set { enabled: true, .. })
+            {
+                ask_region(state); // bindings that are on take the keyboard
+            }
+            state.bindings.set_deep_keys(state.switches.points());
+            bindings::on_command(
+                cmd,
+                &mut state.bindings,
+                state.device.as_ref(),
+                &state.experimental,
+                event_tx,
+            )
+        }
+        Command::Onboard(onboard::Cmd::Load { slot, reply }) => {
+            // The keyboard runs the slot's own bindings and switches once it loads: the
+            // bindings are read again before the next write, gglinux's switches go again.
+            let (tx, mut rx) = oneshot::channel();
+            let cmd = onboard::Cmd::Load { slot, reply: tx };
+            let device = state.device.as_ref();
+            onboard::on_command(
+                cmd,
+                &mut state.onboard,
+                device,
+                &state.experimental,
+                event_tx,
+            );
+            let answer = rx
+                .try_recv()
+                .unwrap_or_else(|_| Err("the load didn't answer".into()));
+            if answer.is_ok() {
+                bindings::on_slot_loaded(&mut state.bindings, event_tx);
+                state.switches.forget();
+            }
+            let _ = reply.send(answer);
+        }
+        Command::Onboard(cmd) => onboard::on_command(
+            cmd,
+            &mut state.onboard,
+            state.device.as_ref(),
+            &state.experimental,
+            event_tx,
+        ),
+        Command::Macros(cmd) => {
+            // The slot the keyboard runs, as the onboard slots know it: named in a write's
+            // note. A write never loads the slot (review R2 K1).
+            let (tx, mut rx) = oneshot::channel();
+            let get = onboard::Cmd::Get(tx);
+            onboard::on_command(get, &mut state.onboard, None, &state.experimental, event_tx);
+            let active = rx
+                .try_recv()
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|s| s.active);
+            let device = state.device.as_ref();
+            let exp = &state.experimental;
+            macros::on_command(cmd, &mut state.macros, device, exp, event_tx, active);
+        }
+        Command::SetExperimental(experimental) => {
+            state.experimental = experimental;
+            if let Some(device) = state.device.as_ref() {
+                device.set_families(families(&experimental));
+            }
+        }
         Command::Shutdown(reply) => {
             hand_back(state);
-            release_screen(state);
+            state.screen.release(state.device.as_ref());
             let _ = reply.send(Ok(()));
             return false;
         }
+        #[cfg(test)]
+        Command::Exchange { report, reply } => {
+            let answer = match state.device.as_ref() {
+                Some(device) => device
+                    .exchange_feature(&report)
+                    .map_err(|e| format!("{e:#}")),
+                None => Err("no keyboard".to_owned()),
+            };
+            let _ = reply.send(answer);
+        }
     }
     true
+}
+
+/// The command families the open keyboard lets out under these gates.
+fn families(experimental: &Experimental) -> Families {
+    Families {
+        bindings: experimental.keyboard_bindings,
+        onboard: experimental.keyboard_onboard,
+        protection: experimental.keyboard_protection,
+    }
 }
 
 fn try_open(state: &mut State) {
     if !is_older_than(state.last_open_attempt, REOPEN_INTERVAL) {
         return;
     }
+    let Some(api) = state.api.as_mut() else {
+        return;
+    };
     state.last_open_attempt = Some(Instant::now());
     let hid = gg_hid::lock();
-    if state.api.refresh_devices().is_err() {
+    if api.refresh_devices().is_err() {
         return;
     }
-    let opened = Keyboard::open(&state.api);
+    let opened = Keyboard::open(api);
     drop(hid);
     match opened {
         Ok(keyboard) => {
             info!("keyboard connected");
-            state.device = Some(keyboard);
-            forget_device(state);
-            state.last_frame = None;
+            connected(state, keyboard);
         }
         Err(e) => debug!(error = %format!("{e:#}"), "keyboard not available"),
     }
+}
+
+/// The keyboard just opened: it has its own settings, and lets out only the command
+/// families the experimental gates allow.
+fn connected(state: &mut State, keyboard: Keyboard) {
+    keyboard.set_families(families(&state.experimental));
+    state.region = None; // asked again: this may be another keyboard
+    state.positions = effects::positions(board(None));
+    state.device = Some(keyboard);
+    forget_device(state);
+    state.last_frame = None;
+    state.just_opened = true;
 }
 
 /// Let the keyboard go if it's gone from the device list, at most every
@@ -657,18 +1041,17 @@ fn look_for(state: &mut State) {
     if !is_older_than(state.last_open_attempt, REOPEN_INTERVAL) {
         return;
     }
+    let Some(api) = state.api.as_mut() else {
+        return;
+    };
     state.last_open_attempt = Some(Instant::now());
     let hid = gg_hid::lock();
-    let refreshed = state.api.refresh_devices();
+    let refreshed = api.refresh_devices();
     drop(hid);
     if refreshed.is_err() {
         return;
     }
-    if state
-        .device
-        .as_ref()
-        .is_some_and(|d| !d.is_listed(&state.api))
-    {
+    if state.device.as_ref().is_some_and(|d| !d.is_listed(api)) {
         info!("keyboard disconnected");
         state.device = None;
         forget_device(state);
@@ -678,10 +1061,8 @@ fn look_for(state: &mut State) {
 /// Forget what was sent to the keyboard: after it (re)connects, it has its own settings.
 fn forget_device(state: &mut State) {
     state.taken = false;
-    state.switches_sent = None;
-    state.screen_taken = false;
-    state.screen_shown = None;
-    state.screen_last = None;
+    state.switches.forget();
+    state.screen.forget();
 }
 
 /// Send a frame if one is due.
@@ -690,13 +1071,14 @@ fn render(state: &mut State) {
     if !drawing(state.lighting.enabled, overlay_active)
         || !is_older_than(
             state.last_frame,
-            interval(&state.lighting, !state.hits.is_empty(), overlay_active),
+            interval(&active_stack(state), !state.hits.is_empty(), overlay_active),
         )
     {
         return;
     }
     let t = state.started.elapsed().as_secs_f64();
-    let duration = f64::from(state.lighting.reactive.duration_s);
+    let longest = zones::press_duration(&active_stack(state));
+    let duration = f64::from(state.lighting.reactive.duration_s.max(longest));
     state.hits.retain(|h| t - h.t < duration);
     let hits = &state.hits;
     let layers = &state.layers;
@@ -706,14 +1088,26 @@ fn render(state: &mut State) {
     let Some(device) = state.device.as_ref() else {
         return;
     };
-    let result = if state.taken { Ok(()) } else { device.init() }.and_then(|()| {
-        device.show(
-            |code| match mic_color(mic, code).or_else(|| overlay_color(layers, code)) {
-                Some(c) => effects::dim(c, state.lighting.brightness),
-                None => effects::color(&state.lighting, &state.positions, code, t, hits, &bands),
-            },
-        )
-    });
+    let result = {
+        let stack = active_stack(state);
+        let scene = zones::Scene::new(&stack, &state.lighting.keys, &state.positions);
+        let inputs = zones::Inputs {
+            t,
+            hits,
+            bands: &bands,
+            screen: state.reflect.colors(),
+        };
+        let lit =
+            |code| effects::frame_color(&state.lighting, &scene, &state.positions, code, &inputs);
+        if state.taken { Ok(()) } else { device.init() }.and_then(|()| {
+            device.show(
+                |code| match mic_color(mic, code).or_else(|| overlay_color(layers, code)) {
+                    Some(c) => effects::dim(c, state.lighting.brightness),
+                    None => lit(code),
+                },
+            )
+        })
+    };
     match result {
         Ok(()) => {
             state.taken = true;
@@ -741,241 +1135,10 @@ fn hand_back(state: &mut State) {
     state.taken = false;
 }
 
-/// Every key a switch setting names must have an adjustable switch.
-fn check_analog(switches: &Switches) -> Result<(), String> {
-    let named = switches
-        .keys
-        .iter()
-        .map(|k| k.code)
-        .chain(switches.rapid_trigger.keys.iter().copied())
-        .chain(switches.rapid_tap.pairs.iter().flat_map(|p| [p.a, p.b]));
-    for code in named {
-        if !ANALOG_KEYS.contains(&code) {
-            let label = ANSI_TKL
-                .iter()
-                .find(|k| k.0 == code)
-                .map_or_else(|| format!("{code:#04x}"), |k| k.1.to_owned());
-            return Err(format!("{label} has a fixed switch: it can't be adjusted"));
-        }
-    }
-    Ok(())
-}
-
-fn device_tap_mode(mode: TapMode) -> gg_device_keyboard::TapMode {
-    use gg_device_keyboard::TapMode as D;
-    match mode {
-        TapMode::LastWins => D::LastWins,
-        TapMode::Neither => D::Neither,
-        TapMode::FirstWins => D::FirstWins,
-        TapMode::SecondWins => D::SecondWins,
-    }
-}
-
-/// Send the switch settings once to a keyboard that hasn't had them since it connected.
-fn sync_switches(state: &mut State) {
-    if !state.switches.enabled || state.switches_sent.is_some() {
-        return;
-    }
-    let Some(device) = state.device.as_ref() else {
-        return;
-    };
-    let s = &state.switches;
-    let pairs: Vec<gg_device_keyboard::TapPair> = s
-        .rapid_tap
-        .pairs
-        .iter()
-        .map(|p| gg_device_keyboard::TapPair {
-            a: p.a,
-            b: p.b,
-            mode: device_tap_mode(p.mode),
-            report_both: p.report_both,
-        })
-        .collect();
-    let sensitivity = s.rapid_trigger.sensitivity;
-    let result = device
-        .set_switches(&gg_device_keyboard::Switches {
-            actuation: &|code| s.actuation_of(code),
-            rapid_trigger: &|code| s.rapid_trigger_on(code),
-            sensitivity: &|_| sensitivity,
-            rapid_tap: s.rapid_tap.enabled,
-            tap_pairs: &pairs,
-        })
-        .map_err(|e| format!("{e:#}"));
-    match &result {
-        Ok(()) => info!("keyboard switch settings sent"),
-        Err(e) => warn!(error = %e, "the keyboard did not take the switch settings"),
-    }
-    state.switches_sent = Some(result);
-}
-
-/// The local time, for the clock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LocalTime {
-    hour: u8,
-    minute: u8,
-    second: u8,
-    /// 0 is Sunday.
-    weekday: u8,
-    day: u8,
-    /// 0 is January.
-    month: u8,
-}
-
-fn local_now() -> LocalTime {
-    // SAFETY: `time` with a null pointer only returns the time; `localtime_r` writes
-    // only the `tm` it's given, which lives on this stack.
-    let tm = unsafe {
-        let t = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
-        tm
-    };
-    LocalTime {
-        hour: tm.tm_hour as u8,
-        minute: tm.tm_min as u8,
-        second: tm.tm_sec.min(59) as u8,
-        weekday: tm.tm_wday as u8,
-        day: tm.tm_mday as u8,
-        month: tm.tm_mon as u8,
-    }
-}
-
-/// The clock's big line, and the small one under it if any.
-fn clock_text(t: LocalTime, seconds: bool, h24: bool, date: bool) -> (String, Option<String>) {
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let mut time = if h24 {
-        format!("{:02}:{:02}", t.hour, t.minute)
-    } else {
-        let h = match t.hour % 12 {
-            0 => 12,
-            h => h,
-        };
-        format!("{h}:{:02}", t.minute)
-    };
-    if seconds {
-        time.push_str(&format!(":{:02}", t.second));
-    }
-    let mut under = Vec::new();
-    if date {
-        under.push(format!(
-            "{} {} {}",
-            DAYS[usize::from(t.weekday % 7)],
-            t.day,
-            MONTHS[usize::from(t.month % 12)]
-        ));
-    }
-    if !h24 {
-        under.push(if t.hour < 12 { "AM" } else { "PM" }.to_owned());
-    }
-    (time, (!under.is_empty()).then(|| under.join(" ")))
-}
-
-/// What a screen setting draws at `now`; `None` for the keyboard's own.
-fn picture(screen: &Screen, now: LocalTime) -> Option<Bitmap> {
-    Some(match screen {
-        Screen::Keyboard => return None,
-        Screen::Text { text } => oled::text(text),
-        Screen::Clock { seconds, h24, date } => {
-            let (time, under) = clock_text(now, *seconds, *h24, *date);
-            oled::clock(&time, under.as_deref())
-        }
-        Screen::Image { pixels } => Bitmap::from_rows(pixels).unwrap_or_default(),
-    })
-}
-
-/// Whether the screen rests dark now: nobody is there, and it's a picture of gglinux's,
-/// or the keyboard's own and care covers that too.
-fn resting(screen: &Screen, care: &ScreenCare, away: bool) -> bool {
-    away && care.dark_when_away && (care.own_screen_too || !matches!(screen, Screen::Keyboard))
-}
-
-/// Where the picture sits at `unix_secs`, as an offset from where it's drawn: a 5 × 5
-/// square walked row by row, back and forth, a pixel every [`SHIFT_EVERY`] seconds. Each
-/// lit pixel's wear is spread over up to 25 neighbours.
-fn shift_at(unix_secs: u64) -> (i32, i32) {
-    let step = (unix_secs / SHIFT_EVERY % 25) as i32;
-    let (row, col) = (step / 5, step % 5);
-    let x = if row % 2 == 0 { col } else { 4 - col };
-    (x - 2, row - 2)
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// What the screen should show now, `None` for the keyboard's own: dark while resting,
-/// otherwise the picture, moved as screen care says.
-fn frame(state: &State) -> Option<Bitmap> {
-    if resting(&state.screen, &state.care, state.away) {
-        return Some(Bitmap::default());
-    }
-    let picture = picture(&state.screen, local_now())?;
-    Some(if state.care.shift {
-        let (dx, dy) = shift_at(unix_now());
-        picture.shifted(dx, dy)
-    } else {
-        picture
-    })
-}
-
-/// Draw the screen if its picture changed (or is due a refresh), or hand it back.
-fn render_screen(state: &mut State) {
-    state.resting = state.device.is_some() && resting(&state.screen, &state.care, state.away);
-    let Some(device) = state.device.as_ref() else {
-        return;
-    };
-    let Some(picture) = frame(state) else {
-        state.screen_error = None;
-        release_screen(state);
-        return;
-    };
-    if state.screen_shown.as_ref() == Some(&picture)
-        && !is_older_than(state.screen_last, SCREEN_REFRESH)
-    {
-        return;
-    }
-    match device.show_screen(&picture) {
-        Ok(()) => {
-            state.screen_taken = true;
-            state.screen_error = None;
-        }
-        Err(e) => {
-            let message = format!("{e:#}");
-            if state.screen_error.as_ref() != Some(&message) {
-                warn!(error = %message, "the keyboard did not take the screen picture");
-            }
-            state.screen_error = Some(message);
-        }
-    }
-    // Kept even after a failure, so it's tried again at the refresh, not every loop.
-    state.screen_shown = Some(picture);
-    state.screen_last = Some(Instant::now());
-}
-
-/// Give the screen back to the keyboard's own menus, if gglinux drew on it.
-fn release_screen(state: &mut State) {
-    if !state.screen_taken {
-        return;
-    }
-    if let Some(device) = state.device.as_ref() {
-        match device.release_screen() {
-            Ok(()) => debug!("keyboard screen handed back"),
-            Err(e) => warn!(error = %format!("{e:#}"), "could not hand the keyboard screen back"),
-        }
-    }
-    state.screen_taken = false;
-    state.screen_shown = None;
-}
-
 fn snapshot(state: &State) -> KeyboardState {
     KeyboardState {
         connected: state.device.is_some(),
-        layout: ANSI_TKL
+        layout: board(state.region)
             .iter()
             .map(|&(code, label, x, y, w)| KeyInfo {
                 code,
@@ -987,16 +1150,15 @@ fn snapshot(state: &State) -> KeyboardState {
             .collect(),
         lighting: state.lighting.clone(),
         reactive: state.reactive,
+        lighting_idle: state.idle_shown,
+        reflect: state.reflect.status(),
         analog_keys: ANALOG_KEYS.to_vec(),
-        switches: state.switches.clone(),
-        switches_error: match &state.switches_sent {
-            Some(Err(e)) => Some(e.clone()),
-            _ => None,
-        },
-        screen: state.screen.clone(),
-        screen_error: state.screen_error.clone(),
-        screen_care: state.care,
-        screen_resting: state.resting,
+        switches: state.switches.settings().clone(),
+        switches_error: state.switches.error(),
+        screen: state.screen.setting().clone(),
+        screen_error: state.screen.error(),
+        screen_care: state.screen.care(),
+        screen_resting: state.screen.resting(),
     }
 }
 
@@ -1040,6 +1202,9 @@ fn save<T: Serialize>(path: &Path, settings: &T, what: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Scratch;
+    use gg_device_keyboard::proto;
+    use gg_device_keyboard::testing::{FakeTransport, Kind};
     use gg_ipc::{Effect, Reactive};
 
     fn lighting(enabled: bool, reactive: bool, effect: Effect) -> Lighting {
@@ -1090,12 +1255,12 @@ mod tests {
 
     #[test]
     fn live_presses_animate_even_a_static_effect() {
-        let still = lighting(true, true, Effect::Static);
+        let still = lighting(true, true, Effect::Static).stack().into_owned();
         assert_eq!(interval(&still, false, false), STATIC_REFRESH);
         assert_eq!(interval(&still, true, false), FRAME);
         assert_eq!(
             interval(
-                &lighting(true, true, Effect::Wave { period_s: 4.0 }),
+                &lighting(true, true, Effect::Wave { period_s: 4.0 }).stack(),
                 false,
                 false
             ),
@@ -1151,7 +1316,7 @@ mod tests {
 
     #[test]
     fn an_active_overlay_animates_even_a_static_effect() {
-        let still = lighting(true, false, Effect::Static);
+        let still = lighting(true, false, Effect::Static).stack().into_owned();
         assert_eq!(interval(&still, false, true), FRAME);
         assert_eq!(interval(&still, false, false), STATIC_REFRESH);
     }
@@ -1189,10 +1354,10 @@ mod tests {
             effect: Effect::Visualizer { sensitivity: 1.0 },
             ..lighting(true, false, Effect::Static)
         };
-        assert!(wants_audio(&viz, true));
-        assert!(!wants_audio(&viz, false), "not drawing");
+        assert!(wants_audio(&viz.stack(), true));
+        assert!(!wants_audio(&viz.stack(), false), "not drawing");
         assert!(
-            !wants_audio(&lighting(true, false, Effect::Static), true),
+            !wants_audio(&lighting(true, false, Effect::Static).stack(), true),
             "another effect"
         );
         let mut m = lighting(true, false, Effect::Static);
@@ -1217,150 +1382,645 @@ mod tests {
     #[test]
     fn a_mute_key_must_be_on_the_keyboard() {
         let mut l = lighting(true, false, Effect::Static);
-        assert!(check_keys(&l).is_ok());
+        assert!(check_keys(&l, None).is_ok());
         l.mic_mute.key = 0x59; // keypad 1: not on a TKL
-        assert!(check_keys(&l).is_err());
-    }
-
-    fn at(hour: u8, minute: u8, second: u8) -> LocalTime {
-        LocalTime {
-            hour,
-            minute,
-            second,
-            weekday: 4,
-            day: 29,
-            month: 9,
-        }
-    }
-
-    #[test]
-    fn the_clock_reads_as_chosen() {
-        let t = at(13, 5, 9);
-        assert_eq!(clock_text(t, false, true, false), ("13:05".into(), None));
-        assert_eq!(
-            clock_text(t, true, true, true),
-            ("13:05:09".into(), Some("Thu 29 Oct".into()))
-        );
-        assert_eq!(
-            clock_text(t, false, false, false),
-            ("1:05".into(), Some("PM".into()))
-        );
-        assert_eq!(
-            clock_text(at(0, 30, 0), false, false, true),
-            ("12:30".into(), Some("Thu 29 Oct AM".into())),
-            "midnight is 12 AM"
-        );
-    }
-
-    #[test]
-    fn the_keyboard_s_own_screen_draws_nothing_and_a_clock_changes_each_second() {
-        assert!(picture(&Screen::Keyboard, at(1, 2, 3)).is_none());
-        let clock = Screen::Clock {
-            seconds: true,
-            h24: true,
-            date: false,
-        };
-        assert_ne!(picture(&clock, at(1, 2, 3)), picture(&clock, at(1, 2, 4)));
-        let minutes = Screen::Clock {
-            seconds: false,
-            h24: true,
-            date: false,
-        };
-        assert_eq!(
-            picture(&minutes, at(1, 2, 3)),
-            picture(&minutes, at(1, 2, 4)),
-            "without seconds, the same picture: nothing is sent"
-        );
-    }
-
-    #[test]
-    fn a_picture_is_drawn_from_its_rows() {
-        let mut pixels = vec![0u8; 640];
-        pixels[0] = 0x80;
-        let b = picture(&Screen::Image { pixels }, at(0, 0, 0)).unwrap();
-        assert!(b.get(0, 0) && !b.get(1, 0));
-    }
-
-    #[test]
-    fn a_clock_wakes_the_loop_within_a_second_and_only_while_the_keyboard_is_here() {
-        let clock = Screen::Clock {
-            seconds: false,
-            h24: true,
-            date: false,
-        };
-        let wait = screen_wait(&clock, true).unwrap();
-        assert!(wait > Duration::ZERO && wait <= Duration::from_millis(1005));
-        assert!(screen_wait(&clock, false).is_none());
-        assert!(screen_wait(&Screen::Keyboard, true).is_none());
-    }
-
-    #[test]
-    fn switch_settings_may_only_name_keys_with_adjustable_switches() {
-        let mut s = Switches::default();
-        s.keys.push(gg_ipc::KeyActuation {
-            code: 0x1A,
-            actuation: 4,
-        });
-        assert!(check_analog(&s).is_ok());
-        s.rapid_trigger.keys.push(0x29); // Escape
-        assert_eq!(
-            check_analog(&s).unwrap_err(),
-            "Esc has a fixed switch: it can't be adjusted"
-        );
-        s.rapid_trigger.keys.clear();
-        s.rapid_tap.pairs.push(gg_ipc::TapPair {
-            a: 0x50,
-            b: 0x4F,
-            mode: TapMode::LastWins,
-            report_both: false,
-        });
-        assert!(check_analog(&s).is_err(), "the arrows are fixed too");
-    }
-
-    #[test]
-    fn the_screen_rests_only_while_away_and_the_keyboards_own_only_when_asked() {
-        let clock = Screen::Clock {
-            seconds: false,
-            h24: true,
-            date: false,
-        };
-        let care = ScreenCare::default();
-        assert!(resting(&clock, &care, true));
-        assert!(!resting(&clock, &care, false), "somebody's there");
+        assert!(check_keys(&l, None).is_err());
+        l.mic_mute.key = 0x48; // Pause: not on this one
+        assert!(check_keys(&l, None).is_err());
+        l.mic_mute.key = 0x64; // beside left Shift, on ISO boards
         assert!(
-            !resting(&Screen::Keyboard, &care, true),
-            "the keyboard's own screen is left alone by default"
+            check_keys(&l, None).is_ok(),
+            "not asked yet: any board's key"
         );
-        let own = ScreenCare {
-            own_screen_too: true,
-            ..care
-        };
-        assert!(resting(&Screen::Keyboard, &own, true));
-        let never = ScreenCare {
-            dark_when_away: false,
-            own_screen_too: true,
-            ..care
-        };
-        assert!(!resting(&clock, &never, true) && !resting(&Screen::Keyboard, &never, true));
+        assert!(check_keys(&l, Some(Some(4))).is_ok(), "German");
+        assert!(check_keys(&l, Some(Some(1))).is_err(), "US");
+        assert!(check_keys(&l, Some(None)).is_err(), "no answer: US");
     }
 
     #[test]
-    fn the_shift_walks_a_five_by_five_square_a_pixel_at_a_time() {
-        let steps: Vec<(i32, i32)> = (0..25).map(|i| shift_at(i * SHIFT_EVERY)).collect();
-        let mut seen = steps.clone();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), 25, "every offset once a round: {steps:?}");
-        assert!(steps.iter().all(|&(x, y)| x.abs() <= 2 && y.abs() <= 2));
-        for pair in steps.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            assert_eq!((a.0 - b.0).abs() + (a.1 - b.1).abs(), 1, "{a:?} to {b:?}");
-        }
+    fn a_saved_mute_key_the_board_lacks_moves_to_the_default() {
+        let mut l = lighting(true, false, Effect::Static);
+        l.mic_mute.key = 0x48; // Pause, older settings' default
+        assert_eq!(on_board(l.clone(), None).mic_mute.key, 0xFB);
+        l.mic_mute.key = 0x64; // ISO only
         assert_eq!(
-            shift_at(SHIFT_EVERY - 1),
-            shift_at(0),
-            "it holds for a whole step"
+            on_board(l.clone(), Some(None)).mic_mute.key,
+            0xFB,
+            "not on US"
         );
-        assert_eq!(shift_at(25 * SHIFT_EVERY), shift_at(0), "and starts over");
+        assert_eq!(
+            on_board(l.clone(), Some(Some(4))).mic_mute.key,
+            0x64,
+            "kept on German"
+        );
+        assert_eq!(
+            on_board(l, None).mic_mute.key,
+            0x64,
+            "kept until it's asked"
+        );
+    }
+
+    /// A state with no device list and its settings in a folder that isn't there: every
+    /// setting at its default, and nothing here saves one.
+    fn nowhere() -> PathBuf {
+        std::env::temp_dir().join(format!("gglinuxd-keyboard-nowhere-{}", std::process::id()))
+    }
+
+    fn bare_state() -> State {
+        State::new(
+            None,
+            &nowhere(),
+            mpsc::channel().0,
+            Vec::new(),
+            Experimental::default(),
+        )
+    }
+
+    #[test]
+    fn the_open_keyboard_lets_a_gated_family_out_only_while_its_gate_is_on() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut state = bare_state();
+        connected(&mut state, FakeTransport::new().keyboard());
+        let families_now = |s: &State| s.device.as_ref().unwrap().families();
+        assert_eq!(families_now(&state), Families::default());
+
+        let bindings_on = Experimental {
+            keyboard_bindings: true,
+            ..Experimental::default()
+        };
+        assert!(handle(
+            Command::SetExperimental(bindings_on),
+            &mut state,
+            &event_tx
+        ));
+        let bindings = Families {
+            bindings: true,
+            onboard: false,
+            protection: false,
+        };
+        assert_eq!(families_now(&state), bindings);
+        connected(&mut state, FakeTransport::new().keyboard());
+        assert_eq!(
+            families_now(&state),
+            bindings,
+            "and every keyboard opened later"
+        );
+
+        let onboard_and_a_mouse_gate = Experimental {
+            keyboard_onboard: true,
+            mouse_power: true,
+            ..Experimental::default()
+        };
+        handle(
+            Command::SetExperimental(onboard_and_a_mouse_gate),
+            &mut state,
+            &event_tx,
+        );
+        assert_eq!(
+            families_now(&state),
+            Families {
+                bindings: false,
+                onboard: true,
+                protection: false,
+            }
+        );
+
+        // Told while no keyboard is open: kept for the next one.
+        state.device = None;
+        handle(
+            Command::SetExperimental(Experimental::default()),
+            &mut state,
+            &event_tx,
+        );
+        connected(&mut state, FakeTransport::new().keyboard());
+        assert_eq!(families_now(&state), Families::default());
+        assert!(state.just_opened, "the units' on_connect is due");
+    }
+
+    #[tokio::test]
+    async fn a_worker_on_a_fresh_install_sends_the_keyboard_nothing_and_answers_the_units() {
+        let fake = FakeTransport::new();
+        let (event_tx, _) = broadcast::channel(8);
+        let kb = spawn_fake_unasked(
+            fake.keyboard(),
+            nowhere(),
+            event_tx,
+            Experimental::default(),
+        );
+        assert!(kb.send(Command::GetState).await.unwrap().connected);
+        assert_eq!(
+            kb.send(|r| Command::Bindings(bindings::Cmd::Get(r)))
+                .await
+                .unwrap(),
+            gg_ipc::BindingsState::default()
+        );
+        assert_eq!(
+            kb.send(|r| Command::Onboard(onboard::Cmd::Get(r)))
+                .await
+                .unwrap(),
+            gg_ipc::OnboardState::default()
+        );
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+        assert!(
+            fake.sent().is_empty(),
+            "lighting, switches and screen are all off by default: {:?}",
+            fake.sent()
+        );
+    }
+
+    /// The colour a direct lighting frame gives `code`.
+    fn frame_color(frame: &[u8], code: u8) -> Rgb {
+        let i = proto::KEYS.iter().position(|&c| c == code).unwrap();
+        let at = 3 + i * 4;
+        assert_eq!(frame[at], code);
+        Rgb {
+            r: frame[at + 1],
+            g: frame[at + 2],
+            b: frame[at + 3],
+        }
+    }
+
+    /// A keyboard whose region is `region`.
+    fn keyboard_of(region: u8) -> FakeTransport {
+        let fake = FakeTransport::new();
+        fake.answer_input(
+            gg_device_keyboard::testing::Key::op(proto::OP_REGION),
+            &[0xF5, 0x00, region],
+        );
+        fake
+    }
+
+    /// How often a worker with these saved settings, and `setup` done to it, asks a
+    /// German keyboard its region over two loops, and what it keeps of the answer.
+    fn region_queries(
+        saved: &[(&str, &str)],
+        experimental: Experimental,
+        setup: impl FnOnce(&mut State),
+    ) -> (usize, Option<Option<u8>>) {
+        let d = Scratch::new("keyboard-takes");
+        for (name, json) in saved {
+            std::fs::write(d.0.join(name), json).unwrap();
+        }
+        let fake = keyboard_of(4);
+        let mut state = State::new(None, &d.0, mpsc::channel().0, Vec::new(), experimental);
+        connected(&mut state, fake.keyboard());
+        setup(&mut state);
+        let (event_tx, _) = broadcast::channel(8);
+        read_region(&mut state, &event_tx);
+        read_region(&mut state, &event_tx);
+        let sent = fake.sent();
+        assert!(
+            sent.iter().all(|s| s.report[1] == proto::OP_REGION),
+            "nothing but the question: {sent:?}"
+        );
+        (sent.len(), state.region)
+    }
+
+    #[test]
+    fn the_region_is_asked_once_and_only_when_gglinux_takes_the_keyboard_anyway() {
+        let off = Experimental::default();
+        let bindings_gate = Experimental {
+            keyboard_bindings: true,
+            ..off
+        };
+        let every_gate = Experimental {
+            keyboard_onboard: true,
+            ..bindings_gate
+        };
+        let bindings_on = [("bindings.json", r#"{"enabled": true}"#)];
+        let not_asked = (0, None);
+        assert_eq!(
+            region_queries(&[], off, |_| {}),
+            not_asked,
+            "a fresh install"
+        );
+        assert_eq!(
+            region_queries(&[], every_gate, |_| {}),
+            not_asked,
+            "gates alone, the onboard slots' too"
+        );
+        assert_eq!(
+            region_queries(&bindings_on, off, |_| {}),
+            not_asked,
+            "bindings on, their gate off: nothing goes out"
+        );
+
+        let german = (1, Some(Some(4)));
+        let lit = |s: &mut State| s.lighting.enabled = true;
+        assert_eq!(region_queries(&[], off, lit), german, "lighting");
+        let painted = |s: &mut State| s.layers = vec![Layer::from([(0x04, Rgb::default())])];
+        assert_eq!(
+            region_queries(&[], off, painted),
+            german,
+            "a game's overlay"
+        );
+        let switches = |s: &mut State| {
+            let on = Switches {
+                enabled: true,
+                ..Switches::default()
+            };
+            s.switches.set(on).unwrap()
+        };
+        assert_eq!(region_queries(&[], off, switches), german, "switches");
+        let text = |s: &mut State| {
+            let hello = Screen::Text {
+                text: "hello".into(),
+            };
+            s.screen.set(hello).unwrap()
+        };
+        assert_eq!(
+            region_queries(&[], off, text),
+            german,
+            "a screen of gglinux's"
+        );
+        assert_eq!(
+            region_queries(&bindings_on, bindings_gate, |_| {}),
+            german,
+            "bindings on with their gate"
+        );
+    }
+
+    #[test]
+    fn each_connection_is_asked_again_and_the_mute_key_follows_the_board() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut state = bare_state();
+        state.lighting.enabled = true;
+        state.lighting.mic_mute.key = 0x64; // saved on an ISO board
+        for (fake, region) in [
+            (keyboard_of(4), Some(4)),
+            (keyboard_of(1), Some(1)),
+            (FakeTransport::new(), None), // no answer
+        ] {
+            connected(&mut state, fake.keyboard());
+            assert_eq!(state.region, None, "not asked yet");
+            read_region(&mut state, &event_tx);
+            read_region(&mut state, &event_tx);
+            assert_eq!(state.region, Some(region));
+            assert_eq!(fake.sent().len(), 1, "asked once: {region:?}");
+            assert_eq!(state.positions, effects::positions(for_region(region)));
+            if region == Some(4) {
+                assert_eq!(state.lighting.mic_mute.key, 0x64, "kept on German");
+            }
+        }
+        assert_eq!(state.lighting.mic_mute.key, 0xFB, "moved on the US board");
+        assert!(!state.positions.contains_key(&0x64));
+    }
+
+    #[test]
+    fn lighting_turned_on_is_checked_against_the_keyboard_s_own_board() {
+        let (event_tx, _) = broadcast::channel(8);
+        let mut state = bare_state();
+        let fake = keyboard_of(1);
+        connected(&mut state, fake.keyboard());
+        let mut iso_key = lighting(true, false, Effect::Static);
+        iso_key.mic_mute.key = 0x64;
+        let (reply, mut answer) = oneshot::channel();
+        handle(
+            Command::SetLighting {
+                lighting: iso_key,
+                reply,
+            },
+            &mut state,
+            &event_tx,
+        );
+        let refused = answer.try_recv().unwrap().unwrap_err();
+        assert_eq!(refused, "the mic-mute key 0x64 is not on this keyboard");
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].report[1], proto::OP_REGION, "asked first");
+    }
+
+    #[test]
+    fn bindings_turned_on_with_their_gate_ask_the_region_before_they_go_out() {
+        let d = Scratch::new("keyboard-bindings-region");
+        let (event_tx, _) = broadcast::channel(8);
+        let gate = Experimental {
+            keyboard_bindings: true,
+            ..Experimental::default()
+        };
+        let mut state = State::new(None, &d.0, mpsc::channel().0, Vec::new(), gate);
+        let fake = keyboard_of(4);
+        connected(&mut state, fake.keyboard());
+        let (reply, _answer) = oneshot::channel();
+        let set = bindings::Cmd::Set {
+            bindings: gg_ipc::Bindings::default(),
+            enabled: true,
+            reply,
+        };
+        handle(Command::Bindings(set), &mut state, &event_tx);
+        let sent = fake.sent();
+        assert_eq!(sent[0].report[1], proto::OP_REGION, "asked first: {sent:?}");
+        assert!(sent.len() > 1, "then the bindings' own reports");
+        assert_eq!(state.region, Some(Some(4)));
+    }
+
+    fn label_of(layout: &[KeyInfo], code: u8) -> &str {
+        &layout.iter().find(|k| k.code == code).unwrap().label
+    }
+
+    #[tokio::test]
+    async fn once_lighting_is_on_the_region_is_asked_first_and_picks_the_board() {
+        let d = Scratch::new("keyboard-region");
+        let fake = FakeTransport::new();
+        fake.answer_input(
+            gg_device_keyboard::testing::Key::op(proto::OP_REGION),
+            &[0xF5, 0x00, 0x04], // German
+        );
+        let (event_tx, _) = broadcast::channel(8);
+        let kb = spawn_fake_unasked(
+            fake.keyboard(),
+            d.0.clone(),
+            event_tx,
+            Experimental::default(),
+        );
+        let before = kb.send(Command::GetState).await.unwrap().layout;
+        assert_eq!(
+            label_of(&before, 0x1C),
+            "Y",
+            "the US board until it's asked"
+        );
+        assert!(before.iter().all(|k| k.code != 0x48), "no Pause");
+        assert!(
+            fake.sent().is_empty(),
+            "not asked while gglinux leaves it alone"
+        );
+
+        let wave = Lighting {
+            enabled: true,
+            effect: Effect::Wave { period_s: 60.0 },
+            ..Lighting::default()
+        };
+        kb.send(|reply| Command::SetLighting {
+            lighting: wave,
+            reply,
+        })
+        .await
+        .unwrap();
+        let layout = kb.send(Command::GetState).await.unwrap().layout;
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+
+        let sent = fake.sent();
+        assert_eq!(
+            (sent[0].kind, &sent[0].report),
+            (
+                Kind::Output,
+                &proto::command(proto::OP_REGION, &[]).unwrap()
+            ),
+            "the region query goes first"
+        );
+        let asked = sent.iter().filter(|s| s.report[1] == proto::OP_REGION);
+        assert_eq!(asked.count(), 1, "once");
+        assert_eq!(label_of(&layout, 0x1C), "Z", "German: QWERTZ");
+        assert_eq!(
+            label_of(&layout, 0x64),
+            "<",
+            "the ISO key beside left Shift"
+        );
+        // The wave's colours run along the board: on the German board 0x64 sits between
+        // 1 and Q, so its colour does too (this early in the wave, green grows with x).
+        let frame = &sent
+            .iter()
+            .find(|s| s.report[1] == proto::OP_DIRECT)
+            .unwrap()
+            .report;
+        let green = |code| frame_color(frame, code).g;
+        assert!(
+            green(0x1E) < green(0x64) && green(0x64) < green(0x14),
+            "the effects know where 0x64 is: {} {} {}",
+            green(0x1E),
+            green(0x64),
+            green(0x14)
+        );
+    }
+
+    const RED: Rgb = Rgb { r: 255, g: 0, b: 0 };
+    const BLUE: Rgb = Rgb { r: 0, g: 0, b: 255 };
+
+    fn one(c: Rgb) -> gg_ipc::Rgb {
+        gg_ipc::Rgb {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+        }
+    }
+
+    /// The colour the last lighting frame sent gave `code`.
+    fn last_color(fake: &FakeTransport, code: u8) -> Rgb {
+        let sent = fake.sent();
+        let frame = sent
+            .iter()
+            .rev()
+            .find(|s| s.report[1] == proto::OP_DIRECT)
+            .expect("a lighting frame");
+        frame_color(&frame.report, code)
+    }
+
+    #[test]
+    fn a_reactive_zone_reads_presses_too() {
+        let mut l = lighting(true, false, Effect::Static);
+        l.zones_mut().push(Zone::new(
+            "w",
+            gg_ipc::ZonePreset::Wasd.keys(),
+            gg_ipc::ZoneEffect::Reactive {
+                mode: gg_ipc::ReactiveMode::Fade,
+                color: one(RED),
+                duration_s: 2.0,
+            },
+        ));
+        assert!(wants_reader(&l, true));
+        assert!(!wants_reader(&l, false), "keyboard away");
+        l.enabled = false;
+        assert!(!wants_reader(&l, true), "lighting off");
+    }
+
+    #[test]
+    fn lighting_saved_before_zones_loads_as_it_was_and_zones_save_back() {
+        let d = Scratch::new("keyboard-zones-file");
+        // As the daemon saved it before zones existed.
+        let old = r#"{
+  "enabled": true,
+  "effect": {
+    "kind": "wave",
+    "period_s": 3.0
+  },
+  "keys": [],
+  "brightness": 60
+}"#;
+        std::fs::write(d.0.join("lighting.json"), old).unwrap();
+        let fresh = || {
+            State::new(
+                None,
+                &d.0,
+                mpsc::channel().0,
+                Vec::new(),
+                Experimental::default(),
+            )
+        };
+        let mut state = fresh();
+        assert_eq!(state.lighting.brightness, 60);
+        let wave = gg_ipc::ZoneEffect::Wave { period_s: 3.0 };
+        assert_eq!(
+            state.lighting.stack().into_owned(),
+            vec![Zone::new("all", gg_ipc::ZoneKeys::All, wave)]
+        );
+        let mut lit = state.lighting.clone();
+        lit.zones_mut().push(Zone::new(
+            "WASD",
+            gg_ipc::ZonePreset::Wasd.keys(),
+            gg_ipc::ZoneEffect::Static { color: one(RED) },
+        ));
+        let (event_tx, _) = broadcast::channel(8);
+        let (reply, mut answer) = oneshot::channel();
+        handle(
+            Command::SetLighting {
+                lighting: lit.clone(),
+                reply,
+            },
+            &mut state,
+            &event_tx,
+        );
+        answer.try_recv().unwrap().unwrap();
+        assert_eq!(fresh().lighting, lit, "saved with its zones");
+    }
+
+    #[tokio::test]
+    async fn the_idle_scene_is_drawn_while_nobody_is_there_and_the_usual_zones_after() {
+        let d = Scratch::new("keyboard-idle");
+        let fake = FakeTransport::new();
+        let (event_tx, _) = broadcast::channel(8);
+        let kb = spawn_fake(
+            fake.keyboard(),
+            d.0.clone(),
+            event_tx,
+            Experimental::default(),
+        );
+        let mut lit = Lighting {
+            enabled: true,
+            ..Lighting::default()
+        };
+        *lit.zones_mut() = vec![Zone::new(
+            "all",
+            gg_ipc::ZoneKeys::All,
+            gg_ipc::ZoneEffect::Static { color: one(RED) },
+        )];
+        lit.idle = gg_ipc::IdleLighting {
+            enabled: true,
+            after_minutes: 0,
+            zones: Vec::new(), // every key dark
+        };
+        kb.send(|reply| Command::SetLighting {
+            lighting: lit,
+            reply,
+        })
+        .await
+        .unwrap();
+        // Each answer to GetState comes after the loop has drawn what came before it.
+        assert!(!kb.send(Command::GetState).await.unwrap().lighting_idle);
+        assert_eq!(last_color(&fake, 0x04), RED);
+
+        kb.send(|reply| Command::SetAway { away: true, reply })
+            .await
+            .unwrap();
+        assert!(kb.send(Command::GetState).await.unwrap().lighting_idle);
+        assert_eq!(
+            last_color(&fake, 0x04),
+            Rgb::default(),
+            "the idle scene: off"
+        );
+
+        kb.send(|reply| Command::SetAway { away: false, reply })
+            .await
+            .unwrap();
+        assert!(!kb.send(Command::GetState).await.unwrap().lighting_idle);
+        assert_eq!(
+            last_color(&fake, 0x04),
+            RED,
+            "back: the usual zones at once"
+        );
+        kb.send::<()>(Command::Shutdown).await.unwrap();
+    }
+
+    #[test]
+    fn reflect_is_refused_while_its_gate_is_off_and_draws_the_screen_once_it_is_on() {
+        let d = Scratch::new("keyboard-reflect");
+        let (event_tx, _) = broadcast::channel(8);
+        let mut state = State::new(
+            None,
+            &d.0,
+            mpsc::channel().0,
+            Vec::new(),
+            Experimental::default(),
+        );
+        let fake = FakeTransport::new();
+        connected(&mut state, fake.keyboard());
+        state.reflect = reflect::tests::on_fake(vec![reflect::tests::solid(RED)]).0;
+        let mut lit = Lighting {
+            enabled: true,
+            ..Lighting::default()
+        };
+        *lit.zones_mut() = vec![
+            Zone::new(
+                "base",
+                gg_ipc::ZoneKeys::All,
+                gg_ipc::ZoneEffect::Static { color: one(BLUE) },
+            ),
+            Zone::new("screen", gg_ipc::ZoneKeys::All, gg_ipc::ZoneEffect::Reflect),
+        ];
+        let set = |state: &mut State, lighting: Lighting| {
+            let (reply, mut answer) = oneshot::channel();
+            handle(Command::SetLighting { lighting, reply }, state, &event_tx);
+            answer.try_recv().unwrap()
+        };
+        let refused = set(&mut state, lit.clone()).unwrap_err();
+        assert!(
+            refused.contains("Lighting: Reflect screen colours")
+                && refused.contains("hasn't been tried on your hardware yet"),
+            "{refused}"
+        );
+        assert!(!state.lighting.uses_reflect(), "nothing kept");
+
+        let gate = Experimental {
+            lighting_reflect: true,
+            ..Experimental::default()
+        };
+        handle(Command::SetExperimental(gate), &mut state, &event_tx);
+        set(&mut state, lit.clone()).unwrap();
+        let frame = |state: &mut State| {
+            sync_reflect(state);
+            state.last_frame = None;
+            render(state);
+            last_color(&fake, 0x04)
+        };
+        assert_eq!(
+            frame(&mut state),
+            BLUE,
+            "no screen frame yet: the base shows"
+        );
+        assert_eq!(snapshot(&state).reflect, gg_ipc::ReflectStatus::Running);
+        std::thread::sleep(Duration::from_millis(70)); // past the frame cap
+        assert_eq!(frame(&mut state), RED, "the screen's colour");
+
+        handle(
+            Command::SetExperimental(Experimental::default()),
+            &mut state,
+            &event_tx,
+        );
+        assert_eq!(
+            frame(&mut state),
+            BLUE,
+            "the gate went off: see-through again"
+        );
+        assert!(matches!(
+            snapshot(&state).reflect,
+            gg_ipc::ReflectStatus::Stopped { .. }
+        ));
+        let dimmer = Lighting {
+            brightness: 50,
+            ..lit
+        };
+        assert!(
+            set(&mut state, dimmer).is_ok(),
+            "lighting that had Reflect already still changes"
+        );
     }
 }

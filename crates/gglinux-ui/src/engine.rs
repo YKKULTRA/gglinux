@@ -1,49 +1,36 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The Engine page: the device list, the mouse and the headset.
+//! The Engine page: the device list and the headset. The mouse panel is in
+//! [`crate::mouse`], the keyboard card in [`crate::keyboard`].
+//!
+//! The headset card's base-station settings (Bluetooth, output, the base
+//! station's screen) are greyed while `headset_extras` is off. A change there
+//! shows what was sent until the daemon shows it too ([`Pending`]): the base
+//! station may still report the old value on the first read after a write.
+//!
+//! The stream-mix sliders show the levels the base station reads back, but a
+//! slider moved sends the other two levels as gglinux last wrote them, never as
+//! read back ([`HeadsetForm::mix_to_send`], review R2 H1): no capture yet tells
+//! the three places in the reply apart (all read `64` in arctis-5), and a wrong
+//! place would write a wrong level, such as aux muted.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use gg_ipc::{
-    DeviceInfo, DpiStage, HeadsetChange, HeadsetControls, HeadsetPower, NoiseMode, RadioMode,
-    Request,
+    BluetoothCall, BluetoothLink, DeviceInfo, Experimental, Feature, HeadsetChange,
+    HeadsetControls, HeadsetGain, HeadsetPairing, HeadsetPower, HomeScreen, LineOut, LineOutMix,
+    NoiseMode, RadioMode, Request, ResponseData, SCREEN_DIM_MINUTES,
 };
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
-use crate::client::{Client, State, TIMEOUT};
-use crate::{act, sync_rows, AppWindow, Device, EngineUi, HeadsetUi, Iface, MouseUi};
+use crate::client::{self, Client, State, TIMEOUT};
+use crate::experimental::{panel_error, read_back, Pending};
+use crate::{act, sync_rows, with_forms, AppWindow, Device, EngineUi, Forms, HeadsetUi, Iface};
 
 pub const RIVAL3: u16 = 0x1872;
 pub const NOVA_PRO: u16 = 0x12e0;
 pub const APEX: u16 = 0x1642;
-
-/// Mirrors gg-device-mouse: DPI_MIN, DPI_MAX, DPI_STEP, MAX_PRESETS.
-const DPI_MIN: i32 = 100;
-const DPI_MAX: i32 = 18000;
-const DPI_STEP: i32 = 100;
-const MAX_STAGES: usize = 5;
-
-/// The `ButtonAction::parse` names offered, in the menu's order (`MouseUi.actions`).
-pub const ACTIONS: [&str; 15] = [
-    "button1",
-    "button2",
-    "button3",
-    "button4",
-    "button5",
-    "dpi",
-    "scrollup",
-    "scrolldown",
-    "playpause",
-    "next",
-    "previous",
-    "mute",
-    "volumeup",
-    "volumedown",
-    "disable",
-];
-/// proto::default_buttons(): each button itself, the sixth cycling DPI.
-const FACTORY_BUTTONS: [&str; 6] = ["button1", "button2", "button3", "button4", "button5", "dpi"];
 
 /// Auto-off choices, in minutes (`HeadsetUi.auto-off-names`).
 const AUTO_OFF: [u16; 7] = [0, 1, 5, 10, 15, 30, 60];
@@ -152,295 +139,71 @@ pub fn bind_devices(ui: &AppWindow, client: &Client) {
     });
 }
 
-// --- the mouse ---------------------------------------------------------------
-
-/// What will be written: the panel's working copy. Seeded once from what the
-/// daemon applied, then it's the user's, and a refresh never overwrites it.
-/// A daemon that went away takes it with it ([`MouseForm::default`] again), as
-/// what it applied went with it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct MouseForm {
-    /// As typed: snapped to the mouse's steps once typing is done, and before
-    /// they're sent.
-    pub stages: Vec<i32>,
-    pub active: usize,
-    pub polling: u16,
-    /// One `ButtonAction::parse` name per button: one of [`ACTIONS`], or a key
-    /// set elsewhere (ggctl), kept as it is so applying doesn't replace it.
-    pub buttons: Vec<String>,
-    seeded: bool,
-}
-
-impl Default for MouseForm {
-    fn default() -> Self {
-        MouseForm {
-            stages: vec![800, 1600],
-            active: 0,
-            polling: 1000,
-            buttons: FACTORY_BUTTONS.map(String::from).to_vec(),
-            seeded: false,
-        }
-    }
-}
-
-/// A DPI the mouse takes: in range, on a step.
-fn snap(dpi: i32) -> i32 {
-    (((dpi as f32) / DPI_STEP as f32).round() as i32 * DPI_STEP).clamp(DPI_MIN, DPI_MAX)
-}
-
-impl MouseForm {
-    /// Keep the form in step with the daemon: seeded once from what it applied,
-    /// and started over while there's no state (not read yet, or the daemon went
-    /// away, and what it applied went with it), as the old panel did.
-    pub fn follow(&mut self, mouse: Option<&gg_ipc::MouseState>) {
-        match mouse {
-            None => *self = MouseForm::default(),
-            Some(m) => {
-                if let Some(a) = &m.applied {
-                    self.seed(a);
-                }
-            }
-        }
-    }
-
-    pub fn seed(&mut self, applied: &gg_ipc::MouseSettings) {
-        if self.seeded {
-            return;
-        }
-        self.seeded = true;
-        if let Some(dpi) = &applied.dpi {
-            self.stages = dpi.stages.iter().map(|s| s.x as i32).collect();
-            self.active = dpi.active.min(self.stages.len().saturating_sub(1));
-        }
-        if let Some(hz) = applied.polling_hz {
-            self.polling = hz;
-        }
-        if let Some(buttons) = &applied.buttons {
-            self.buttons = FACTORY_BUTTONS
-                .iter()
-                .enumerate()
-                .map(|(i, factory)| buttons.get(i).map_or(*factory, String::as_str).to_owned())
-                .collect();
-        }
-    }
-
-    /// A stage while it's typed: only kept in range, so the box isn't fought.
-    pub fn edit_stage(&mut self, i: usize, dpi: i32) {
-        if let Some(s) = self.stages.get_mut(i) {
-            *s = dpi.clamp(DPI_MIN, DPI_MAX);
-        }
-    }
-
-    /// A stage once typed: snapped to what the mouse takes.
-    pub fn set_stage(&mut self, i: usize, dpi: i32) {
-        if let Some(s) = self.stages.get_mut(i) {
-            *s = snap(dpi);
-        }
-    }
-
-    pub fn add_stage(&mut self) {
-        if self.stages.len() < MAX_STAGES {
-            self.stages.push(*self.stages.last().unwrap_or(&800));
-        }
-    }
-
-    pub fn remove_stage(&mut self, i: usize) {
-        if self.stages.len() <= 1 || i >= self.stages.len() {
-            return;
-        }
-        self.stages.remove(i);
-        // The picked stage moves down a place when one before it goes, and the
-        // daemon refuses a pick past the end.
-        if i < self.active {
-            self.active -= 1;
-        } else if self.active >= self.stages.len() {
-            self.active = self.stages.len() - 1;
-        }
-    }
-
-    pub fn pick_stage(&mut self, i: usize) {
-        self.active = i.min(self.stages.len().saturating_sub(1));
-    }
-
-    pub fn pick_button(&mut self, i: usize, action: usize) {
-        if let (Some(b), Some(a)) = (self.buttons.get_mut(i), ACTIONS.get(action)) {
-            *b = (*a).to_owned();
-        }
-    }
-
-    pub fn factory_buttons(&mut self) {
-        self.buttons = FACTORY_BUTTONS.map(String::from).to_vec();
-    }
-
-    /// Each button's place in the menu, or -1 for a key the menu doesn't offer.
-    pub fn button_menu(&self) -> Vec<i32> {
-        self.buttons
-            .iter()
-            .map(|b| action_index(b).map_or(-1, |i| i as i32))
-            .collect()
-    }
-
-    /// The DPI request; the stages are snapped first, so what's shown is what's sent.
-    pub fn dpi_request(&mut self, save: bool) -> Request {
-        for s in &mut self.stages {
-            *s = snap(*s);
-        }
-        Request::SetMouseDpi {
-            stages: self
-                .stages
-                .iter()
-                .map(|x| DpiStage {
-                    x: *x as u16,
-                    y: *x as u16,
-                })
-                .collect(),
-            active: self.active,
-            save,
-        }
-    }
-
-    pub fn polling_request(&mut self, save: bool) -> Request {
-        Request::SetMousePolling {
-            hz: self.polling,
-            save,
-        }
-    }
-
-    pub fn buttons_request(&mut self, save: bool) -> Request {
-        Request::SetMouseButtons {
-            actions: self.buttons.clone(),
-            save,
-        }
-    }
-}
-
-/// Where a button name is in the menu. The daemon reads names without regard
-/// to case, and takes "disabled" as well.
-fn action_index(name: &str) -> Option<usize> {
-    let name = name.trim().to_ascii_lowercase();
-    let name = if name == "disabled" { "disable" } else { &name };
-    ACTIONS.iter().position(|a| *a == name)
-}
-
-/// Only the parts written: the others aren't known, so they aren't shown.
-pub fn summarise(a: &gg_ipc::MouseSettings) -> String {
-    let mut parts = Vec::new();
-    if let Some(dpi) = &a.dpi {
-        let list: Vec<String> = dpi.stages.iter().map(|s| s.x.to_string()).collect();
-        parts.push(format!(
-            "{} dpi · stage {}",
-            list.join(" / "),
-            dpi.active + 1
-        ));
-    }
-    if let Some(hz) = a.polling_hz {
-        parts.push(format!("{hz} Hz"));
-    }
-    if a.buttons.is_some() {
-        parts.push("button layout".into());
-    }
-    parts.join(" · ")
-}
-
-fn show_mouse_form(ui: &AppWindow, f: &MouseForm) {
-    let g = ui.global::<MouseUi>();
-    sync_rows(g.get_stages(), f.stages.clone(), |m| g.set_stages(m));
-    g.set_active(f.active as i32);
-    g.set_polling(f.polling as i32);
-    g.set_buttons(ints(f.button_menu()));
-    let keys: Vec<SharedString> = f
-        .buttons
-        .iter()
-        .map(|b| match action_index(b) {
-            Some(_) => SharedString::new(),
-            None => b.as_str().into(),
-        })
-        .collect();
-    sync_rows(g.get_button_keys(), keys, |m| g.set_button_keys(m));
-}
-
-pub fn show_mouse(ui: &AppWindow, s: &State, form: &RefCell<MouseForm>) {
-    let g = ui.global::<MouseUi>();
-    g.set_known(s.mouse.is_some());
-    form.borrow_mut().follow(s.mouse.as_ref());
-    let Some(m) = s.mouse.as_ref() else {
-        // Onboard writes start off again too: they can't be undone.
-        g.set_persist(false);
-        g.set_connected(false);
-        g.set_battery(-1);
-        g.set_charging(false);
-        g.set_applied(SharedString::new());
-        show_mouse_form(ui, &form.borrow());
-        return;
-    };
-    g.set_connected(m.connected);
-    g.set_battery(m.battery.map_or(-1, |b| b.level as i32));
-    g.set_charging(m.battery.is_some_and(|b| b.charging));
-    g.set_applied(m.applied.as_ref().map(summarise).unwrap_or_default().into());
-    show_mouse_form(ui, &form.borrow());
-}
-
-pub fn bind_mouse(ui: &AppWindow, client: &Client, form: Rc<RefCell<MouseForm>>) {
-    let g = ui.global::<MouseUi>();
-    let edit = |f: fn(&mut MouseForm, i32, i32)| {
-        let weak = ui.as_weak();
-        let form = form.clone();
-        move |a: i32, b: i32| {
-            f(&mut form.borrow_mut(), a, b);
-            if let Some(ui) = weak.upgrade() {
-                show_mouse_form(&ui, &form.borrow());
-            }
-        }
-    };
-    g.on_edit_stage(edit(|f, i, v| f.edit_stage(i as usize, v)));
-    g.on_set_stage(edit(|f, i, v| f.set_stage(i as usize, v)));
-    let add = edit(|f, _, _| f.add_stage());
-    g.on_add_stage(move || add(0, 0));
-    let remove = edit(|f, i, _| f.remove_stage(i as usize));
-    g.on_remove_stage(move |i| remove(i, 0));
-    let pick = edit(|f, i, _| f.pick_stage(i as usize));
-    g.on_pick_stage(move |i| pick(i, 0));
-    let polling = edit(|f, hz, _| f.polling = hz as u16);
-    g.on_pick_polling(move |hz| polling(hz, 0));
-    g.on_pick_button(edit(|f, i, a| f.pick_button(i as usize, a as usize)));
-    let factory = edit(|f, _, _| f.factory_buttons());
-    g.on_factory_buttons(move || factory(0, 0));
-
-    let send = |tag: &'static str, make: fn(&mut MouseForm, bool) -> Request| {
-        let weak = ui.as_weak();
-        let client = client.clone();
-        let form = form.clone();
-        move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let save = ui.global::<MouseUi>().get_persist();
-            let req = make(&mut form.borrow_mut(), save);
-            show_mouse_form(&ui, &form.borrow());
-            act(&ui, &client, req, TIMEOUT, move |ui, busy, error| {
-                let g = ui.global::<MouseUi>();
-                g.set_busy(if busy {
-                    tag.into()
-                } else {
-                    SharedString::new()
-                });
-                g.set_error(error);
-            });
-        }
-    };
-    g.on_apply_dpi(send("dpi", MouseForm::dpi_request));
-    g.on_apply_polling(send("polling", MouseForm::polling_request));
-    g.on_apply_buttons(send("buttons", MouseForm::buttons_request));
-    g.on_save(send("save", |_, _| Request::SaveMouse));
-}
-
 // --- the headset -------------------------------------------------------------
 
-/// The custom EQ curve being edited, seeded once from what was last applied;
-/// gone with the daemon, like the mouse's form.
+/// The base station's own settings, the ones `headset_extras` gates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Extras {
+    pub bluetooth_at_power_on: Option<bool>,
+    pub bluetooth_call: Option<BluetoothCall>,
+    pub gain: Option<HeadsetGain>,
+    pub line_out: Option<LineOut>,
+    pub line_out_mix: Option<LineOutMix>,
+    pub home_screen: Option<HomeScreen>,
+    pub screen_dim_minutes: Option<u16>,
+}
+
+impl Extras {
+    pub fn of(c: &HeadsetControls) -> Extras {
+        Extras {
+            bluetooth_at_power_on: c.bluetooth_at_power_on,
+            bluetooth_call: c.bluetooth_call,
+            gain: c.gain,
+            line_out: c.line_out,
+            line_out_mix: c.line_out_mix,
+            home_screen: c.home_screen,
+            screen_dim_minutes: c.screen_dim_minutes,
+        }
+    }
+
+    /// These settings once `change` is made.
+    pub fn with(mut self, change: &HeadsetChange) -> Extras {
+        match change {
+            HeadsetChange::BluetoothAtPowerOn(on) => self.bluetooth_at_power_on = Some(*on),
+            HeadsetChange::BluetoothCall(call) => self.bluetooth_call = Some(*call),
+            HeadsetChange::Gain(gain) => self.gain = Some(*gain),
+            HeadsetChange::LineOut(line_out) => self.line_out = Some(*line_out),
+            HeadsetChange::LineOutMix(mix) => self.line_out_mix = Some(*mix),
+            HeadsetChange::HomeScreen(home) => self.home_screen = Some(*home),
+            HeadsetChange::ScreenDimMinutes(m) => self.screen_dim_minutes = Some(*m),
+            _ => {}
+        }
+        self
+    }
+}
+
+/// A stream-mix level gglinux hasn't written in this run of the app goes out at
+/// 100 (`64`), the level GG's own connect push sends for all three
+/// (`47 64 00 64 64`, capture arctis-1).
+const UNWRITTEN_MIX: LineOutMix = LineOutMix {
+    main: gg_ipc::LINE_OUT_LEVEL_MAX,
+    aux: gg_ipc::LINE_OUT_LEVEL_MAX,
+    mic: gg_ipc::LINE_OUT_LEVEL_MAX,
+};
+
+/// The custom EQ curve being edited, seeded once from what was last applied, and
+/// the base-station settings sent and not shown by the daemon yet; gone with the
+/// daemon, like the mouse's form ([`crate::mouse::MouseForm`]). The stream mix
+/// last written stays: the base station keeps its levels while the daemon is
+/// away.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadsetForm {
     pub bands: Vec<f32>,
     pub editing_custom: bool,
     seeded: bool,
+    pub extras: Pending<Extras>,
+    /// The stream mix the daemon last took from this app; `None` before the first.
+    mix_written: Option<LineOutMix>,
 }
 
 impl Default for HeadsetForm {
@@ -449,18 +212,28 @@ impl Default for HeadsetForm {
             bands: vec![0.0; EQ_BANDS],
             editing_custom: false,
             seeded: false,
+            extras: Pending::default(),
+            mix_written: None,
         }
     }
 }
 
 impl HeadsetForm {
-    /// As [`MouseForm::follow`]: the curve is seeded once from what was applied,
-    /// and starts over, Custom closed, while there's no state.
+    /// As [`crate::mouse::MouseForm::follow`]: the curve is seeded once from
+    /// what was applied, and starts over, Custom closed, while there's no state.
     pub fn follow(&mut self, headset: Option<&gg_ipc::HeadsetState>) {
         match headset {
-            None => *self = HeadsetForm::default(),
+            None => self.afresh(),
             Some(h) => self.seed(&h.controls),
         }
+    }
+
+    /// Everything afresh but the stream mix last written.
+    fn afresh(&mut self) {
+        *self = HeadsetForm {
+            mix_written: self.mix_written,
+            ..HeadsetForm::default()
+        };
     }
 
     pub fn seed(&mut self, c: &HeadsetControls) {
@@ -484,6 +257,28 @@ impl HeadsetForm {
         self.editing_custom = i == EQ_CUSTOM;
         (i != EQ_CUSTOM).then(|| HeadsetChange::EqPreset(i.clamp(0, 3) as u8))
     }
+
+    /// The stream mix to send for one slider moved (0 main, 1 aux, 2 mic): that
+    /// level, and the other two as the daemon last took them from this app, or
+    /// [`UNWRITTEN_MIX`]'s. What the base station reads back is only shown.
+    pub fn mix_to_send(&self, which: i32, level: i32) -> Option<HeadsetChange> {
+        let mut mix = self.mix_written.unwrap_or(UNWRITTEN_MIX);
+        let level = level.clamp(0, i32::from(gg_ipc::LINE_OUT_LEVEL_MAX)) as u8;
+        match which {
+            0 => mix.main = level,
+            1 => mix.aux = level,
+            2 => mix.mic = level,
+            _ => return None,
+        }
+        Some(HeadsetChange::LineOutMix(mix))
+    }
+
+    /// The daemon took `change`: a stream mix is the one written now.
+    pub fn mix_taken(&mut self, change: &HeadsetChange) {
+        if let HeadsetChange::LineOutMix(mix) = change {
+            self.mix_written = Some(*mix);
+        }
+    }
 }
 
 /// The auto-off choice shown, or -1 for not known (or not one of the choices).
@@ -491,6 +286,74 @@ fn auto_off_index(minutes: Option<u16>) -> i32 {
     minutes
         .and_then(|m| AUTO_OFF.iter().position(|a| *a == m))
         .map_or(-1, |i| i as i32)
+}
+
+/// The dim-timeout choice shown (`HeadsetUi.dim-names`), or -1 for not known.
+fn dim_index(minutes: Option<u16>) -> i32 {
+    minutes
+        .and_then(|m| SCREEN_DIM_MINUTES.iter().position(|d| *d == m))
+        .map_or(-1, |i| i as i32)
+}
+
+/// What Bluetooth is doing now, as the base station says; "" while not known.
+pub fn bluetooth_now(c: &HeadsetControls) -> &'static str {
+    match (c.bluetooth_on, c.bluetooth_link) {
+        (_, Some(BluetoothLink::Connected)) => "a phone is connected",
+        (_, Some(BluetoothLink::NotConnected)) => "on, nothing connected",
+        (Some(false), _) | (_, Some(BluetoothLink::Off)) => "Bluetooth off",
+        (Some(true), None) => "Bluetooth on",
+        (None, None) => "",
+    }
+}
+
+/// The 2.4 GHz link to the headset, as the base station says; "" while not known.
+pub fn link_now(pairing: Option<HeadsetPairing>) -> &'static str {
+    match pairing {
+        Some(HeadsetPairing::Connected) => "headset linked",
+        Some(HeadsetPairing::PairedOffline) => "paired, headset off or away",
+        Some(HeadsetPairing::NotPaired) => "headset not paired",
+        None => "",
+    }
+}
+
+/// An optional setting as the index of its choice, -1 for not known.
+fn index<T>(value: Option<T>, of: impl Fn(T) -> i32) -> i32 {
+    value.map_or(-1, of)
+}
+
+fn show_extras(ui: &AppWindow, s: &State, x: &Extras) {
+    let g = ui.global::<HeadsetUi>();
+    let gated = s.experimental.is_some_and(|e| e.on(Feature::HeadsetExtras));
+    g.set_extras_gated(gated);
+    g.set_extras_refusal(
+        Experimental::default()
+            .refusal(Feature::HeadsetExtras)
+            .unwrap_or_default()
+            .into(),
+    );
+    g.set_bt_at_power_on(index(x.bluetooth_at_power_on, i32::from));
+    g.set_bt_call(index(x.bluetooth_call, |c| match c {
+        BluetoothCall::Nothing => 0,
+        BluetoothCall::LowerGame => 1,
+        BluetoothCall::MuteGame => 2,
+    }));
+    g.set_gain(index(x.gain, |v| match v {
+        HeadsetGain::Low => 0,
+        HeadsetGain::High => 1,
+    }));
+    g.set_line_out(index(x.line_out, |v| match v {
+        LineOut::Speakers => 0,
+        LineOut::Stream => 1,
+    }));
+    let mix = x.line_out_mix;
+    g.set_mix_main(index(mix, |m| i32::from(m.main)));
+    g.set_mix_aux(index(mix, |m| i32::from(m.aux)));
+    g.set_mix_mic(index(mix, |m| i32::from(m.mic)));
+    g.set_home_screen(index(x.home_screen, |v| match v {
+        HomeScreen::Detailed => 0,
+        HomeScreen::Simple => 1,
+    }));
+    g.set_dim(dim_index(x.screen_dim_minutes));
 }
 
 fn show_headset_form(ui: &AppWindow, f: &HeadsetForm) {
@@ -544,9 +407,128 @@ pub fn show_headset(ui: &AppWindow, s: &State, form: &RefCell<HeadsetForm>) {
         RadioMode::Range => 1,
     }));
     g.set_eq_preset(c.eq_preset.map_or(-1, i32::from));
+    g.set_bt_now(bluetooth_now(c).into());
+    g.set_link(link_now(c.pairing).into());
+    let extras = form.borrow_mut().extras.show(&Extras::of(c));
+    show_extras(ui, s, &extras);
+}
+
+/// Send one base-station setting: shown at once, then read back until the
+/// daemon shows it too (twice at most), as the base station may answer the first
+/// read after a write with the old value.
+fn send_extra(ui: &AppWindow, client: &Client, change: HeadsetChange) {
+    let Some(h) = client.state().headset else {
+        return;
+    };
+    let sent = with_forms(|f| {
+        let mut form = f.headset.borrow_mut();
+        let sent = form.extras.show(&Extras::of(&h.controls)).with(&change);
+        form.extras.sent(sent);
+        sent
+    });
+    let g = ui.global::<HeadsetUi>();
+    g.set_busy(true);
+    g.set_error(SharedString::new());
+    with_forms(|f| show_headset(ui, &client.state(), &f.headset));
+    let weak = ui.as_weak();
+    let reader = client.clone();
+    let taken = change.clone();
+    client.command(Request::SetHeadset { change }, TIMEOUT, move |result| {
+        let read = result.is_ok();
+        client::runtime().spawn(async move {
+            if read {
+                read_back(
+                    &reader,
+                    || Request::GetHeadsetState,
+                    |a| match a {
+                        ResponseData::Headset { state } => Some(Extras::of(&state.controls)),
+                        _ => None,
+                    },
+                    &sent,
+                )
+                .await;
+            }
+            let error = result.err().map(|e| panel_error(&e)).unwrap_or_default();
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                with_forms(|f| {
+                    let mut form = f.headset.borrow_mut();
+                    form.extras.settle();
+                    if read {
+                        form.mix_taken(&taken);
+                    }
+                });
+                let g = ui.global::<HeadsetUi>();
+                g.set_busy(false);
+                g.set_error(error);
+                crate::refresh(&ui);
+            });
+        });
+    });
+}
+
+/// The extras' callbacks: each sends its change through [`send_extra`].
+fn bind_extras(ui: &AppWindow, client: &Client) {
+    let g = ui.global::<HeadsetUi>();
+    let extra = |make: fn(i32) -> Option<HeadsetChange>| {
+        let weak = ui.as_weak();
+        let client = client.clone();
+        move |v: i32| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(change) = make(v) {
+                send_extra(&ui, &client, change);
+            }
+        }
+    };
+    let power_on = extra(|v| Some(HeadsetChange::BluetoothAtPowerOn(v != 0)));
+    g.on_set_bt_at_power_on(move |on| power_on(i32::from(on)));
+    g.on_set_bt_call(extra(|i| {
+        [
+            BluetoothCall::Nothing,
+            BluetoothCall::LowerGame,
+            BluetoothCall::MuteGame,
+        ]
+        .get(i as usize)
+        .map(|c| HeadsetChange::BluetoothCall(*c))
+    }));
+    g.on_set_gain(extra(|i| {
+        Some(HeadsetChange::Gain(if i == 0 {
+            HeadsetGain::Low
+        } else {
+            HeadsetGain::High
+        }))
+    }));
+    g.on_set_line_out(extra(|i| {
+        Some(HeadsetChange::LineOut(if i == 0 {
+            LineOut::Speakers
+        } else {
+            LineOut::Stream
+        }))
+    }));
+    g.on_set_home_screen(extra(|i| {
+        Some(HeadsetChange::HomeScreen(if i == 0 {
+            HomeScreen::Detailed
+        } else {
+            HomeScreen::Simple
+        }))
+    }));
+    g.on_set_dim(extra(|i| {
+        SCREEN_DIM_MINUTES
+            .get(i as usize)
+            .map(|m| HeadsetChange::ScreenDimMinutes(*m))
+    }));
+    let weak = ui.as_weak();
+    let client = client.clone();
+    g.on_set_mix(move |which, level| {
+        let Some(ui) = weak.upgrade() else { return };
+        // The other two levels as last written, never as read back (R2 H1).
+        if let Some(change) = with_forms(|f| f.headset.borrow().mix_to_send(which, level)) {
+            send_extra(&ui, &client, change);
+        }
+    });
 }
 
 pub fn bind_headset(ui: &AppWindow, client: &Client, form: Rc<RefCell<HeadsetForm>>) {
+    bind_extras(ui, client);
     let g = ui.global::<HeadsetUi>();
     let mark = |ui: &AppWindow, busy: bool, error: SharedString| {
         let g = ui.global::<HeadsetUi>();
@@ -656,54 +638,53 @@ pub fn bind_headset(ui: &AppWindow, client: &Client, form: Rc<RefCell<HeadsetFor
     });
 }
 
+/// Start the headset's working copy afresh (see [`Forms::reset`]), but for the
+/// stream mix last written: the base station kept it.
+pub fn reset(forms: &Forms) {
+    forms.headset.borrow_mut().afresh();
+}
+
 /// The `shot` example's scripted steps for this page (see [`crate::poke`]). A
-/// step with a place in a list takes it in the name (`mouse.set-stage1:3200`,
-/// `headset.set-band3:6` for +6 dB on the fourth band).
+/// step with a place in a list takes it in the name (`headset.set-band3:6` for
+/// +6 dB on the fourth band).
 pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
-    let m = ui.global::<MouseUi>();
     let h = ui.global::<HeadsetUi>();
-    let indexed = |prefix: &str| {
-        name.strip_prefix(prefix)
-            .and_then(|i| i.parse::<i32>().ok())
-    };
-    if let Some(i) = indexed("mouse.set-stage") {
-        m.invoke_set_stage(i, n);
-    } else if let Some(i) = indexed("mouse.pick-button") {
-        m.invoke_pick_button(i, n);
-    } else if let Some(i) = indexed("headset.set-band") {
+    if let Some(i) = name
+        .strip_prefix("headset.set-band")
+        .and_then(|i| i.parse::<i32>().ok())
+    {
         h.invoke_set_band(i, n as f32);
-    } else {
-        match name {
-            "devices.toggle" => {
-                let id = ui.global::<EngineUi>().get_devices().row_data(n as usize);
-                if let Some(d) = id {
-                    ui.global::<EngineUi>().invoke_toggle(d.id);
-                }
+        return true;
+    }
+    match name {
+        "devices.toggle" => {
+            let id = ui.global::<EngineUi>().get_devices().row_data(n as usize);
+            if let Some(d) = id {
+                ui.global::<EngineUi>().invoke_toggle(d.id);
             }
-            "mouse.add-stage" => m.invoke_add_stage(),
-            "mouse.remove-stage" => m.invoke_remove_stage(n),
-            "mouse.pick-stage" => m.invoke_pick_stage(n),
-            "mouse.pick-polling" => m.invoke_pick_polling(n),
-            "mouse.factory-buttons" => m.invoke_factory_buttons(),
-            "mouse.persist" => m.set_persist(n != 0),
-            "mouse.apply-dpi" => m.invoke_apply_dpi(),
-            "mouse.apply-polling" => m.invoke_apply_polling(),
-            "mouse.apply-buttons" => m.invoke_apply_buttons(),
-            "mouse.save" => m.invoke_save(),
-            "headset.set-protect" => h.invoke_set_protect(n != 0),
-            "headset.set-lit-seconds" => h.invoke_set_lit_seconds(n),
-            "headset.set-brightness" => h.invoke_set_brightness(n),
-            "headset.set-noise" => h.invoke_set_noise(n),
-            "headset.set-transparency" => h.invoke_set_transparency(n),
-            "headset.set-sidetone" => h.invoke_set_sidetone(n),
-            "headset.set-mic-volume" => h.invoke_set_mic_volume(n),
-            "headset.set-mic-led" => h.invoke_set_mic_led(n),
-            "headset.set-auto-off" => h.invoke_set_auto_off(n),
-            "headset.set-radio" => h.invoke_set_radio(n),
-            "headset.pick-preset" => h.invoke_pick_preset(n),
-            "headset.apply-bands" => h.invoke_apply_bands(),
-            _ => return false,
         }
+        "headset.set-protect" => h.invoke_set_protect(n != 0),
+        "headset.set-lit-seconds" => h.invoke_set_lit_seconds(n),
+        "headset.set-brightness" => h.invoke_set_brightness(n),
+        "headset.set-noise" => h.invoke_set_noise(n),
+        "headset.set-transparency" => h.invoke_set_transparency(n),
+        "headset.set-sidetone" => h.invoke_set_sidetone(n),
+        "headset.set-mic-volume" => h.invoke_set_mic_volume(n),
+        "headset.set-mic-led" => h.invoke_set_mic_led(n),
+        "headset.set-auto-off" => h.invoke_set_auto_off(n),
+        "headset.set-radio" => h.invoke_set_radio(n),
+        "headset.pick-preset" => h.invoke_pick_preset(n),
+        "headset.apply-bands" => h.invoke_apply_bands(),
+        "headset.set-bt-at-power-on" => h.invoke_set_bt_at_power_on(n != 0),
+        "headset.set-bt-call" => h.invoke_set_bt_call(n),
+        "headset.set-gain" => h.invoke_set_gain(n),
+        "headset.set-line-out" => h.invoke_set_line_out(n),
+        "headset.set-mix-main" => h.invoke_set_mix(0, n),
+        "headset.set-mix-aux" => h.invoke_set_mix(1, n),
+        "headset.set-mix-mic" => h.invoke_set_mix(2, n),
+        "headset.set-home-screen" => h.invoke_set_home_screen(n),
+        "headset.set-dim" => h.invoke_set_dim(n),
+        _ => return false,
     }
     true
 }
@@ -711,170 +692,7 @@ pub(crate) fn poke(ui: &AppWindow, name: &str, n: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gg_ipc::{DeviceKind, MouseDpi, MouseSettings};
-
-    #[test]
-    fn a_stage_is_left_alone_while_typed_and_snapped_once_done() {
-        let mut f = MouseForm::default();
-        // Typing 1250 passes through 125 on the way: snapping that to 100 would
-        // fight the box.
-        f.edit_stage(0, 125);
-        assert_eq!(f.stages[0], 125);
-        f.edit_stage(0, 1250);
-        assert_eq!(f.stages[0], 1250);
-        f.set_stage(0, 1250);
-        assert_eq!(f.stages[0], 1300);
-        f.set_stage(1, 50);
-        assert_eq!(f.stages[1], DPI_MIN);
-        f.set_stage(1, 99_999);
-        assert_eq!(f.stages[1], DPI_MAX);
-        f.edit_stage(1, 99_999);
-        assert_eq!(f.stages[1], DPI_MAX, "even typed, a stage stays in range");
-    }
-
-    #[test]
-    fn what_is_sent_is_snapped_and_shown_so() {
-        // Apply without leaving the box: the typed number is snapped on the way out.
-        let mut f = MouseForm::default();
-        f.edit_stage(1, 1650);
-        let Request::SetMouseDpi {
-            stages,
-            active,
-            save,
-        } = f.dpi_request(true)
-        else {
-            panic!("not a DPI request");
-        };
-        let sent: Vec<u16> = stages.iter().map(|s| s.x).collect();
-        assert_eq!((sent, active, save), (vec![800, 1700], 0, true));
-        assert!(stages.iter().all(|s| s.x == s.y));
-        assert_eq!(f.stages, vec![800, 1700], "the form shows what was sent");
-    }
-
-    #[test]
-    fn stages_come_and_go_within_bounds() {
-        let mut f = MouseForm::default();
-        f.set_stage(1, 3200);
-        for _ in 0..10 {
-            f.add_stage();
-        }
-        assert_eq!(f.stages, vec![800, 3200, 3200, 3200, 3200]);
-        f.pick_stage(9);
-        assert_eq!(f.active, 4, "a pick past the end is the last stage");
-    }
-
-    #[test]
-    fn removing_a_stage_keeps_the_pick_on_the_same_stage() {
-        let mut f = MouseForm {
-            stages: vec![400, 800, 1600],
-            active: 2,
-            ..MouseForm::default()
-        };
-        f.remove_stage(0);
-        assert_eq!((f.stages.clone(), f.active), (vec![800, 1600], 1));
-        f.remove_stage(1);
-        assert_eq!((f.stages.clone(), f.active), (vec![800], 0));
-        f.remove_stage(0);
-        assert_eq!(f.stages, vec![800], "the last stage stays");
-    }
-
-    #[test]
-    fn the_form_is_seeded_once() {
-        let applied = MouseSettings {
-            dpi: Some(MouseDpi {
-                stages: vec![DpiStage { x: 400, y: 400 }],
-                active: 0,
-            }),
-            polling_hz: Some(500),
-            buttons: Some(
-                ["button2", "button1", "button3", "button4", "button5", "dpi"]
-                    .map(String::from)
-                    .to_vec(),
-            ),
-        };
-        let mut f = MouseForm::default();
-        f.seed(&applied);
-        assert_eq!(
-            (f.stages.clone(), f.polling, f.button_menu()),
-            (vec![400], 500, vec![1, 0, 2, 3, 4, 5])
-        );
-        f.set_stage(0, 3200);
-        f.seed(&applied);
-        assert_eq!(
-            f.stages,
-            vec![3200],
-            "a later refresh leaves the edit alone"
-        );
-        assert_eq!(
-            summarise(&applied),
-            "400 dpi · stage 1 · 500 Hz · button layout"
-        );
-    }
-
-    #[test]
-    fn a_part_never_written_keeps_the_forms_own() {
-        let mut f = MouseForm::default();
-        f.seed(&MouseSettings {
-            polling_hz: Some(250),
-            ..MouseSettings::default()
-        });
-        assert_eq!((f.stages.clone(), f.polling), (vec![800, 1600], 250));
-        assert_eq!(f.buttons, FACTORY_BUTTONS.map(String::from).to_vec());
-    }
-
-    #[test]
-    fn a_key_set_elsewhere_is_kept_until_picked_over() {
-        let mut f = MouseForm::default();
-        f.seed(&MouseSettings {
-            buttons: Some(
-                ["button1", "Button2", "f13", "button4", "disabled"]
-                    .map(String::from)
-                    .to_vec(),
-            ),
-            ..MouseSettings::default()
-        });
-        // Case and the "disabled" spelling are the daemon's too; a short list
-        // gets the factory action for the rest.
-        assert_eq!(f.button_menu(), vec![0, 1, -1, 3, 14, 5]);
-        let Request::SetMouseButtons { actions, .. } = f.buttons_request(false) else {
-            panic!("not a buttons request");
-        };
-        assert_eq!(actions[2], "f13", "applying doesn't replace it");
-        f.pick_button(2, 8);
-        assert_eq!(f.buttons[2], "playpause");
-        f.factory_buttons();
-        assert_eq!(f.button_menu(), vec![0, 1, 2, 3, 4, 5]);
-    }
-
-    #[test]
-    fn a_daemon_gone_takes_the_working_copy_with_it() {
-        let state = |applied: Option<MouseSettings>| gg_ipc::MouseState {
-            connected: true,
-            battery: None,
-            applied,
-        };
-        let first = MouseSettings {
-            polling_hz: Some(500),
-            ..MouseSettings::default()
-        };
-        let mut f = MouseForm::default();
-        f.follow(Some(&state(Some(first))));
-        f.add_stage();
-        // A battery notification, or the answer after a write: the edit stays.
-        f.follow(Some(&state(None)));
-        assert_eq!((f.polling, f.stages.len()), (500, 3));
-        // The daemon went away; the one that comes back applied nothing yet.
-        f.follow(None);
-        assert_eq!(f, MouseForm::default());
-        f.follow(Some(&state(None)));
-        assert_eq!(f, MouseForm::default());
-        // And what it applies later seeds the form again.
-        f.follow(Some(&state(Some(MouseSettings {
-            polling_hz: Some(125),
-            ..MouseSettings::default()
-        }))));
-        assert_eq!(f.polling, 125);
-    }
+    use gg_ipc::DeviceKind;
 
     #[test]
     fn the_eq_curve_starts_over_with_the_daemon() {
@@ -934,6 +752,109 @@ mod tests {
         assert_eq!(auto_off_index(Some(0)), 0);
         assert_eq!(auto_off_index(Some(30)), 5);
         assert_eq!(auto_off_index(Some(7)), -1);
+    }
+
+    #[test]
+    fn the_dim_timeout_shows_only_the_captured_choices() {
+        assert_eq!(dim_index(None), -1);
+        assert_eq!(dim_index(Some(0)), 0);
+        assert_eq!(dim_index(Some(30)), 5);
+        assert_eq!(dim_index(Some(60)), 6);
+        assert_eq!(dim_index(Some(45)), -1);
+    }
+
+    #[test]
+    fn a_base_station_change_shows_until_the_daemon_shows_it() {
+        let daemon = HeadsetControls {
+            gain: Some(HeadsetGain::Low),
+            line_out: Some(LineOut::Speakers),
+            ..HeadsetControls::default()
+        };
+        let mut f = HeadsetForm::default();
+        let now = f.extras.show(&Extras::of(&daemon));
+        let sent = now.with(&HeadsetChange::Gain(HeadsetGain::High));
+        f.extras.sent(sent);
+        // The first read after the write may still say low.
+        assert_eq!(
+            f.extras.show(&Extras::of(&daemon)).gain,
+            Some(HeadsetGain::High)
+        );
+        let caught_up = HeadsetControls {
+            gain: Some(HeadsetGain::High),
+            ..daemon.clone()
+        };
+        assert_eq!(f.extras.show(&Extras::of(&caught_up)), sent);
+        assert!(!f.extras.waiting());
+        f.follow(None);
+        assert_eq!(f, HeadsetForm::default(), "gone with the daemon");
+    }
+
+    #[test]
+    fn a_stream_level_goes_out_with_the_levels_gglinux_last_wrote_never_the_read_back() {
+        let mix = |main, aux, mic| Some(HeadsetChange::LineOutMix(LineOutMix { main, aux, mic }));
+        let mut f = HeadsetForm::default();
+        // The base station reads back aux 0, the byte next to aux's place: shown, not sent.
+        let read_back = Extras {
+            line_out_mix: Some(LineOutMix {
+                main: 100,
+                aux: 0,
+                mic: 100,
+            }),
+            ..Extras::default()
+        };
+        assert_eq!(f.extras.show(&read_back), read_back);
+        // Nothing written yet: the other two go out at 100, as GG's own connect push
+        // (`47 64 00 64 64`, capture arctis-1).
+        assert_eq!(f.mix_to_send(0, 50), mix(50, 100, 100));
+        // A change the daemon didn't take isn't remembered.
+        assert_eq!(f.mix_to_send(1, 70), mix(100, 70, 100));
+        // One it took is.
+        f.mix_taken(&HeadsetChange::LineOutMix(LineOutMix {
+            main: 50,
+            aux: 100,
+            mic: 100,
+        }));
+        assert_eq!(f.mix_to_send(1, 70), mix(50, 70, 100));
+        f.mix_taken(&HeadsetChange::LineOutMix(LineOutMix {
+            main: 50,
+            aux: 70,
+            mic: 100,
+        }));
+        assert_eq!(f.mix_to_send(2, 140), mix(50, 70, 100), "100 at most");
+        assert_eq!(f.mix_to_send(2, -5), mix(50, 70, 0));
+        assert_eq!(f.mix_to_send(3, 10), None);
+        // Another setting taken leaves it alone.
+        f.mix_taken(&HeadsetChange::Gain(HeadsetGain::High));
+        assert_eq!(f.mix_to_send(0, 20), mix(20, 70, 100));
+        // The base station keeps its levels while the daemon goes and comes back.
+        f.follow(None);
+        assert!(!f.editing_custom && !f.extras.waiting());
+        assert_eq!(f.mix_to_send(0, 20), mix(20, 70, 100));
+        let forms = Forms::default();
+        *forms.headset.borrow_mut() = f;
+        forms.headset.borrow_mut().pick_preset(EQ_CUSTOM);
+        reset(&forms);
+        assert!(!forms.headset.borrow().editing_custom, "the rest afresh");
+        assert_eq!(forms.headset.borrow().mix_to_send(0, 20), mix(20, 70, 100));
+    }
+
+    #[test]
+    fn bluetooth_and_the_headset_link_read_plainly() {
+        let mut c = HeadsetControls::default();
+        assert_eq!(bluetooth_now(&c), "");
+        c.bluetooth_on = Some(false);
+        c.bluetooth_link = Some(BluetoothLink::Off);
+        assert_eq!(bluetooth_now(&c), "Bluetooth off");
+        c.bluetooth_link = Some(BluetoothLink::NotConnected);
+        assert_eq!(bluetooth_now(&c), "on, nothing connected");
+        c.bluetooth_link = Some(BluetoothLink::Connected);
+        assert_eq!(bluetooth_now(&c), "a phone is connected");
+        assert_eq!(link_now(None), "");
+        assert_eq!(
+            link_now(Some(HeadsetPairing::PairedOffline)),
+            "paired, headset off or away"
+        );
+        assert_eq!(link_now(Some(HeadsetPairing::Connected)), "headset linked");
     }
 
     #[test]

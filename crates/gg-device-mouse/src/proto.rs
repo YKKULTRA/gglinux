@@ -14,6 +14,31 @@ pub const CMD_POLLING_RATE: u8 = 0x17;
 pub const CMD_BUTTONS: u8 = 0x19;
 pub const CMD_SAVE: u8 = 0x09;
 pub const CMD_BATTERY: [u8; 2] = [0xAA, 0x01];
+/// Set the sleep timer. Not in rivalcfg: from our own GG 123 captures (2026-11-08,
+/// `docs/PROTOCOLS.md`), where GG sends it only when saving, followed by [`CMD_SAVE`].
+pub const CMD_SLEEP_TIMER: u8 = 0x2B;
+/// Read the sleep timer back (same captures); the answer is laid out as [`CMD_SLEEP_TIMER`]'s
+/// arguments.
+pub const CMD_READ_SLEEP_TIMER: u8 = 0xAB;
+/// The sleep timers GG offers, in whole minutes: the only values seen on the wire.
+pub const SLEEP_MINUTES: std::ops::RangeInclusive<u8> = 1..=20;
+/// Where the timer's seconds (`u16`, little-endian) sit, counting from the command byte.
+const SLEEP_OFFSET: usize = 5;
+/// Set how the mouse talks to its dongle (GG's High-Efficiency Mode and Wireless
+/// Stability). Same captures; GG sends it at once, without a save.
+pub const CMD_RADIO: u8 = 0x2E;
+/// Read it back: the answer is [`CMD_RADIO`]'s two arguments.
+pub const CMD_READ_RADIO: u8 = 0xAE;
+/// Read the DPI stages back: the answer is [`CMD_SENSITIVITY`]'s arguments.
+pub const CMD_READ_SENSITIVITY: u8 = 0xAC;
+/// Read the polling rate back: the answer is [`CMD_POLLING_RATE`]'s code.
+pub const CMD_READ_POLLING_RATE: u8 = 0x97;
+/// Set what the scroll wheel does: `1A <up entry> <down entry>`, each entry five bytes like
+/// a field of the buttons table [`CMD_BUTTONS`]. Not in rivalcfg: from our own GG 123
+/// captures rival-5 and rival-8 to rival-10 (2026-11-13, `docs/PROTOCOLS.md` §1 "Rival:
+/// more from GG 123"), where GG sends it on Save, followed by [`CMD_SAVE`]. Nothing reads
+/// it back. What the wheel takes: [`wheel_takes`].
+pub const CMD_WHEEL: u8 = 0x1A;
 
 /// The firmware always parses five DPI slots, whatever `count` says.
 pub const MAX_PRESETS: usize = 5;
@@ -152,6 +177,97 @@ pub fn polling_rate_packet(rate: PollingRate) -> Vec<u8> {
     vec![CMD_POLLING_RATE, rate.code()]
 }
 
+pub fn read_polling_rate_packet() -> Vec<u8> {
+    vec![CMD_READ_POLLING_RATE]
+}
+
+/// The answer to `97`: the rate's code. `None` for a code no rate has. A mouse that
+/// isn't answering reads as all zeros, which is also 1000 Hz's code: the caller decides
+/// whether the mouse answered at all (see [`decode_sensitivity`], which can tell).
+pub fn decode_polling_rate(data: &[u8]) -> Option<PollingRate> {
+    [
+        PollingRate::Hz1000,
+        PollingRate::Hz500,
+        PollingRate::Hz250,
+        PollingRate::Hz125,
+    ]
+    .into_iter()
+    .find(|r| Some(&r.code()) == data.first())
+}
+
+pub fn read_sensitivity_packet() -> Vec<u8> {
+    vec![CMD_READ_SENSITIVITY]
+}
+
+/// The DPI of a TrueMove Air code, or `None` for a code the sensor table doesn't have.
+pub fn dpi_of_code(code: u8) -> Option<u16> {
+    let stage = TRUEMOVE_AIR.iter().position(|&c| c == code)?;
+    Some((stage as u16 + 1) * DPI_STEP)
+}
+
+/// The answer to `AC`: `<count> <selected, from 1> <x1..x5> <y1..y5>`, the arguments of
+/// `2C`. Gives the live stages and which one is active (from 0). `None` unless the count,
+/// the selection and every live code make sense: all zeros (no answer) is `None`.
+pub fn decode_sensitivity(data: &[u8]) -> Option<(Vec<DpiStage>, usize)> {
+    let count = usize::from(*data.first()?);
+    let selected = usize::from(*data.get(1)?);
+    if !(1..=MAX_PRESETS).contains(&count) || !(1..=count).contains(&selected) {
+        return None;
+    }
+    let xs = data.get(2..2 + MAX_PRESETS)?;
+    let ys = data.get(2 + MAX_PRESETS..2 + 2 * MAX_PRESETS)?;
+    let stages = (0..count)
+        .map(|i| {
+            Some(DpiStage {
+                x: dpi_of_code(xs[i])?,
+                y: dpi_of_code(ys[i])?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((stages, selected - usize::from(FIRST_PRESET)))
+}
+
+/// How the mouse talks to its dongle. GG shows it as two switches, High-Efficiency Mode
+/// and Wireless Stability; these three are every state it sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Radio {
+    /// GG's High-Efficiency Mode on: `2E 00`.
+    HighEfficiency,
+    /// Both off: `2E 02 00`.
+    Normal,
+    /// GG's Wireless Stability on: `2E 02 01`.
+    Stable,
+}
+
+impl Radio {
+    const ALL: [Radio; 3] = [Radio::HighEfficiency, Radio::Normal, Radio::Stable];
+
+    pub(crate) fn bytes(self) -> [u8; 2] {
+        match self {
+            Radio::HighEfficiency => [0x00, 0x00],
+            Radio::Normal => [0x02, 0x00],
+            Radio::Stable => [0x02, 0x01],
+        }
+    }
+}
+
+pub fn radio_packet(radio: Radio) -> Vec<u8> {
+    let [mode, stability] = radio.bytes();
+    vec![CMD_RADIO, mode, stability]
+}
+
+pub fn read_radio_packet() -> Vec<u8> {
+    vec![CMD_READ_RADIO]
+}
+
+/// The answer to `AE`: `<mode> <stability>`, as `2E` takes them. `None` for any pair GG
+/// never sent. All zeros is High-Efficiency Mode, and also a mouse that isn't answering:
+/// as with [`decode_polling_rate`], the caller decides whether it answered.
+pub fn decode_radio(data: &[u8]) -> Option<Radio> {
+    let pair = data.get(..2)?;
+    Radio::ALL.into_iter().find(|r| r.bytes() == pair)
+}
+
 /// What a physical mouse button does when pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonAction {
@@ -219,26 +335,94 @@ pub fn default_buttons() -> [ButtonAction; BUTTON_COUNT] {
 pub fn buttons_packet(actions: &[ButtonAction; BUTTON_COUNT]) -> Vec<u8> {
     let mut packet = vec![0u8; 1 + BUTTON_COUNT * BUTTON_FIELD_LEN];
     packet[0] = CMD_BUTTONS;
-
     for (i, action) in actions.iter().enumerate() {
         let off = 1 + i * BUTTON_FIELD_LEN;
-        match *action {
-            ButtonAction::Button(n) => packet[off] = n,
-            ButtonAction::Disable => packet[off] = BTN_DISABLE,
-            ButtonAction::DpiCycle => packet[off] = BTN_DPI_SWITCH,
-            ButtonAction::ScrollUp => packet[off] = BTN_SCROLL_UP,
-            ButtonAction::ScrollDown => packet[off] = BTN_SCROLL_DOWN,
-            ButtonAction::Key(code) => {
-                packet[off] = BTN_KEYBOARD;
-                packet[off + 1] = code;
-            }
-            ButtonAction::Multimedia(code) => {
-                packet[off] = BTN_MULTIMEDIA;
-                packet[off + 1] = code;
-            }
-        }
+        packet[off..off + BUTTON_FIELD_LEN].copy_from_slice(&entry(*action));
     }
     packet
+}
+
+/// One action's five bytes, as the buttons table `19` and the wheel `1A` both take them:
+/// its code, then a key's or media key's usage, then zeros.
+fn entry(action: ButtonAction) -> [u8; BUTTON_FIELD_LEN] {
+    let (code, usage) = match action {
+        ButtonAction::Button(n) => (n, 0),
+        ButtonAction::Disable => (BTN_DISABLE, 0),
+        ButtonAction::DpiCycle => (BTN_DPI_SWITCH, 0),
+        ButtonAction::ScrollUp => (BTN_SCROLL_UP, 0),
+        ButtonAction::ScrollDown => (BTN_SCROLL_DOWN, 0),
+        ButtonAction::Key(usage) => (BTN_KEYBOARD, usage),
+        ButtonAction::Multimedia(usage) => (BTN_MULTIMEDIA, usage),
+    };
+    [code, usage, 0, 0, 0]
+}
+
+/// The wheel as it comes from the factory, and as GG sends it by default: up scrolls up,
+/// down scrolls down.
+pub const DEFAULT_WHEEL: [ButtonAction; 2] = [ButtonAction::ScrollUp, ButtonAction::ScrollDown];
+
+/// Which of the wheel's two entries: turned up (the first in `1A`) or down (the second).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelSide {
+    Up,
+    Down,
+}
+
+/// Whether the wheel takes `action` on `side`: only what a capture shows there. Each
+/// entry GG 123 sent is the one the buttons table has for the same action ([`entry`]):
+///
+/// | GG's action | entry | up: capture | down: capture |
+/// |---|---|---|---|
+/// | Button 1, 2, 3, 5, 6 | `01` `02` `03` `05` `06` | rival-8, 22:08:25 to 22:09:12 | none |
+/// | Button 4 | `04` | rival-5 | rival-8 22:10:01 |
+/// | DPI Toggle | `30` | rival-8 22:09:25 | none |
+/// | Scroll Up | `31` | rival-5 (GG's default) | none |
+/// | Scroll Down | `32` | rival-8 22:09:36 | rival-5 (GG's default), rival-8 |
+/// | a keyboard key | `51 <usage>` (A: `51 04`) | rival-9 22:11:45 | none |
+/// | a media key | `61 <usage>` (Volume Up: `61 e9`) | rival-9 22:12:15 | none |
+/// | Deactivate | `00` | rival-10 22:13:50 | none |
+///
+/// So turned down the wheel takes only Scroll Down and Button 4 for now (review R2, M1).
+/// Turned up, it takes every kind but a button the mouse doesn't have (it has
+/// [`BUTTON_COUNT`]) and a key or media code no name in rivalcfg's tables gives
+/// ([`ButtonAction::parse`] never gives one).
+pub fn wheel_takes(side: WheelSide, action: ButtonAction) -> bool {
+    let named = |table: &[(&str, u8)], code: u8| table.iter().any(|&(_, c)| c == code);
+    match (side, action) {
+        (WheelSide::Down, action) => {
+            matches!(action, ButtonAction::ScrollDown | ButtonAction::Button(4))
+        }
+        (WheelSide::Up, ButtonAction::Button(n)) => (1..=BUTTON_COUNT as u8).contains(&n),
+        (WheelSide::Up, ButtonAction::Key(code)) => named(tables::KEYBOARD, code),
+        (WheelSide::Up, ButtonAction::Multimedia(code)) => named(tables::MULTIMEDIA, code),
+        (WheelSide::Up, _) => true,
+    }
+}
+
+/// Build the wheel packet: `1A <up entry> <down entry>`, five bytes each, as GG sends it.
+/// Where GG left a byte of the action before in an entry (rival-10), this writes zeros.
+/// Refuses an action [`wheel_takes`] doesn't take on its side.
+pub fn wheel_packet(up: ButtonAction, down: ButtonAction) -> Result<Vec<u8>> {
+    let mut packet = vec![0u8; 1 + 2 * BUTTON_FIELD_LEN];
+    packet[0] = CMD_WHEEL;
+    for (i, (side, action)) in [(WheelSide::Up, up), (WheelSide::Down, down)]
+        .into_iter()
+        .enumerate()
+    {
+        if !wheel_takes(side, action) {
+            match side {
+                WheelSide::Up => {
+                    bail!("the wheel doesn't take {action:?}: the mouse has no name for it")
+                }
+                WheelSide::Down => bail!(
+                    "{action:?} is not known for the wheel's down position yet: a capture shows only ScrollDown and Button(4) there"
+                ),
+            }
+        }
+        let at = 1 + i * BUTTON_FIELD_LEN;
+        packet[at..at + BUTTON_FIELD_LEN].copy_from_slice(&entry(action));
+    }
+    Ok(packet)
 }
 
 pub fn save_packet() -> Vec<u8> {
@@ -247,6 +431,36 @@ pub fn save_packet() -> Vec<u8> {
 
 pub fn battery_packet() -> Vec<u8> {
     CMD_BATTERY.to_vec()
+}
+
+/// `2B 00 00 00 00 <seconds u16 LE>`: the mouse sleeps after `minutes` without use.
+///
+/// Only GG's own range is taken (1 to 20 minutes): no other value has been seen on the
+/// wire, so what the mouse does with one is unknown.
+pub fn sleep_timer_packet(minutes: u8) -> Result<Vec<u8>> {
+    if !SLEEP_MINUTES.contains(&minutes) {
+        bail!(
+            "the sleep timer takes {} to {} minutes, not {minutes}",
+            SLEEP_MINUTES.start(),
+            SLEEP_MINUTES.end()
+        );
+    }
+    let mut packet = vec![0u8; SLEEP_OFFSET + 2];
+    packet[0] = CMD_SLEEP_TIMER;
+    packet[SLEEP_OFFSET..].copy_from_slice(&(u16::from(minutes) * 60).to_le_bytes());
+    Ok(packet)
+}
+
+pub fn read_sleep_timer_packet() -> Vec<u8> {
+    vec![CMD_READ_SLEEP_TIMER]
+}
+
+/// The answer to `AB`: `00 00 00 00 <seconds u16 LE>`, the arguments of `2B` without its
+/// command byte. `None` for a short answer or a zero (no timer GG would set).
+pub fn decode_sleep_timer(data: &[u8]) -> Option<u16> {
+    let at = SLEEP_OFFSET - 1;
+    let secs = u16::from_le_bytes(data.get(at..at + 2)?.try_into().ok()?);
+    (secs != 0).then_some(secs)
 }
 
 /// Battery state as reported by `AA 01`.
@@ -432,6 +646,174 @@ mod tests {
         assert!(ButtonAction::parse("nonsense").is_err());
     }
 
+    /// Byte for byte as GG 123 sent each wheel action on Save (captures rival-5 and rival-8
+    /// to rival-10, `~/projects/gg-m11/captures/`). The whole report is these eleven bytes
+    /// and zeros. Where GG left a stale byte from the action before (rival-10: Deactivate
+    /// after Volume Up went out as `1a 00 e9 …`), gglinux writes zeros.
+    #[test]
+    fn every_wheel_action_goes_out_as_gg_sends_it() {
+        use ButtonAction::*;
+        let wheel = |up: [u8; 2], down: u8| [0x1A, up[0], up[1], 0, 0, 0, down, 0, 0, 0, 0];
+        let cases = [
+            (
+                Button(1),
+                ScrollDown,
+                wheel([0x01, 0], 0x32),
+                "rival-8 22:08:25",
+            ),
+            (
+                Button(2),
+                ScrollDown,
+                wheel([0x02, 0], 0x32),
+                "rival-8 22:08:37",
+            ),
+            (
+                Button(3),
+                ScrollDown,
+                wheel([0x03, 0], 0x32),
+                "rival-8 22:08:49",
+            ),
+            (Button(4), ScrollDown, wheel([0x04, 0], 0x32), "rival-5"),
+            (
+                Button(5),
+                ScrollDown,
+                wheel([0x05, 0], 0x32),
+                "rival-8 22:09:00",
+            ),
+            (
+                Button(6),
+                ScrollDown,
+                wheel([0x06, 0], 0x32),
+                "rival-8 22:09:12",
+            ),
+            (
+                DpiCycle,
+                ScrollDown,
+                wheel([0x30, 0], 0x32),
+                "rival-8 22:09:25",
+            ),
+            (
+                ScrollDown,
+                ScrollDown,
+                wheel([0x32, 0], 0x32),
+                "rival-8 22:09:36",
+            ),
+            (
+                ScrollUp,
+                ScrollDown,
+                wheel([0x31, 0], 0x32),
+                "rival-8 22:09:48",
+            ),
+            (
+                ScrollUp,
+                Button(4),
+                wheel([0x31, 0], 0x04),
+                "rival-8 22:10:01",
+            ),
+            (
+                Key(0x04),
+                ScrollDown,
+                wheel([0x51, 0x04], 0x32),
+                "rival-9 22:11:45",
+            ),
+            (
+                Multimedia(0xE9),
+                ScrollDown,
+                wheel([0x61, 0xE9], 0x32),
+                "rival-9 22:12:15",
+            ),
+            (
+                Disable,
+                ScrollDown,
+                wheel([0x00, 0], 0x32),
+                "rival-10 22:13:50",
+            ),
+        ];
+        for (up, down, want, seen) in cases {
+            assert_eq!(wheel_packet(up, down).unwrap(), want, "{seen}");
+        }
+        // The names that give the captured key and media key.
+        assert_eq!(ButtonAction::parse("a").unwrap(), Key(0x04));
+        assert_eq!(ButtonAction::parse("volumeup").unwrap(), Multimedia(0xE9));
+        assert_eq!(
+            wheel_packet(DEFAULT_WHEEL[0], DEFAULT_WHEEL[1]).unwrap(),
+            wheel_packet(ScrollUp, ScrollDown).unwrap()
+        );
+    }
+
+    /// Every action a button takes, as the buttons table's field for it.
+    fn every_action() -> Vec<ButtonAction> {
+        use ButtonAction::*;
+        let mut every: Vec<ButtonAction> = (1..=BUTTON_COUNT as u8).map(Button).collect();
+        every.extend([Disable, DpiCycle, ScrollUp, ScrollDown]);
+        every.extend(tables::KEYBOARD.iter().map(|&(_, code)| Key(code)));
+        every.extend(tables::MULTIMEDIA.iter().map(|&(_, code)| Multimedia(code)));
+        every
+    }
+
+    /// The wheel's entry is the buttons table's field for the same action: turned up for
+    /// every action, turned down for the two a capture shows there.
+    #[test]
+    fn a_wheel_entry_is_the_buttons_tables_field() {
+        use ButtonAction::*;
+        for action in every_action() {
+            let mut buttons = default_buttons();
+            buttons[2] = action;
+            let field = &buttons_packet(&buttons)[1 + 2 * BUTTON_FIELD_LEN..][..BUTTON_FIELD_LEN];
+            let up = wheel_packet(action, ScrollDown).unwrap();
+            assert_eq!(&up[1..1 + BUTTON_FIELD_LEN], field, "{action:?} up");
+            if matches!(action, ScrollDown | Button(4)) {
+                let down = wheel_packet(ScrollUp, action).unwrap();
+                assert_eq!(&down[1 + BUTTON_FIELD_LEN..], field, "{action:?} down");
+            }
+        }
+    }
+
+    /// Turned down, only Scroll Down (rival-5, rival-8) and Button 4 (rival-8 22:10:01)
+    /// were captured; everything else was seen only turned up (review R2, M1).
+    #[test]
+    fn the_wheels_down_position_takes_only_what_a_capture_shows_there() {
+        use ButtonAction::*;
+        let mut taken = Vec::new();
+        for action in every_action() {
+            match wheel_packet(ScrollUp, action) {
+                Ok(_) => taken.push(action),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(
+                        e.contains("not known for the wheel's down position yet"),
+                        "{e}"
+                    );
+                    assert!(!wheel_takes(WheelSide::Down, action), "{action:?}");
+                }
+            }
+        }
+        assert_eq!(taken, [Button(4), ScrollDown]);
+        // GG's swap of the two scroll directions sends a `31` turned down: refused.
+        assert!(wheel_packet(ScrollDown, ScrollUp).is_err());
+    }
+
+    /// What the mouse doesn't have, or the tables don't name, is refused, and nothing is
+    /// built for it: a button past the sixth, and key or media codes no name gives.
+    #[test]
+    fn the_wheel_refuses_a_button_or_code_the_mouse_has_no_name_for() {
+        use ButtonAction::*;
+        for action in [
+            Button(0),
+            Button(7),
+            Button(0xFF),
+            Key(0x00),
+            Key(0xF0),
+            Multimedia(0x00),
+            Multimedia(0x30),
+        ] {
+            assert!(!wheel_takes(WheelSide::Up, action), "{action:?}");
+            let up = wheel_packet(action, ScrollDown).unwrap_err().to_string();
+            assert!(up.contains("the wheel doesn't take"), "{up}");
+            assert!(wheel_packet(ScrollUp, action).is_err(), "{action:?} down");
+        }
+    }
+
     #[test]
     fn battery_decoding_rejects_meaningless_readings() {
         // The reply actually observed from the hardware.
@@ -452,5 +834,132 @@ mod tests {
         assert_eq!(decode_battery(&[0x00, 0, 0]), None, "0 means asleep");
         assert_eq!(decode_battery(&[0xFF, 0, 0]), None, "out of range");
         assert_eq!(decode_battery(&[0x10, 0x00]), None, "short reply");
+    }
+
+    /// Byte for byte as GG 123 sent them on each switch (rival-1 capture), and the mouse's
+    /// answers to `AE` there.
+    #[test]
+    fn the_radio_modes_go_out_and_read_back_as_in_ggs_capture() {
+        assert_eq!(radio_packet(Radio::HighEfficiency), [0x2E, 0x00, 0x00]);
+        assert_eq!(radio_packet(Radio::Normal), [0x2E, 0x02, 0x00]);
+        assert_eq!(radio_packet(Radio::Stable), [0x2E, 0x02, 0x01]);
+        assert_eq!(read_radio_packet(), [0xAE]);
+        let mut answer = [0u8; 64];
+        assert_eq!(decode_radio(&answer), Some(Radio::HighEfficiency));
+        answer[0] = 0x02;
+        assert_eq!(decode_radio(&answer), Some(Radio::Normal));
+        answer[1] = 0x01;
+        assert_eq!(decode_radio(&answer), Some(Radio::Stable));
+        for unseen in [[0x00, 0x01], [0x01, 0x00], [0x02, 0x02], [0x03, 0x00]] {
+            assert_eq!(decode_radio(&unseen), None, "{unseen:02X?}");
+        }
+        assert_eq!(decode_radio(&[0x02]), None, "short");
+    }
+
+    /// The mouse's answers to `AC` in the captures, next to the `2C` GG had just sent.
+    #[test]
+    fn the_dpi_stages_read_back_from_the_mouses_answer() {
+        assert_eq!(read_sensitivity_packet(), [0xAC]);
+        let mut answer = [0u8; 64];
+        // GG's defaults, stage 3 active: 400, 800, 1600, 2400, 3200.
+        answer[..12].copy_from_slice(&[
+            5, 3, 0x04, 0x09, 0x12, 0x1B, 0x26, 0x04, 0x09, 0x12, 0x1B, 0x26,
+        ]);
+        let (stages, active) = decode_sensitivity(&answer).unwrap();
+        assert_eq!(stages, [400, 800, 1600, 2400, 3200].map(DpiStage::uniform));
+        assert_eq!(active, 2);
+        // Stage 1 at X 500, Y 400, and active.
+        answer[..12].copy_from_slice(&[
+            5, 1, 0x05, 0x09, 0x12, 0x1B, 0x26, 0x04, 0x09, 0x12, 0x1B, 0x26,
+        ]);
+        let (stages, active) = decode_sensitivity(&answer).unwrap();
+        assert_eq!((stages[0], active), (DpiStage { x: 500, y: 400 }, 0));
+        // What comes back is what would be sent.
+        let sent = sensitivity_packet(&stages, active).unwrap();
+        assert_eq!(sent[1..], answer[..12]);
+        // Two stages: only the live codes are read.
+        answer[..12].copy_from_slice(&[2, 2, 0x09, 0x12, 0, 0, 0, 0x09, 0x12, 0, 0, 0]);
+        let (stages, active) = decode_sensitivity(&answer).unwrap();
+        assert_eq!((stages.len(), active), (2, 1));
+    }
+
+    #[test]
+    fn a_dpi_answer_that_makes_no_sense_reads_as_nothing() {
+        assert_eq!(decode_sensitivity(&[0u8; 64]), None, "no answer");
+        let ok = [
+            5, 3, 0x04, 0x09, 0x12, 0x1B, 0x26, 0x04, 0x09, 0x12, 0x1B, 0x26,
+        ];
+        assert!(decode_sensitivity(&ok).is_some());
+        for (at, bad, why) in [
+            (0, 6, "six stages"),
+            (1, 0, "no stage active"),
+            (1, 6, "a stage past the count"),
+            (2, 0x01, "a code the sensor has none for"),
+        ] {
+            let mut answer = ok;
+            answer[at] = bad;
+            assert_eq!(decode_sensitivity(&answer), None, "{why}");
+        }
+        assert_eq!(decode_sensitivity(&ok[..11]), None, "short");
+        // Every code the table has comes back as its DPI.
+        for dpi in (DPI_MIN..=DPI_MAX).step_by(usize::from(DPI_STEP)) {
+            assert_eq!(dpi_of_code(dpi_code(dpi)), Some(dpi));
+        }
+    }
+
+    /// The mouse's answers to `97` in the captures: `03` before (125 Hz), `01` after 500 Hz
+    /// was saved, `00` after 1000 Hz.
+    #[test]
+    fn the_polling_rate_reads_back_from_the_mouses_answer() {
+        assert_eq!(read_polling_rate_packet(), [0x97]);
+        for (code, rate) in [
+            (0x00, PollingRate::Hz1000),
+            (0x01, PollingRate::Hz500),
+            (0x02, PollingRate::Hz250),
+            (0x03, PollingRate::Hz125),
+        ] {
+            assert_eq!(decode_polling_rate(&[code, 0, 0]), Some(rate));
+        }
+        assert_eq!(decode_polling_rate(&[0x04]), None);
+        assert_eq!(decode_polling_rate(&[]), None);
+    }
+
+    /// Byte for byte as GG 123 sent them when saving 20 and 10 minutes (rival-2/-3b captures).
+    #[test]
+    fn the_sleep_timer_goes_out_as_gg_sends_it() {
+        assert_eq!(
+            sleep_timer_packet(20).unwrap(),
+            [0x2B, 0x00, 0x00, 0x00, 0x00, 0xB0, 0x04]
+        );
+        assert_eq!(
+            sleep_timer_packet(10).unwrap(),
+            [0x2B, 0x00, 0x00, 0x00, 0x00, 0x58, 0x02]
+        );
+        assert_eq!(sleep_timer_packet(1).unwrap()[5..], [0x3C, 0x00]);
+    }
+
+    #[test]
+    fn a_sleep_timer_outside_ggs_range_is_refused() {
+        for minutes in [0, 21, 255] {
+            let e = sleep_timer_packet(minutes).unwrap_err().to_string();
+            assert!(e.contains("1 to 20 minutes"), "{minutes}: {e}");
+        }
+    }
+
+    /// The mouse's answers to `AB` in the captures: 5, 10 and 20 minutes.
+    #[test]
+    fn the_sleep_timer_reads_back_from_the_mouses_answer() {
+        assert_eq!(read_sleep_timer_packet(), [0xAB]);
+        let mut answer = [0u8; 64];
+        for (bytes, secs) in [
+            ([0x2C, 0x01], 300),
+            ([0x58, 0x02], 600),
+            ([0xB0, 0x04], 1200),
+        ] {
+            answer[4..6].copy_from_slice(&bytes);
+            assert_eq!(decode_sleep_timer(&answer), Some(secs));
+        }
+        assert_eq!(decode_sleep_timer(&[0, 0, 0, 0, 0x2C]), None, "short");
+        assert_eq!(decode_sleep_timer(&[0u8; 64]), None, "zero");
     }
 }

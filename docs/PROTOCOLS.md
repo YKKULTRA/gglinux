@@ -57,12 +57,74 @@ strips byte 0 and the device receives a 64-byte report beginning with the opcode
 - Kernel `hid-steelseries` does **not** export this mouse's battery to upower → poll `0xAA 0x01`
   ourselves (Solaar-style). Treat timeout/`0` as "asleep/unknown".
 - Original 2020 model `1038:1830` deltas: sensitivity `0x20` with `dpi_length_byte=2`; everything else same.
-- **Not covered by any public RE (fresh-RE candidates):** macros, sleep/dim timers, high-efficiency
-  mode, Bluetooth-side config.
+- **Not covered by any public RE (fresh-RE candidates):** macros, Bluetooth-side config. The sleep
+  timer, High-Efficiency Mode and Wireless Stability are now captured (below).
+
+### 1a. Captured from GG 123 (2026-11-08)
+
+Our own USB captures of GG 123.0.0 in a Windows VM with the mouse passed through (pcaps, action logs
+and the full write-up: `RIVAL-PROTOCOL.md` in the M11 capture folder). Same transport as above; answers
+to queries are 64-byte input reports, first byte at index 0.
+
+| Function | Bytes | Notes |
+|---|---|---|
+| Sleep timer | `2B 00 00 00 00 <seconds u16 LE>` | GG sends it only when saving, then `09`; GG offers 1–20 min (seen: `58 02` = 10 min, `B0 04` = 20 min). **Built (gated `mouse_power`); verified on this mouse 2026-11-13** (read back after the pacing fix; a 1 min timer put it to sleep after about a minute). |
+| Read sleep timer | `AB` → `00 00 00 00 <seconds u16 LE>` | 300, 600, 1200 read back as set. **Built (gated `mouse_power`); verified 2026-11-13.** |
+| High-Efficiency / Wireless Stability | `2E 00` (High-Efficiency on), `2E 02 00` (normal), `2E 02 01` (normal + stability) | sent live; read back with `AE` → `<mode> <stability>`. **Built (gated `mouse_power`); each mode read back from this mouse 2026-11-13.** |
+| Wheel bindings | `1A 31 00 00 00 00 32 …` | wheel up/down, same codes as `19`; see "Rival: more from GG 123" below. **Built (gated `mouse_wheel`), untested here.** |
+| Read DPI stages | `AC` → `<count> <current> <X×5> <Y×5>` | the layout of `2C`. **Built (gated `mouse_power`); verified 2026-11-13**, separate X/Y included. |
+| Read polling rate | `97` → `<code>` | the codes of `17`. **Built (gated `mouse_power`); verified 2026-11-13.** |
+| Unknown queries | `D0`, `90` → `01 05`; `E8` → `04`/`01` | GG polls `E8` every ~2 s |
+
+Captures `rival-1`, `rival-2` and `rival-3b` (2026-11-08). The "verified" notes come from the hardware test log of
+2026-11-13 (each value read back from the mouse on a fresh poll).
+
+**Pacing (found on hardware, 2026-11-13):** a command sent straight after another makes the mouse drop
+the first. A setting followed at once by the save `09` was lost every time (DPI, polling rate and the sleep
+timer alike; the mouse kept reporting its old value), 5 ms apart it was kept. GG leaves 30–40 ms between
+its commands; gglinux now keeps 35 ms (`COMMAND_PACE`). After a polling-rate command (`17`, even with the
+rate unchanged) or a radio-mode command (`2E`) the dongle answers nothing, or late enough to mix answers
+up, for about a second, and a command sent 0.5–0.6 s after one was lost (1.5 s: kept). GG waits 3.0 s after
+`17` in both captures and 1.4–2.7 s after `2E`; gglinux waits 3 s after either (`LINK_PACE`). A save needs
+no extra time: a timer sent 40 ms after `09` was kept.
+`2B` on its own takes effect at once, without `09`: a 60 s timer sent to a mouse that
+had lain still for minutes put it to sleep on the spot, after which it answers no query until it's moved.
+
+A mouse that isn't answering reads as all zeros, which would decode as 1000 Hz (`97` → `00`) and
+High-Efficiency Mode (`AE` → `00 00`). gglinux believes those two only next to an `AC` answer with a
+stage count of 1 to 5, which zeros can't be.
+
+**Asleep (gglinux, M11 b3):** every write starts with a battery query (`AA 01`, the same one the poll sends every
+60 s) made for it. If that query gets no reading, the mouse is asleep and is sent nothing else: the answer is "the
+mouse is asleep: move it, then try again", and its last readings are dropped until it wakes. (On 2026-11-13 a sleep
+timer sent to a sleeping mouse was lost while gglinux said "ok"; this is the fix.) After a write, `AC`, `97`, `AB` and
+`AE` are read back, at most twice, 300 ms apart (`READ_AGAIN`), while `mouse_power` is on; a mouse that still reports
+the old value gets an error naming the setting. The buttons (`19`) and the wheel (`1A`) have no read.
+
+Acceleration, deceleration and angle snapping send nothing to the mouse (only `09` on save, capture
+`rival-3b`): GG applies them on the PC. Bluetooth Smoothing sends nothing over the 2.4 GHz link when toggled; it
+only applies in Bluetooth mode.
 
 Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.py`, `handlers/multidpi_range_choice_xy.py`, `devices/dpi.py` (all WTFPL).
 
 ---
+
+### Rival: more from GG 123 (2026-11-13)
+
+Wheel bindings `1a <up action> 00 00 00 00 <down action> …` then `09` on Save (Scroll Up = Button 4: `1a 04 00 00 00 00
+32`; back: `1a 31 … 32`), actions as in the button table `19` (capture `rival-5`). A macro on a button sends nothing but
+`09`: GG plays mouse macros on the PC. No pairing or lift-off control in GG for this mouse (captures `rival-4` …
+`rival-7`).
+
+Captures `rival-8` … `rival-10`: each wheel entry is the buttons table's field for the same action, for every action GG
+offers: Button 1–6 (`01`–`06`), DPI Toggle `30`, Scroll Up `31`, Scroll Down `32`, a key `51 <usage>` (A: `51 04`), a
+media key `61 <usage>` (Volume Up: `61 e9`), Deactivate `00`. All of these were seen in the up position; the down
+position was seen only with `32` (`rival-5`, `rival-8`) and Button 4 `04` (`rival-8`). GG leaves a stale usage byte when
+the action changes type (`1a 00 e9`, then `1a 31 e9`).
+
+gglinux (M11 b3 and c1, gated `mouse_wheel`, untested here): turned up, the wheel takes any of those actions; turned
+down, only `32` and `04`, until a capture shows more there. It writes zeros where GG left a stale byte. With the gate
+off, no `1A` goes out at all.
 
 ## 2. Arctis Nova Pro Wireless — headset + base station (GameDAC Gen 2) — `1038:12e0`
 
@@ -106,14 +168,19 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 | Noise mode | `06 bd <0\|1\|2>` | 0 off, 1 transparency, 2 ANC (loteran; status byte 10, event `07 bd`) |
 | Transparency level | `06 b9 <1-10>` | status byte 8, event `07 b9` |
 | Mic volume/gain | `06 37 <1-10>` | 1 = muted, 10 = 100% (loteran's shipped slider; the `0xa0` figure elsewhere is contradicted by it — confirm by ear). Not in the status readback |
-| Analog gain (hi-Z) | `06 27 <1=low\|2=high>` | hardware gain toggle, **not** a sample-rate change |
+| Output gain | `06 27 <1=low\|2=high>` | the base station's output gain (GG's Audio tab "Gain", Arctis Sound Manager's "Audio Gain"), **not** a mic hi-Z gain or a sample-rate change; captures `arctis-1` (`27 02` / `27 01`) |
 | Mic-mute LED brightness | `06 bf <1-10>` | 1 is the minimum (HeadsetControl "off" = 1, "on" = 10); status byte 11 |
 | Auto-shutoff timer | `06 c1 <0-6>` | `0`=never, `1=1m,2=5m,3=10m,4=15m,5=30m,6=60m`; status byte 12 |
 | 2.4 GHz mode | `06 c3 <0=speed\|1=range>` | |
 | ChatMix enable | `06 49 01` | disable `06 49 00`; enables the dial interrupt (below) |
 | Sonar icon on OLED | `06 8d 01` | |
 | Volume set | `06 25 <atten 0-56>` | 0=max, 56=mute |
-| Line-out | `06 43 <v>` / per-stream `06 47 <mainL> <mainR> <aux>` | |
+| Line-out | `06 43 <1=speakers\|2=stream>`; stream mix `06 47 <main> 00 <aux> <mic>` (0–100 each) | as GG sends them (captures `arctis-3`); Arctis Sound Manager sends main twice in `47`, GG `00` in that place |
+| Bluetooth on at power-on | `06 b2 <0\|1>` | captures `arctis-2` |
+| Bluetooth call | `06 b3 <0 nothing\|1 game 12 dB lower\|2 mute game>` | captures `arctis-2` |
+| Home screen | `06 89 <0 detailed\|1 simple>` | captures `arctis-2` |
+| Screen dim timeout | `06 83 <n>` | `00` never, `01`…`06` = 1, 5, 10, 15, 30, 60 min (captures `arctis-2`, `arctis-3`; 60 min = `83 06` in `arctis-5`). Arctis Sound Manager's init sends `83 01` but names no codes; these come from the captures |
+| Screen settings query | `06 80` | reply below; GG asked it in `arctis-5` |
 | OLED frame | `06 93 <x> 00 <w> <h> <pixels>` | **1024-byte feature report** per strip, strips ≤ 64 px wide (x = 0, 64), column-major LSB-top, 128×64 panel. One all-black frame blanks the panel and holds 3+ min; re-sending every 2 s flashes the stock screen through. **Verified 2026-09-27** |
 | OLED brightness | `06 85 <1-10>` | 64-byte output report. **No off level**: `0` behaves like `1` (ggoled rejects it). Verified 2026-09-27 |
 | OLED return-to-UI | `06 95` | stock screen back immediately. A headset-wheel volume change also returns to it, permanently. Verified 2026-09-27 |
@@ -124,6 +191,34 @@ Reuse: `flozz/rivalcfg` `devices/rival3_wireless_gen2.py`, `usbhid.py`, `mouse.p
 **`7`=spare/charge-slot battery** (hot-swap), `8`=transparency_level, `9`=mic_status,
 `10`=noise_cancelling, `11`=mic_led_brightness, `12`=auto_off_minutes, `13`=wireless_mode,
 `14`=wireless_pairing, **`15`=headset_power_status (`0x01` offline / `0x02` cable-charging / `0x08` online)**.
+
+Bluetooth and pairing bytes, as gglinux decodes them since M11 (Arctis Sound Manager's `status`, checked against
+GG's replies): byte 2 Bluetooth on at power-on (`0`/`1`), 3 what a call does (the `b3` codes), 4 Bluetooth power
+(`00` on, `01` off), 5 Bluetooth link (`0` off, `1` a phone connected, `2` on, nothing connected), 14 the 2.4 GHz link
+(`1` not paired, `4` paired with the headset off or away, `8` connected). Seen: `06 b0 00 00 01 00 00 08 08 00 02 0a 05
+00 04 01` (`arctis-1`, headset off) and `06 b0 00 00 01 00 01 08 08 00 02 0a 05 00 08 08` (`arctis-5`, headset on).
+
+### Replies to `06 20` and `06 80` (M11)
+
+Offsets count the report id as byte 0. The layout is Arctis Sound Manager's (`settings_readback`, `probe_queries`);
+our captures agree with it but can't prove every byte, because neighbouring values were equal in the only replies we
+have (review R2: stream main, aux and mic all `64`; gain and line out both `01`).
+
+- **`06 20`** (the daemon polls it every second): 3 volume (attenuation 0–56), 4 gain (`1`/`2`),
+  5 surround, 6 EQ preset (0–4 = Flat, Bass Boost, Focus, Smiley, Custom), 7–16 the Custom bands (`0x14` = 0 dB),
+  17 mic volume (1–10), 18 sidetone (0–3), 19 line out (`1`/`2`), 20–21 ChatMix, 22 stream main, 23 unused, 24 stream
+  aux, 25 stream mic. `arctis-5`: `06 20 00 03 01 00 00 14×10 0a 00 01 64 64 64 00 64 64`, the values GG pushed next.
+- **`06 80`**: 2 dim timeout (the `83` codes), 3 brightness, 4 idle brightness, 5 home screen, 6 home-screen mic mute,
+  7 Sonar present. `arctis-5`: `06 80 01 0a 01 00`, the values GG pushed next (`83 01`, `85 0a`, `89 00`).
+- `06 10` answers with an ASCII firmware string (`0000.003.0820001.029.027…` in `arctis-5`); gglinux doesn't use it.
+
+**What gglinux does with them (M11 b4, gated `headset_extras`, untested here):** it sends the seven base-station
+settings above (`b2`, `b3`, `27`, `43`, `47`, `89`, `83`) as GG does, each alone: GG sends no save (`09`) after them,
+and neither does gglinux, so whether the base station keeps them over a power cycle isn't known yet. Commands to the
+base station keep 50 ms apart (`COMMAND_GAP`, Arctis Sound Manager's `time_between_commands_ms`); the feature
+reports that blank the screen don't count in that gap. It shows gain, line out, sidetone, mic volume, EQ, Bluetooth
+and the 2.4 GHz link from the replies above. `06 80` is asked only while the gate is on: every 30 s, and 5 s after a
+screen setting changes here, with the first reply after the change skipped (it can still hold the old value).
 
 ### Interrupt-IN events (RX `0x07 ..`, read continuously from iface 4)
 - **ChatMix dial:** `07 45 <game 0x00-0x64> <chat 0x00-0x64>` — both `0x64` at center detent.
@@ -156,6 +251,16 @@ Reuse: `Sapd/HeadsetControl` `lib/devices/steelseries_arctis_nova_pro_wireless.h
 `Dymstro/nova-chatmix-linux` `nova-chatmix.py` + udev/systemd units (0BSD, copy freely).
 
 ---
+
+### Captured from GG 123 (2026-11-13), base station `12e0`, headset off
+
+Our captures `arctis-1` … `arctis-3`; writes are `06 <op> <args>` on interface 4. They match Arctis Sound Manager
+(ea410e0): gain High `27 02` / Low `27 01`; Bluetooth on at power-up `b2 01`/`00`; Bluetooth call lower 12 dB `b3 01`,
+mute game `b3 02`, nothing `b3 00`; home screen Simple `89 01` / Detailed `89 00`; line-out Streaming `43 02` /
+Speakers `43 01`; stream mix `47 <main> 00 <aux> <mic>` (0–100). New: **OLED dim timeout `83 <n>`**: Off `00`, 1 min
+`01`, 5 `02`, 10 `03`, 15 `04`, 30 `05` (60 presumably `06`). GG's connect push sends `c1 05 · 89 00 · c3 00 · 39 00 ·
+bf 0a · 43 01 · 83 01 · b2 00 · 47 64 00 64 64 · 85 0a · 37 0a · 27 01 · b3 00 · 2e 00 · 33 14×10` (no ANC write). GG
+shows no idle brightness, USB source or pairing control for this model.
 
 ## 3. Apex Pro TKL Gen 3 — keyboard — `1038:1642`
 
@@ -192,7 +297,7 @@ to its LED — all but Menu, which types Application `0x65` (the HID usage; not 
 unit): the table has no `0x65` and lights Menu as `0xE7`. gglinux opens these read-only, and only
 with the optional `61-gglinux-reactive.rules` installed; the default udev rule leaves them root-only.
 
-### 3b. OLED — 128×40 monochrome — command `1F 81` (built 2026-10-29, untested here)
+### 3b. OLED — 128×40 monochrome — command `1F 81` (built 2026-10-29, the live frame verified here 2026-11-13)
 
 > **Source, adapted:** Apex Control's protocol reference (github.com/Rikearon/apex-control,
 > `docs/PROTOCOL.md`, © 2026 Henrique Aron, CC BY 4.0, <https://creativecommons.org/licenses/by/4.0/>),
@@ -235,7 +340,7 @@ Reuse: `not-jan/apex-tux` `apex-hardware/src/usb.rs` + `device.rs` (Unlicense) �
 > `0x1642` is unknown** — capture it from SteelSeries GG on Windows alongside the M5 actuation
 > captures rather than guessing further on this interface.
 
-### 3c. Actuation / switch behavior — command `38` (built 2026-10-29, untested here)
+### 3c. Actuation / switch behavior — command `38` (built 2026-10-29; sent here, not checked by hand, and on hold since 2026-11-13, §3e)
 
 > **Source, adapted:** the same Apex Control reference (CC BY 4.0). All of these write the
 > keyboard's RAM only (checked there: the flash profile is unchanged afterwards), so a power cycle
@@ -254,8 +359,10 @@ Reuse: `not-jan/apex-tux` `apex-hardware/src/usb.rs` + `device.rs` (Unlicense) �
 > - Rapid Tap (output, 65 bytes): `38 66 <0|1>` on/off; `38 67 <count>` then
 >   `index, key1, key2, mode | 0x80 if both report, 0, 0` per pair, at most 10. Modes 0–3 are
 >   documented as last-wins, neither, first-wins, second-wins; not verified anywhere.
-> - **Not built:** key bindings (`36`, which also replaces the Fn layer's shortcuts if written
->   blank), and onboard profile images (`02` erase, `03` write: the flash commands below).
+> - Key bindings (`36`, which also replaces the Fn layer's shortcuts if written blank) are built
+>   since M11, behind `keyboard_bindings`: every write starts from a read, and the keyboard's own Fn
+>   shortcuts are kept byte for byte (see the allowlist below and §3e). Onboard profile images (`02`
+>   erase, `03` write) are §3d's, behind a gate.
 
 Earlier notes:
 No public project implements OmniPoint / Rapid Trigger / Rapid Tap / Protection Mode for *any* Apex
@@ -267,13 +374,195 @@ Pro generation on Linux. This is the project's one real reverse-engineering effo
 - **Method:** capture GG↔keyboard traffic with usbmon/Wireshark (Windows host or Windows-in-VM/Wine),
   diff reports while toggling one setting at a time, decode opcodes + per-key byte layout.
 
-### ⚠ Firmware / bricking DENYLIST (never send)
-SteelSeries "FIZZ" update protocol lives on the `0xFFC0` interface: 9-byte header
-`(cmd u8, fsid, fileid, block-size u16 LE, offset u32 LE, payload)`. **Never emit:**
-`FIZZ_ERASE 0x02`, `FIZZ_FILE_ACCESS 0x03`, `FIZZ_FILE_CRC 0x04`, or any bootloader-entry
-(`custom_enter_boot_bytes`, device-specific, unpublished). **Safe read-only/reversible probes to
-start with:** firmware `0x90`, profile `0x89`, region `0xF5`, RGB `0x40`/`0x41` (already validated
-against `0x1642` by OpenRGB). Keep all fuzzing away from the FIZZ range. (Ref: fwupd discussion #10308.)
+### 3d. Onboard profile slots — `83` read, `02`/`03` erase and write, `B1`, `B2` (built M11, gated off; reads and slot-5 writes verified here 2026-11-13)
+
+> **Source, adapted:** the same Apex Control reference (CC BY 4.0), "Onboard profiles & the flash
+> filesystem", "Image layout", "CRC", "Writing safely" and "Queries & misc". Its author reports a
+> full slot read, and an erase + 25-chunk write + `B1` + full read-back, as confirmed on one keyboard
+> (fw 1.19.7), first on spare slot 4 (0-based: file `0x84`, "Config 5", which ggctl and the app call
+> slot 5). Where the document leaves the shape or timing open, gglinux does what Apex Control's own
+> code does at the same commit (MIT; pinned in `gglinux-audit-2026-11-05/evidence/apexkit-f7db8c5/`,
+> cited `AK:<file>:<line>`), as review R1-onboard found. gglinux builds them behind `keyboard_onboard`
+> (off by default). On this keyboard (2026-11-13, hardware test log): all five slots read twice,
+> byte-identical, CRC and schemas right; a backup written back into spare slot 5 and a slot-5 write of a
+> new screen picture both read back byte for byte; `B1` answered `B1 00 04 01`. What the keyboard does
+> after a load (`B2`) wasn't watched.
+>
+> - Every setting command above writes RAM only; at power-up the keyboard loads the active slot's
+>   flash image. Slots 0–4 (shown 1–5) are files `0x80 + slot`. Integers are little-endian.
+> - Read a chunk (feature, write then read): request `83 01 <file> F4 01 <offset u32>`; the feature
+>   read answers `83 <err> <data…>`. gglinux asks for 25 × 500 bytes at offsets 0, 500 … 12000 and
+>   drops the last chunk's 176 bytes past the image, as Apex Control's code reads (AK
+>   `ApexDevice.swift:214-245`, `OnboardProfile.swift:136-148`). It waits 13 ms between the request
+>   and the read (the feature report still holds the last command's answer until then; AK
+>   `HIDTransport.swift:247-253`) and tries each chunk up to 4 times, 50 ms apart (AK
+>   `ApexDevice.swift:223-237`).
+> - Erase (output → input): `02 01 <file>`; the input report comes when the erase is done (up to
+>   6 s). What it holds isn't documented: gglinux only waits for it (one that starts with `02`).
+> - Write a chunk (feature): `03 01 <file> F4 01 <offset u32> <data…>`, 500-byte chunks, 13 ms after
+>   each one, the last too. The 25th is sent exactly as Apex Control's code sends it: size 500 at
+>   offset 12000, the image's last 324 bytes, then 176 × `0xFF` (AK `OnboardProfile.swift:155-177`,
+>   pinned by its test `OnboardProfileTests.swift:302-318`). Nothing but `0xFF` goes past byte 12323.
+> - Check (output → input): `B1 <slot>`. The reference says only that the firmware CRC-checks the
+>   slot, and documents no answer. gglinux waits up to 2 s, logs what came, and lets the full
+>   read-back decide, as Apex Control's code does (AK `ApexDevice.swift:274-277`). An answer other
+>   than `B1 00`, or none, is kept as a note in the result until a session on the keyboard shows
+>   what a good answer looks like.
+> - Load (output): `B2 <slot>`, no answer.
+> - The input queue: the kernel keeps every input report the interface sends for the open file.
+>   Before the erase and before `B1`, gglinux throws away the ones nobody read, and while it waits
+>   it skips reports that don't start with the opcode it waits for, so an old or late answer to
+>   something else is never taken for the erase's or the check's (Apex Control waits only for the
+>   report after its own send: AK `HIDTransport.swift:191-197, 259-286`).
+> - Image (profile schema 3, device schema 8, fw ≥ 1.19.0), 12 324 bytes = 12 320-byte body + CRC.
+>   Offsets: 0 schema `3` (u32) · 4 name, 24 bytes ASCII · 28 onboard lighting, 48 (Fn-lit mask at
+>   40) · 76 Fn key, u32 (factory `0xF0`) · 80 normal-layer bindings, 100 × 5 · 580 Fn-layer
+>   bindings, 100 × 5 · 1080 device schema `8` (u32) · 1084 primary actuation, 70 `h` then 70 `l` ·
+>   1224 three zone levels + a 70-byte zone list · 1306 second actuation `h`, `l` (`FF FF` off),
+>   release modes, Rapid Trigger distance, 70 each · 1586 protection ms (u32) + 70 distances ·
+>   1660 second-actuation bindings, 70 × 5 · 2010 screen picture, 640 bytes as `1F 81` · 2650 Rapid
+>   Tap, 10 × `key1, key2, mode | 0x80 both, 0, 0` + the on byte · 2701 padding · 2704 macros, 9 600
+>   bytes · 12304 GUID, 16 · 12320 CRC. A test pins each as a number.
+> - The per-key tables (bindings, actuation, release, distance, protection) are in the firmware's
+>   own key order (`deviceKeyIndexToHID` in ApexKit), which the reference doesn't list. His slot
+>   images confirm that order (§3e), but a slot write still leaves the actuation, release, distance
+>   and protection tables as the slot has them; of the bindings, only a macro key's normal-layer
+>   place is written (§3f).
+> - CRC: the STM32 CRC unit's CRC-32, polynomial `0x04C11DB7`, init `0xFFFFFFFF`, no reflection,
+>   no final XOR, fed as 32-bit little-endian words over the 12 320 body bytes (the byte-wise
+>   equivalent is CRC-32/MPEG-2 with each word's bytes reversed). ApexKit's vectors (`C704DD7B`,
+>   `1DABE74F`, `8DCBFB33`, `908EDE87`; AK `OnboardProfileTests.swift:64-70`) are in the tests.
+> - Writing safely, as gglinux does it (`crates/gg-device-keyboard/src/onboard.rs`,
+>   `Keyboard::write_slot`): read the whole slot and check size, schemas and CRC → save a backup
+>   file (`~/.config/gglinux/onboard-backups/slot<N>-<UTC>.bin`, folder 700, file 600, synced with
+>   its folder) and read it back; it must equal the slot or nothing is erased → change the image in
+>   memory and check it the same way → erase → 25 chunks → `B1` → read everything back and compare
+>   (once more if the first read differs, as the first read after a change may lag). On any failure
+>   from the erase on, the old image goes back, and that restore never stops once its erase is out:
+>   each send is tried 3 times, an erase that doesn't answer is waited out for its whole 6 s, `B1`
+>   decides nothing, the read-back always runs, and the whole restore is done up to 3 times before
+>   it reports failure. The worker sends nothing else meanwhile, so the lighting stream pauses
+>   around the write; stopping or restarting the daemon waits for a write to end. An unchanged
+>   image isn't written. Most of a write takes about 2 s; with every wait run out, about 37 s.
+> - A slot that doesn't check out any more (a write cut short, a restore that failed) is never
+>   written that way. `ggctl onboard restore N <backup file> --damaged` (its own question first)
+>   puts a backup into it (`Keyboard::recover_slot`): the slot is read and saved raw as
+>   `slot<N>-<UTC>-damaged.bin`, the backup file is checked (size, schemas, CRC), then erase,
+>   25 chunks, `B1` and read-back as a restore does them. It's refused for a slot that checks out,
+>   and for one that holds a whole image with its CRC right but other schemas (other firmware's
+>   layout). A slot that reads bad on a plain read is saved the same way, to look at later.
+
+### 3e. Captured from GG 123 (2026-11-13), firmware 1.19.7
+
+Our own USB captures of GG 123.0.0 with the keyboard passed through to a Windows VM (pcaps `apex-2…8`,
+action logs and screenshots in the M11 capture folder). All on interface 1; answers to output reports
+come as input reports on endpoint `0x82`.
+
+| What | Bytes | Notes |
+|---|---|---|
+| Protection Mode | release-mode table `38 62 44 [key, mode] × 68` | mode `00` neither, `02` Rapid Trigger, `03` Protection Mode, `04` both. **Built (gated `keyboard_protection`).** |
+| Deep press, "none" | `38 61 44 02 [key, h, l] × 68` | GG sends `00 00` for keys never set and `FF FF` for a key switched off; Apex Control sends `FF FF`. gglinux now sends what GG does. His flash images hold `00 00`. |
+| Deep-press bindings | (GG's text) | "Maximum of 8 dual actuation keybinds permitted": enforced in `Bindings::validate`. |
+| Slot write | `02 01 <file>` → input `02 00` (125 ms); 25 × `03 01 <file> F4 01 <offset u32>` ~15 ms apart, the last at 12000 with size 500; `B1 <slot>` → `B1 00 <slot> 01`; `B2 <slot>` → `B2 00 <slot>` | GG's Save. The shapes of §3d; `B2` does answer. GG doesn't read back; gglinux does. |
+| Slot read | `83 01 <file> F4 01 <offset u32>` (feature), read 15–17 ms later → `83 00 <data>` | GG reads all five slots when it opens the keyboard. |
+| Queries | `90` → `90 00 "1.19.7"`; `F5` → `F5 00 01` (region); `F2` → `F2 00 00` (layout); `34` → `34 00 00` (unknown) | GG's connect sequence: `90 F5 90 F2 F5`, the five slots, `1F 82`, `B2 <its config>`, `34`, `90`. |
+
+**Deep press on his keyboard (firmware 1.19.7, 2026-11-13, finger tests with `hwtest/apex_probe.py`):**
+
+- A deep-press binding (`36 02`) is kept only on a key that already has a second point. Written before the point, the
+  keyboard drops it without an error (read back empty 5 times of 5; point first, kept 4 of 4). So gglinux sends the
+  points, then the deep layer, and writes the deep layer again after every points table. Written 0 ms after the
+  points table the binding was still dropped now and then; 2 ms and more after it, kept every time (gglinux waits
+  20 ms).
+- With W at 3.0 mm and W → x: a gentle press types `w`, a full press `wxw` (the key's own action comes back as it
+  rises past the point again).
+- In RAM no table takes a point away: not `00 00` (which leaves a key as it is), not GG's `FF FF` for that key, not
+  `FF FF` for all 68 keys. A profile load (`B2`) or unplugging does. A point with nothing bound past it does nothing (a
+  full press types the key once), so when gglinux takes a point away it sends GG's reset for that key and clears the
+  key's deep binding.
+- Switch tables (`38 61 44 00`, `38 62`, `38 65`, `38 66`, `38 67`) and points tables don't touch the deep layer; `B2`
+  clears it.
+- Once, right after gglinux's first deep-press attempt (bindings, then switch tables at 1.5 mm without Rapid Trigger,
+  then the points table with `FF FF` for 67 keys), the keyboard sent `` ` `` over and over with nobody touching it,
+  until unplugged. A second key (`f`) came by itself about 50 minutes later, while a probe loop was sending slot
+  loads, switch tables, points and deep-layer writes. He confirmed that neither was his. Replaying gglinux's exact
+  reports in the lab VM (captures `apex-12`, `apex-13`, `apex-16`, with lighting frames every 33 ms in the last)
+  brought no phantom key back. The cause is unknown, so on his keyboard deep press, Protection Mode and anything else
+  that sends switch tables stay on hold until it is found.
+
+On his keyboard (2026-11-13): the firmware key order of every per-key table in a slot image is Apex
+Control's `deviceKeyIndexToHID` (pinned `Key.swift`), which the images' own normal layers confirm; the 91
+bindable keys are exactly `bindings::KEYS`; a bindings read (`B6`) needs ~13 ms before its answer is
+there (read at once, the Fn layer's read still returned the normal layer's answer).
+
+Binding writes on his keyboard (hardware test log and hands-on log, 2026-11-13): Caps Lock → `b` and Fn+F1 → `c`
+typed as set (finger tests), and every write read back as sent, with the keyboard's nine own Fn shortcuts unchanged.
+Deep-layer writes through the daemon were dropped at random (4 of 16), so since M11 b1 every layer write (`36`) is read
+back (`B6`, 13 ms later) and written again, up to 3 times in all. If the layer still doesn't read back as sent, or a
+send fails part way, gglinux writes the layer the keyboard last held once more, reads it back and says which state each
+layer is in (review R2 S3). This read-back hasn't been tried on the keyboard yet.
+
+### 3f. More from GG 123 (2026-11-13 evening, lab VM), firmware 1.19.7
+
+Source for everything here: our captures `apex-10` … `apex-22` and `apex-30` (notes: `~/projects/gg-m11/captures/GG-CAPTURES-2026-11-13.md`).
+
+- **GG sends only the table that changed.** Actuation of all keys: only `38 61 44 00` (1.5 mm `1e 1b`, 1.8 mm `28 25`,
+  the same curve as ours). Rapid Trigger on/off: only `38 62`. Never the sensitivity table or the Rapid Tap reports
+  with them. It changes only the 61 keys a US board has; the 7 others (`32 64 87 88 89 8a 8b`) stay at `2f 2a`, mode `00`
+  (`apex-10`).
+
+  gglinux does the same since M11 (b1): it remembers the five switch reports sent on this connection and sends only
+  those that changed, with `2f 2a` / mode `00` for the analog keys the board doesn't have (for ISO and JIS boards that
+  list is inferred; only the US tables were captured). All five go after a connect or a slot load, when gglinux's
+  switch settings are turned on, and with the first change 5 minutes or more after the last time all five went
+  (`FULL_SEND_AGE`; review R2 S1: the keyboard may have changed meanwhile without gglinux seeing it). Nothing goes on a
+  timer alone; `ggctl switches resend` sends all five on demand. Every report to the keyboard keeps 5 ms from the one
+  before (`REPORT_GAP`), and the report after a deep-press points table waits 20 ms.
+- **Keyboard macros live in the slot image.** At offset 2704, back to back: `77 <mode> <count u16 LE> 01 <times>
+  <wait u16 LE ms>`, then `count` 4-byte events: key `02 <usage> 01 <1 down / 0 up>`, delay `04 00 <ms u16 LE>`, mouse
+  button `00 <button> 00 <1/0>` (only button 1 seen). Modes: `01` Play Once, `02` Play N Times (`times`, with `wait` ms
+  between plays), `03` Repeat While Pressed, `04` Toggle Auto-Repeat (`wait`); GG's default wait is 15 ms (`0f 00`), and
+  its fifth header byte was `01` in every save (meaning unknown). Toggle Hold is greyed in GG (`apex-30`). The key's
+  normal-layer block is `71 00 00 <start u16 LE, in 4-byte words>` (`apex-21`: a second macro at word 20). Nothing goes
+  out live: GG writes macros (and dual bindings) only with SAVE (`apex-20` … `apex-22`, `apex-30`). A GG Text Macro is
+  not stored on the keyboard (the key stays `51 <key>`): GG types it from the PC.
+
+  gglinux writes exactly these shapes (M11 b2 and c1; `ggctl macro write N`, gated by `keyboard_macros` and
+  `keyboard_onboard`, untested here), through §3d's checked slot transaction: only the macro area, the bound keys'
+  normal-layer places and the CRC change. Tests rebuild GG's areas of `apex-20`, `apex-21`, `apex-22` and `apex-30`
+  byte for byte. A slot whose macros hold anything else (another mode or kind of step, another fifth header byte, a
+  macro on the Fn or deep-press layer) is never rewritten. gglinux's own limits, until longer macros are tried on the
+  keyboard: two keys with a macro and 64 steps a macro. A write never loads the slot (review R2 K1: a load also swaps
+  the switch tables and bindings); the answer says to run `ggctl onboard load N`.
+
+### What gglinux sends this keyboard: the allowlist
+
+Every report is checked right before it goes out, by
+[`crates/gg-device-keyboard/src/allow.rs`](../crates/gg-device-keyboard/src/allow.rs) (with
+`ALLOWED`/`ALLOWED_SUB` in `proto.rs`). Shape is checked before the gate, and every refusal says
+which rule refused it.
+
+- **Always:** `40 41 4B 23 A3 90 F5`, the screen's `1F 81`/`1F 82`, and the switches' `38 61` (primary
+  layer `00` only), `38 62`, `38 65`, `38 66`, `38 67`. RAM only.
+- **With `keyboard_bindings` on:** `36`/`B6 <layer 0–2> <count 1–106>`, `35 <key>`, `3C <mask>`, and the
+  second actuation table `38 61 44 02`. RAM only.
+- **With `keyboard_onboard` on, flash:** `02 01 <file>`, `03 01 <file> F4 01 <offset>` and
+  `83 01 <file> F4 01 <offset>` with `file` `0x80`–`0x84` and `offset` a multiple of 500 from 0 to 12000
+  (500-byte chunks, as Apex Control's code sends them; `03`'s data is the image's bytes there, `0xFF` up to 500,
+  then zeros), and `B1`/`B2 <slot 0–4>`. Nothing but zeros may follow their fields.
+- **With `keyboard_protection` on:** release modes `03` and `04` in the `38 62` table (Protection Mode,
+  and with Rapid Trigger). Without it the table takes only `00` and `02`; no other mode ever passes.
+- **Never, whatever is on:** `04` (the firmware's file checksum), `02`/`03`/`83` with another
+  sub-command or another file (the other files hold what the keyboard needs to run), `75` (writes the
+  region to flash on every call), `38 83` (a screen picture to flash), any bootloader entry
+  (`custom_enter_boot_bytes`, unpublished) and anything unlisted. A random-report property test runs
+  120 000 reports against the listed shapes.
+
+Background: these opcodes share the `0xFFC0` interface with SteelSeries' "FIZZ" update protocol
+(9-byte header `cmd, fsid, fileid, block-size u16, offset u32, payload`; fwupd discussion #10308),
+which is why the old rule here was "never send `0x02`, `0x03`, `0x04`". The narrow rule keeps the
+update path closed (`04`, other files and sub-commands, the bootloader) while letting the five profile
+slots through, gated. Probing beyond the listed shapes stays off limits on this interface.
 
 ---
 
@@ -314,6 +603,19 @@ skeleton (MIT) — note it lacks the per-prefix writer, which is new work.
 overwrites a coreProps.json that isn't gglinux's (only an `address` key on `127.0.0.1`), and removes
 its own files when GameSense is turned off. Requests with an `Origin` header are refused and POSTs
 must be `application/json`, so browsers can't reach it.
+
+**Screen and bitmap handlers, 2026-11-13 (M11 c2)** in `gg-gamesense/src/{screen,bitmap}.rs`, from the pinned SDK
+docs (`json-handlers-screen.md`, `json-handlers-full-keyboard-lighting.md`); not yet tried with a real game:
+
+- `screened` and `screened-128x40` handlers draw on the Apex's screen: text lines, progress bars, `image-data` and the
+  event's own `image-data-128x40` (640 bytes, 1 bit a pixel, most significant bit first: the doc's own example picture
+  decodes to the SteelSeries logo), timed by `length-millis` and `repeats`. The layout of text is gglinux's own (the
+  SDK gives none); icons (`icon-id`) aren't drawn, since the icon list isn't in the pinned docs. A game's pictures go
+  out through the keyboard's live frame (`1F 81`, §3b) at most every 100 ms.
+- `bitmap` / `partial-bitmap` handlers carry 132 colours on a 22 × 6 grid, "mapped to the nearest appropriate keys"
+  with the first colour at the top left. The doc doesn't say how wide a cell is. **gglinux's reading, not checked
+  against GG:** the grid is a full-size keyboard's, one key per column, and each TKL key takes the cell under its
+  middle; the keypad's four columns land on no key.
 
 ---
 

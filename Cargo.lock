@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "gg-audio"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "gg-ipc",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "gg-device-headset"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "hidapi",
@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "gg-device-keyboard"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "hidapi",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "gg-device-mouse"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "hidapi",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "gg-gamesense"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "gg-device-keyboard",
  "serde",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "gg-hid"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "gg-ipc",
@@ -1606,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "gg-ipc"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "gglinux"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "ashpd",
  "gg-ipc",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "gglinuxd"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "ashpd",

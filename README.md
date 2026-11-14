@@ -14,28 +14,53 @@ GPL-3.0-or-later.
 > "SteelSeries", "GG", "Sonar", "Moments" and "GameSense" are SteelSeries trademarks, used here only
 > to say what gglinux is compatible with.
 
-## Project status: early, mostly untested on hardware
+## Project status: early, partly tested on hardware
 
-Read this before you plug anything in. gglinux has one developer and one set of devices. Almost
-everything is built and covered by unit tests against fake devices and a fake PipeWire, but only
-two features have been confirmed working on real hardware:
+Read this before you plug anything in. gglinux has one developer and one set of devices. Everything
+is built and covered by unit tests against fake devices and a fake PipeWire. What has been
+confirmed on real hardware so far:
 
 - **Keyboard lighting** on the Apex Pro TKL Gen 3: static per-key colours, the wave effect, and
   handing lighting back to the keyboard's own onboard effects.
+- **Keyboard key bindings** (experimental): a remapped key and an Fn-layer key typed what was
+  set, and each binding layer reads back from the keyboard as written.
+- **Keyboard onboard profile slots** (experimental): all five read and backed up; writes into the
+  spare slot (a backup put back, a new screen picture) read back byte for byte.
+- **The keyboard's screen**: the System Monitor (GPU temperature and clock included) and an
+  animation.
 - **Base-station screen protection** on the Arctis Nova Pro Wireless: the base station's OLED is
   kept dark (it never sleeps on its own) and lit briefly on real events such as a battery change.
+- **The Rival 3 Wireless Gen 2 mouse**: DPI stages (separate X and Y too), polling rate, a button
+  bound to a key from the app, and saving to the mouse (kept over a power cycle); with the
+  `mouse_power` switch also the sleep timer, High-Efficiency Mode and Wireless Stability, each
+  read back from the mouse.
 
 Read-only paths, such as listing the connected devices and reading headset status and battery,
-were also seen working during development. **Everything else below is untested on hardware.**
+were also seen working. **Everything else below is untested on hardware.**
+
+> **More is built than is verified.** Key remaps and deep press, onboard profile slots and keyboard
+> macros, Protection Mode, the mouse's sleep timer, power modes and scroll-wheel actions, the base
+> station's Bluetooth, gain and line-out settings, and Reflect lighting are all in gglinux, unit-tested
+> against fake devices, but **off by default** because they write to a device in a way that hasn't
+> been tried on real hardware (or, for some, only on the developer's). Turn any of them on in
+> **Settings → Experimental** or with `ggctl experimental <name> on`; the list is in
+> [Experimental features](#experimental-features). Reports of what happens on your devices help.
+
+Two things are on hold on the developer's keyboard: deep press, and anything that sends switch
+settings (actuation, Rapid Trigger, Rapid Tap, Protection Mode). Twice a key typed by itself not
+long after such changes, and the cause isn't known yet ([PROTOCOLS.md](docs/PROTOCOLS.md) §3e).
 Expect bugs, and please report them.
+
+Sonar and Moments (clips) are frozen as built: they stay and keep working, but nothing more is
+planned for them.
 
 ### Supported devices
 
 | Device | USB ID | Status |
 |---|---|---|
-| Apex Pro TKL Gen 3 (keyboard) | `1038:1642` | Lighting verified. Screen and switches untested. |
+| Apex Pro TKL Gen 3 (keyboard) | `1038:1642` | Lighting, key bindings, onboard slots and screen verified. Switches and macros untested. |
 | Arctis Nova Pro Wireless (headset + base station) | `1038:12e0` | Screen protection verified. Controls untested. |
-| Rival 3 Wireless Gen 2 (mouse) | `1038:1872` | Parked: built, never confirmed on hardware. |
+| Rival 3 Wireless Gen 2 (mouse) | `1038:1872` | DPI, polling, button keys, saving, sleep timer and wireless modes verified. Wheel actions untested. |
 
 Other SteelSeries devices are not supported. Each device speaks its own protocol, and gglinux only
 talks to the exact USB IDs above.
@@ -43,34 +68,51 @@ talks to the exact USB IDs above.
 ### Feature matrix
 
 **Verified** means seen working on real hardware. **Untested** means built and unit-tested, not yet
-tried on hardware. **Blocked** means it cannot be built yet. **Parked** means built, but the hardware
-is no longer available to test it.
+tried on hardware. **On hold** means untested and kept off the developer's keyboard for now (see
+above). **Not built** means not there yet. *(exp.)* marks a feature behind an experimental switch.
 
 | Area | Feature | Status |
 |---|---|---|
 | Keyboard | Per-key static colours, wave effect, hand-back to onboard lighting | Verified |
-| Keyboard | Breathing and spectrum effects | Untested |
+| Keyboard | Breathing, spectrum and gradient effects | Untested |
+| Keyboard | Lighting zones: sets of keys, each with its own effect, stacked | Untested |
+| Keyboard | A lighting scene of its own (or lights off) while you're away | Untested |
 | Keyboard | Reactive lighting (Fade, Ripple on key press), opt-in | Untested |
+| Keyboard | Reflect: keys take the colours of the screen *(exp.)* | Not built (the screen capture is missing) |
+| Keyboard | OLED screen: System Monitor, animations (GIF, APNG, WebP) | Verified |
 | Keyboard | OLED screen: text, clock, a picture | Untested |
 | Keyboard | Screen burn-in care: the picture moves a pixel now and then, and goes dark while you're away | Untested |
-| Keyboard | Actuation point (global and per key), Rapid Trigger, Rapid Tap | Untested |
-| Keyboard | Key remap, second actuation point, saving to the keyboard's flash | Not built |
+| Keyboard | Actuation point (global and per key), Rapid Trigger, Rapid Tap | On hold |
+| Keyboard | Protection Mode *(exp.)* | On hold |
+| Keyboard | Key remap and the Fn layer *(exp.)* | Verified |
+| Keyboard | Deep press: a second actuation point with its own binding *(exp.)* | On hold |
+| Keyboard | Onboard profile slots: read, back up, load, write *(exp.)* | Verified (a load's effect not watched yet) |
+| Keyboard | Macros stored on the keyboard *(exp.)* | Untested |
+| Keyboard | The real board drawn for the keyboard's region (US, ISO, JIS) | Verified on a US board |
 | Headset | Base-station screen burn-in protection | Verified |
 | Headset | ANC, transparency, sidetone, mic volume and mute light, auto-off, 2.4 GHz mode, on-device EQ | Untested |
-| Mouse | DPI stages, polling rate, button remap, onboard save | Parked |
+| Headset | The base station's own settings: Bluetooth at power-on and during calls, gain, line out and its stream mix, home screen, screen dim time *(exp.)* | Untested |
+| Headset | What the base station reports: gain, line out, sidetone, mic volume, EQ, Bluetooth, link | Untested |
+| Mouse | DPI stages (separate X and Y), polling rate, button remap with any key, onboard save | Verified |
+| Mouse | Sleep timer, High-Efficiency Mode, Wireless Stability, read back from the mouse *(exp.)* | Verified |
+| Mouse | Scroll wheel actions *(exp.)* | Untested |
+| Mouse | Spare-key actions: a button runs a program, types text, applies a profile, saves a clip | Untested |
 | Sonar audio | Game, Chat, Media and Aux channels, per-app routing, ChatMix slider | Untested |
 | Sonar audio | 10-band EQ per channel, headphone correction, AutoEQ import | Untested |
 | Sonar audio | Virtual mic: RNNoise noise suppression, gate, compressor | Untested |
 | Sonar audio | Smart Volume, streamer mode (a separate mix for OBS) | Untested |
 | GameSense | Local GameSense server, game events drawn on the keyboard, Proton support | Untested |
+| GameSense | Games' screen pictures on the keyboard's screen, full-keyboard bitmaps | Untested |
 | GameSense | Built-in audio visualizer and mic-mute light | Untested |
-| Profiles | Named lighting profiles, switched automatically per game | Untested |
+| Profiles | Profiles of any device settings (headset, mouse, switches, bindings, screen, lighting), presets, import and export | Untested |
+| Profiles | Switched by the game that runs, or by the window that has the focus (Hyprland, KDE Plasma) | Untested |
 | Moments | Instant-replay clips through gpu-screen-recorder, hotkey, clip library | Untested |
 | Desktop | Tray, start at login, settings backup and restore, `ggctl` | Untested |
 | Desktop | Turn any part off (keyboard, headset, mouse, Sonar, GameSense, profiles, clips) | Untested |
+| Desktop | Experimental switches in Settings | Verified |
 
-The full parity checklist against GG, with the reasons behind each status, is in
-[PLAN.md](PLAN.md#feature-parity-checklist-vs-steelseries-gg).
+Where every feature of GG stands, row by row, with the reasons, is in
+[docs/PARITY.md](docs/PARITY.md).
 
 ### Screenshots
 
@@ -148,7 +190,8 @@ systemctl --user enable --now gglinuxd
 ```
 
 The package installs the udev rule to `/usr/lib/udev/rules.d/`, the user unit, the app with a menu
-entry, and `ggctl`.
+entry, `ggctl`, and for KDE Plasma the KWin script that profiles use to follow the focused window
+(off until you turn it on, see [Profiles that follow the window](#profiles-that-follow-the-window)).
 
 ### From source, any distribution
 
@@ -293,18 +336,75 @@ screen can go dark then too, which is off by default because gglinux otherwise l
 ```sh
 ggctl                         # device list and live hotplug events
 ggctl clip save               # save the instant replay (bind it to a key)
-ggctl profile list            # saved lighting profiles
+ggctl profile list            # saved profiles, presets and rules
 ggctl profile apply "Late Night"
-ggctl gamesense on            # also: gamesense off, gamesense test
-ggctl mouse                   # the mouse's battery and the settings gglinux applied
+ggctl profile rule add focus program game.exe "Late Night"   # while that game's window has the focus
+ggctl gamesense on            # also: gamesense off, gamesense test, gamesense test screen
+ggctl mouse                   # the mouse's battery and settings
+ggctl mouse wheel button4 scrolldown   # the scroll wheel turned up goes back (needs mouse_wheel)
+ggctl headset                 # the headset and every base-station setting
+ggctl headset gain high       # the base station's own settings need headset_extras
+ggctl lighting zones add WASD wasd static ff0000   # a zone on top of the lighting
+ggctl switches resend         # send all of gglinux's switch settings to the keyboard again
+ggctl bind capslock ctrl+a    # key bindings (need keyboard_bindings)
+ggctl onboard read            # read and back up the keyboard's five onboard slots (need keyboard_onboard)
+ggctl macro set hi 'text:"hello"'   # keyboard macros, written into a slot with `ggctl macro write N`
+ggctl actions set f13 run kitty     # what a spare key F13-F24 does
+ggctl experimental            # the experimental switches; ggctl experimental mouse_wheel on
 ggctl parts                   # which parts run; ggctl parts clips off turns one off
 ggctl screen care shift off   # burn-in care: shift, away, own (each on or off)
 ggctl --help
 ```
 
-The Rival 3's protocol is write-only: there is no way to read its current settings, so applying one
-replaces whatever was configured before, and `ggctl mouse` reports what gglinux applied this
-session.
+The Rival 3 reports its DPI stages, polling rate, sleep timer and wireless mode back when asked, and
+gglinux reads them while `mouse_power` is on: after each change (an error says so if the mouse
+didn't take it) and every minute. Its buttons and scroll wheel can't be read, so for those
+`ggctl mouse` shows what gglinux applied. An asleep mouse is sent nothing: move it, then try again.
+
+### Experimental features
+
+Features that write to a device in a way not yet tried on the developer's hardware stay off until
+you turn them on in **Settings → Experimental**, or with `ggctl experimental <name> on`. While one
+is off, gglinuxd refuses its commands and the app shows its controls greyed with the reason. The
+switches are saved in `~/.config/gglinux/experimental.json`; all are off on a fresh install.
+
+| Name | Label in Settings | What it lets through |
+|---|---|---|
+| `keyboard_bindings` | Keyboard: key bindings and deep press | key remaps, the Fn layer and the Fn key, deep-press points and bindings |
+| `keyboard_onboard` | Keyboard: onboard profile slots | reading, loading and writing the keyboard's five onboard slots (writes go to flash, after a backup) |
+| `keyboard_protection` | Keyboard: Protection Mode | Protection Mode in the switch settings |
+| `keyboard_macros` | Keyboard: macros | the macro list; writing it into a slot also needs `keyboard_onboard` |
+| `mouse_power` | Mouse: sleep timer and power settings | the sleep timer, High-Efficiency Mode and Wireless Stability, and reading the mouse's own settings back |
+| `mouse_wheel` | Mouse: scroll wheel actions | changing what the scroll wheel does |
+| `headset_extras` | Headset: Bluetooth, gain and line out | the base station's Bluetooth, gain, line-out and screen settings, and asking it for its screen settings |
+| `lighting_reflect` | Lighting: Reflect screen colours | Reflect lighting zones (the screen capture behind them isn't built yet) |
+
+### Profiles that follow the window
+
+A profile rule can act while its program runs, or, as GG does, only while that program's window
+has the focus, with your own settings coming back when you switch to another window.
+
+- **Hyprland:** works by itself; gglinux follows Hyprland's event socket.
+- **KDE Plasma:** needs gglinux's KWin script, which tells the daemon which window has the focus.
+  The Arch package installs it; turn on *gglinux focus* in System Settings → Window Management →
+  KWin Scripts, or:
+
+  ```sh
+  kwriteconfig6 --file kwinrc --group Plugins --key gglinux-focusEnabled true
+  qdbus6 org.kde.KWin /KWin reconfigure
+  ```
+
+  From a checkout, install it for your user first:
+
+  ```sh
+  kpackagetool6 --type=KWin/Script --install crates/gglinuxd/src/profiles/kwin/gglinux-focus
+  ```
+
+  (`--upgrade` instead of `--install` replaces an older copy.)
+- **Elsewhere**, a focus rule acts while its program runs.
+
+`ggctl profile list` says which desktop is followed (`Focus: followed through Hyprland`, or
+`KDE Plasma` once the script has reported its first window).
 
 ### The app
 
@@ -323,7 +423,7 @@ kernel module) and needs nothing set there; the Tauri app it replaced needed
 
 ### Hyprland
 
-gglinux was built on KDE Plasma; on Hyprland three things need a line in your config, because
+gglinux was built on KDE Plasma; on Hyprland a few things need a line in your config, because
 Hyprland leaves them to it:
 
 - **The clip hotkey.** Hyprland lists portal shortcuts but binds none itself. With clips on, add
@@ -340,6 +440,11 @@ Hyprland leaves them to it:
   tray window too, run `gglinux --hidden` from `hl.on("hyprland.start", ...)` with
   `hl.exec_cmd`, or `exec-once` in `hyprland.conf`. Settings shows the exact line.
 - **The tray icon** needs a bar with a tray, such as Waybar's `tray` module.
+- **Spare-key actions.** Hyprland binds the spare keys F13–F24 from its config, not when gglinux
+  asks. For each key with an action, add a line such as
+  `hl.bind("F13", hl.dsp.global("io.github.ykk.gglinux:action-f13"))` (or
+  `bind = , F13, global, io.github.ykk.gglinux:action-f13` in `hyprland.conf`); Settings → Actions
+  and `ggctl actions` show the lines.
 
 Clips record through the ScreenCast portal (`xdg-desktop-portal-hyprland`), which may ask you to
 pick a screen when the replay buffer starts.
@@ -375,14 +480,18 @@ rm -f ~/.config/autostart/gglinux.desktop
 systemctl --user daemon-reload
 sudo rm -f /etc/udev/rules.d/{60-gglinux,61-gglinux-reactive}.rules
 sudo udevadm control --reload
+kpackagetool6 --type=KWin/Script --remove gglinux-focus   # if you installed the KWin script
 ```
 
 **Your settings** (both kinds of install):
 
 ```sh
-rm -rf ~/.config/gglinux                       # settings
+rm -rf ~/.config/gglinux                       # settings, and the keyboard slot backups
 rm -rf ~/.local/share/io.github.ykk.gglinux    # left by the old app (before 2026-10-29), if there
 ```
+
+`~/.config/gglinux/onboard-backups/` holds the backups gglinux made of the keyboard's onboard slots
+before writing them. Keep a copy if you may want to put a slot back later.
 
 ## Development
 
@@ -398,8 +507,11 @@ gglinux is free software under the [GNU General Public License v3.0 or later](LI
 The device protocols come from the work of others: rivalcfg (WTFPL) for the mouse,
 HeadsetControl (GPL-3.0), loteran/Arctis-Sound-Manager (GPL-3.0+) and Dymstro/nova-chatmix-linux
 (0BSD) for the headset, OpenRGB (GPL-2.0+) for the keyboard lighting, and apex-tux (Unlicense) for
-the OLED research. The keyboard's screen and switch commands are from Apex Control's protocol
-reference (github.com/Rikearon/apex-control, `docs/PROTOCOL.md`, CC BY 4.0, adapted in
-[docs/PROTOCOLS.md](docs/PROTOCOLS.md)) and agree with apex-pro-tkl-gen3-linux (MIT) on the screen.
+the OLED research. The keyboard's screen, switch, key-binding and onboard-slot commands are from
+Apex Control's protocol reference (github.com/Rikearon/apex-control, `docs/PROTOCOL.md`, CC BY 4.0,
+adapted in [docs/PROTOCOLS.md](docs/PROTOCOLS.md)) and agree with apex-pro-tkl-gen3-linux (MIT) on
+the screen. Keyboard macros, Protection Mode, the mouse's sleep timer, wireless modes and wheel,
+and the base station's extra settings were checked against, or decoded from, our own USB captures
+of SteelSeries GG.
 The screen's 8 × 8 font is Daniel Hepper's public-domain font8x8. RNNoise comes from
 werman/noise-suppression-for-voice and clips from gpu-screen-recorder. See the reuse map in [PLAN.md](PLAN.md#reuse-map-what-we-port-and-its-license).

@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The Apex Pro TKL Gen 3's screen, in the keyboard card.
+
+import { TextEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Hint, ErrorLine, Toggle, Button, Segmented, AccentSlider, Row, Unit, Head } from "widgets.slint";
+import { Opt, SubTitle } from "keyboard.slint";
+
+export global ScreenUi {
+    /// 0 the keyboard's own, 1 text, 2 clock, 3 picture, 4 animation, 5 system monitor:
+    /// the tab shown.
+    in property <int> kind;
+    in-out property <string> text;
+    in property <bool> too-long;
+    /// Nothing but spaces: nothing to show.
+    in property <bool> blank: true;
+    in property <bool> h24: true;
+    in property <bool> seconds;
+    in property <bool> date: true;
+    in property <string> file-name;
+    in property <bool> has-source;
+    in property <bool> has-preview;
+    in property <image> preview;
+    in property <int> threshold: 128;
+    in property <bool> dither: true;
+    in property <bool> invert;
+    /// The animation: chosen here (with its file name and conversion) or the keyboard's.
+    in property <string> anim-name;
+    in property <bool> has-anim-source;
+    in property <bool> has-anim-preview;
+    in property <image> anim-preview;
+    /// "12 pictures, 1.2 s".
+    in property <string> anim-summary;
+    /// The file had more than 256 pictures.
+    in property <bool> anim-cut;
+    /// Some pictures were meant to show for less than 0.1 s.
+    in property <bool> anim-slowed;
+    in property <int> anim-threshold: 128;
+    in property <bool> anim-dither: true;
+    in property <bool> anim-invert;
+    /// The System Monitor's readings that are on, and how many.
+    in property <bool> mon-cpu;
+    in property <bool> mon-cpu-temp;
+    in property <bool> mon-ram;
+    in property <bool> mon-gpu;
+    in property <bool> mon-gpu-temp;
+    in property <bool> mon-clock;
+    in property <int> mon-count;
+    in property <bool> care;
+    in property <bool> shift;
+    in property <bool> away;
+    in property <bool> own-too;
+    in property <bool> resting;
+    in property <string> refused;
+    in property <bool> busy;
+    in property <string> error;
+    callback pick(int);
+    callback text-edited(string);
+    callback show-text();
+    callback set-clock(bool, bool, bool);
+    callback choose-picture();
+    callback set-threshold(int);
+    callback set-dither(bool);
+    callback set-invert(bool);
+    callback show-picture();
+    callback show-animation();
+    callback set-anim-threshold(int);
+    callback set-anim-dither(bool);
+    callback set-anim-invert(bool);
+    /// A reading by its place (CPU use, CPU temperature, memory, GPU use, GPU
+    /// temperature, clock), on or off.
+    callback set-reading(int, bool);
+    callback set-care(bool, bool, bool);
+}
+
+/// One System Monitor reading's box: it can't turn off the last one, nor a fifth on.
+component Reading inherits Toggle {
+    in property <int> index;
+    enabled: !ScreenUi.busy && (self.checked ? ScreenUi.mon-count > 1 : ScreenUi.mon-count < 4);
+    toggled(v) => { ScreenUi.set-reading(self.index, v); }
+}
+
+export component ScreenPanel {
+    VerticalLayout {
+        Head { text: "SCREEN"; }
+        Opt { HorizontalLayout {
+            alignment: start;
+            Segmented { options: ["Keyboard's own", "Text", "Clock", "Picture", "Animation", "System monitor"]; current: ScreenUi.kind; enabled: !ScreenUi.busy; picked(i) => { ScreenUi.pick(i); } }
+        } }
+        Opt { shown: ScreenUi.kind == 1; gap: 12px; VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                alignment: start;
+                TextEdit {
+                    width: 220px;
+                    height: 128px;
+                    font-size: 14px;
+                    font-family: Theme.mono;
+                    text <=> ScreenUi.text;
+                    enabled: !ScreenUi.busy;
+                    edited(t) => { ScreenUi.text-edited(t); }
+                }
+            }
+            Text {
+                text: "Up to 5 lines of 16 characters, plain ASCII. Short text is drawn bigger.";
+                color: ScreenUi.too-long ? Theme.danger : Theme.text-dim;
+                font-size: Theme.small;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: start;
+                Button { text: "Show on the keyboard"; enabled: !ScreenUi.busy && !ScreenUi.too-long && !ScreenUi.blank; clicked => { ScreenUi.show-text(); } }
+            }
+        } }
+        Opt { shown: ScreenUi.kind == 2; gap: 12px; HorizontalLayout {
+            spacing: 18px;
+            alignment: start;
+            Toggle { text: "24-hour"; checked: ScreenUi.h24; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-clock(v, ScreenUi.seconds, ScreenUi.date); } }
+            Toggle { text: "Seconds"; checked: ScreenUi.seconds; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-clock(ScreenUi.h24, v, ScreenUi.date); } }
+            Toggle { text: "Date"; checked: ScreenUi.date; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-clock(ScreenUi.h24, ScreenUi.seconds, v); } }
+        } }
+        Opt { shown: ScreenUi.kind == 3; gap: 12px; VerticalLayout {
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Button { text: "Choose a picture…"; enabled: !ScreenUi.busy; clicked => { ScreenUi.choose-picture(); } }
+                Text { text: ScreenUi.file-name; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; overflow: elide; }
+            }
+            Opt { shown: ScreenUi.has-preview; HorizontalLayout {
+                alignment: start;
+                Rectangle {
+                    width: 386px;
+                    height: 122px;
+                    background: #0a0a0a;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    clip: true;
+                    Image { width: 384px; height: 120px; source: ScreenUi.preview; image-rendering: pixelated; }
+                }
+            } }
+            Opt { shown: ScreenUi.has-source; VerticalLayout {
+                spacing: 10px;
+                Row {
+                    label: "Threshold";
+                    thr := AccentSlider { minimum: 1; maximum: 254; value: ScreenUi.threshold; changed(v) => { ScreenUi.set-threshold(v); } released(v) => { ScreenUi.set-threshold(v); } }
+                    Unit { text: thr.shown; }
+                }
+                HorizontalLayout {
+                    spacing: 18px;
+                    alignment: start;
+                    Toggle { text: "Dither"; checked: ScreenUi.dither; toggled(v) => { ScreenUi.set-dither(v); } }
+                    Toggle { text: "Invert"; checked: ScreenUi.invert; toggled(v) => { ScreenUi.set-invert(v); } }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Button { text: "Show on the keyboard"; enabled: !ScreenUi.busy; clicked => { ScreenUi.show-picture(); } }
+                }
+            } }
+        } }
+        Opt { shown: ScreenUi.kind == 4; gap: 12px; VerticalLayout {
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Button { text: "Choose an animation…"; enabled: !ScreenUi.busy; clicked => { ScreenUi.choose-picture(); } }
+                Text { text: ScreenUi.anim-name; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; overflow: elide; }
+            }
+            Opt { shown: !ScreenUi.has-anim-preview; Hint { text: "A GIF, APNG or WebP of up to 256 pictures, looping. Each picture shows as long as the file says, from 0.1 to 10 seconds."; } }
+            Opt { shown: ScreenUi.has-anim-preview; HorizontalLayout {
+                alignment: start;
+                Rectangle {
+                    width: 386px;
+                    height: 122px;
+                    background: #0a0a0a;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    clip: true;
+                    Image { width: 384px; height: 120px; source: ScreenUi.anim-preview; image-rendering: pixelated; }
+                }
+            } }
+            Opt { shown: ScreenUi.has-anim-preview; gap: 6px; Hint { text: ScreenUi.anim-summary + ", the first one shown here."; } }
+            Opt { shown: ScreenUi.anim-cut; gap: 6px; Hint { text: "The file has more than 256 pictures: only the first 256 are kept."; } }
+            Opt { shown: ScreenUi.anim-slowed; gap: 6px; Hint { text: "Some pictures were meant to show for less than 0.1 seconds: they show for 0.1 seconds."; } }
+            Opt { shown: ScreenUi.has-anim-source; VerticalLayout {
+                spacing: 10px;
+                Row {
+                    label: "Threshold";
+                    athr := AccentSlider { minimum: 1; maximum: 254; value: ScreenUi.anim-threshold; changed(v) => { ScreenUi.set-anim-threshold(v); } released(v) => { ScreenUi.set-anim-threshold(v); } }
+                    Unit { text: athr.shown; }
+                }
+                HorizontalLayout {
+                    spacing: 18px;
+                    alignment: start;
+                    Toggle { text: "Dither"; checked: ScreenUi.anim-dither; toggled(v) => { ScreenUi.set-anim-dither(v); } }
+                    Toggle { text: "Invert"; checked: ScreenUi.anim-invert; toggled(v) => { ScreenUi.set-anim-invert(v); } }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Button { text: "Show on the keyboard"; enabled: !ScreenUi.busy; clicked => { ScreenUi.show-animation(); } }
+                }
+            } }
+        } }
+        Opt { shown: ScreenUi.kind == 5; gap: 12px; VerticalLayout {
+            Hint { text: "Up to 4 readings, a line each, read again every second."; }
+            Opt { HorizontalLayout {
+                alignment: start;
+                GridLayout {
+                    spacing-horizontal: 24px;
+                    spacing-vertical: 8px;
+                    Reading { row: 0; col: 0; index: 0; text: "CPU use"; checked: ScreenUi.mon-cpu; }
+                    Reading { row: 0; col: 1; index: 1; text: "CPU temperature"; checked: ScreenUi.mon-cpu-temp; }
+                    Reading { row: 0; col: 2; index: 2; text: "Memory"; checked: ScreenUi.mon-ram; }
+                    Reading { row: 1; col: 0; index: 3; text: "GPU use"; checked: ScreenUi.mon-gpu; }
+                    Reading { row: 1; col: 1; index: 4; text: "GPU temperature"; checked: ScreenUi.mon-gpu-temp; }
+                    Reading { row: 1; col: 2; index: 5; text: "Clock"; checked: ScreenUi.mon-clock; }
+                }
+            } }
+            Opt { Hint { text: "The graphics card is only asked (with nvidia-smi) while it's already awake. gglinux never wakes it to ask, so a sleeping card shows as idle."; } }
+        } }
+        Opt { shown: ScreenUi.care; gap: 18px; VerticalLayout {
+            SubTitle { text: "Burn-in care"; }
+            Opt { gap: 8px; Toggle { text: "Move the picture a pixel every couple of minutes"; checked: ScreenUi.shift; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-care(v, ScreenUi.away, ScreenUi.own-too); } } }
+            Opt { gap: 8px; Toggle { text: "Dark while nobody's at the computer (locked, asleep, or logged out)"; checked: ScreenUi.away; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-care(ScreenUi.shift, v, ScreenUi.own-too); } } }
+            Opt { gap: 8px; HorizontalLayout {
+                padding-left: 24px;
+                Toggle { text: "The keyboard's own screen too"; checked: ScreenUi.own-too; enabled: !ScreenUi.busy && ScreenUi.away; toggled(v) => { ScreenUi.set-care(ScreenUi.shift, ScreenUi.away, v); } }
+            } }
+            Opt { shown: ScreenUi.resting; gap: 8px; Hint { text: "Resting now: nobody's at the computer."; } }
+        } }
+        Opt { shown: ScreenUi.refused != ""; ErrorLine { text: "The keyboard refused the picture: " + ScreenUi.refused; } }
+        Opt { shown: ScreenUi.error != ""; ErrorLine { text: ScreenUi.error; } }
+    }
+}

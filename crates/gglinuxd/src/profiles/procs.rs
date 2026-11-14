@@ -85,9 +85,48 @@ pub fn running(proc_root: &Path, uid: u32) -> Vec<String> {
     seen.into_values().take(MAX_NAMES).collect()
 }
 
+/// The names of process `pid`, lower-cased: its `comm`, `argv[0]`'s file name and its
+/// executable's file name; for matching a focused window's program against rules.
+pub fn program_names(proc_root: &Path, pid: u32) -> Vec<String> {
+    let dir = proc_root.join(pid.to_string());
+    let comm = std::fs::read_to_string(dir.join("comm")).unwrap_or_default();
+    let cmdline = std::fs::read(dir.join("cmdline")).unwrap_or_default();
+    let mut out = names(&comm, &cmdline);
+    if let Some(exe) = std::fs::read_link(dir.join("exe"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+    {
+        // A deleted executable reads as "name (deleted)".
+        let exe = exe.trim_end_matches(" (deleted)").to_string();
+        out.push(exe);
+    }
+    let mut lower: Vec<String> = out.iter().map(|n| n.to_lowercase()).collect();
+    lower.dedup();
+    let mut seen = std::collections::HashSet::new();
+    lower.retain(|n| seen.insert(n.clone()));
+    lower
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_focused_windows_program_is_known_by_every_name() {
+        let root = std::env::temp_dir().join(format!("gglinux-proc-pid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("4242");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("comm"), "RDR2.exe\n").unwrap();
+        std::fs::write(dir.join("cmdline"), b"Z:\\games\\RDR2\\RDR2.exe\0").unwrap();
+        std::os::unix::fs::symlink("/usr/bin/wine64-preloader", dir.join("exe")).unwrap();
+        assert_eq!(
+            program_names(&root, 4242),
+            vec!["rdr2.exe".to_string(), "wine64-preloader".to_string()]
+        );
+        assert!(program_names(&root, 7).is_empty(), "gone");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn names_come_from_comm_and_the_program_path() {

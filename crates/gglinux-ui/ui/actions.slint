@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Actions on the spare keys F13–F24: a card on the Settings page, after the parts
+// (placed in app.slint). Each row is a key, a name and what it does; the list is
+// edited here and saved whole.
+
+import { ComboBox, LineEdit } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Card, Title, Hint, ErrorLine, Button } from "widgets.slint";
+import { Opt } from "keyboard.slint";
+
+export struct ActionRow {
+    /// The key, counted from F13 (0) to F24 (11).
+    key: int,
+    label: string,
+    /// What it does, in `ActionsUi.kinds` order.
+    kind: int,
+    /// The program and its arguments, the text, or the profile's name.
+    value: string,
+    /// What the value box says while it's empty.
+    placeholder: string,
+    /// The media key, in `ActionsUi.media` order.
+    media: int,
+}
+
+export global ActionsUi {
+    /// Show the card: on the Settings page, once the daemon has said what's bound.
+    /// Off, it takes no room.
+    in property <bool> shown: false;
+    in property <[ActionRow]> rows;
+    in property <[string]> keys;
+    in property <[string]> kinds;
+    in property <[string]> media;
+    /// What the desktop said about the keys.
+    in property <string> shortcuts;
+    in property <string> typing;
+    in property <bool> typing-bad;
+    /// The lines Hyprland needs in its config, one per key.
+    in property <bool> hyprland;
+    in property <string> lua;
+    in property <string> conf;
+    /// The list differs from the daemon's.
+    in property <bool> changed;
+    /// Why the list can't be saved as it is.
+    in property <string> problem;
+    in property <bool> can-add;
+    in property <bool> busy;
+    in property <string> error;
+    callback add();
+    callback remove(int);
+    callback set-key(int, int);
+    callback set-label(int, string);
+    callback set-kind(int, int);
+    callback set-value(int, string);
+    callback set-media(int, int);
+    callback save();
+    callback undo();
+}
+
+/// A text box as wide as it's given, which follows `value`: typing into a
+/// `LineEdit` drops its binding, so a value changed from outside (an undo) is
+/// pushed back in.
+component Field {
+    in property <string> value;
+    in property <string> placeholder;
+    in property <bool> enabled: true;
+    callback edited(string);
+    min-height: le.min-height;
+    preferred-height: le.preferred-height;
+    le := LineEdit {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        text: root.value;
+        placeholder-text: root.placeholder;
+        enabled: root.enabled;
+        edited(t) => { root.edited(t); }
+    }
+    changed value => {
+        if le.text != root.value {
+            le.text = root.value;
+        }
+    }
+}
+
+/// A list box as wide as it's given, which follows `index`: a `ComboBox` sets its
+/// own pick when used, which drops its binding, so the daemon's pick is pushed back
+/// in (as `Pick` in devices.slint does). `Pick` keeps the list box's own minimum
+/// width, too wide for a key's name.
+component Choice {
+    in property <[string]> model;
+    in property <int> index;
+    in property <bool> enabled: true;
+    in property <bool> busy;
+    callback picked(int);
+    min-height: cb.min-height;
+    preferred-height: cb.preferred-height;
+    cb := ComboBox {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        model: root.model;
+        current-index: root.index;
+        enabled: root.enabled;
+        selected => { root.picked(self.current-index); }
+    }
+    changed index => { cb.current-index = root.index; }
+    changed busy => {
+        if !root.busy {
+            cb.current-index = root.index;
+        }
+    }
+}
+
+/// Lines to copy into a config: like `Code`, but the text can be selected.
+component CopyLines inherits Rectangle {
+    in property <string> text;
+    background: Theme.bg;
+    border-color: Theme.line;
+    border-width: 1px;
+    border-radius: 8px;
+    HorizontalLayout {
+        padding: 10px;
+        TextInput {
+            text: root.text;
+            read-only: true;
+            single-line: false;
+            wrap: word-wrap;
+            font-family: Theme.mono;
+            font-size: Theme.small;
+            color: Theme.accent;
+            selection-background-color: Theme.accent.with-alpha(0.3);
+        }
+    }
+}
+
+export component ActionsPanel inherits Card {
+    Title { text: "Actions on spare keys"; }
+    Hint { text: "F13 to F24 aren't on your keyboard, so they're free for actions. Bind a mouse button to F13 in the mouse panel (Engine page), give F13 an action here, and the button runs it."; }
+    VerticalLayout {
+        spacing: 0;
+        for r[i] in ActionsUi.rows : HorizontalLayout {
+            padding-top: i == 0 ? 0 : 8px;
+            spacing: 8px;
+            Choice { width: 90px; model: ActionsUi.keys; index: r.key; enabled: !ActionsUi.busy; busy: ActionsUi.busy; picked(k) => { ActionsUi.set-key(i, k); } }
+            Field { width: 150px; value: r.label; placeholder: "Name"; enabled: !ActionsUi.busy; edited(t) => { ActionsUi.set-label(i, t); } }
+            Choice { width: 150px; model: ActionsUi.kinds; index: r.kind; enabled: !ActionsUi.busy; busy: ActionsUi.busy; picked(k) => { ActionsUi.set-kind(i, k); } }
+            if r.kind == 3 : Text { text: "Saves the instant replay"; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 1; }
+            if r.kind == 4 : Choice { horizontal-stretch: 1; model: ActionsUi.media; index: r.media; enabled: !ActionsUi.busy; busy: ActionsUi.busy; picked(k) => { ActionsUi.set-media(i, k); } }
+            if r.kind < 3 : Field { horizontal-stretch: 1; value: r.value; placeholder: r.placeholder; enabled: !ActionsUi.busy; edited(t) => { ActionsUi.set-value(i, t); } }
+            VerticalLayout { alignment: center; horizontal-stretch: 0; Button { text: "Remove"; small: true; enabled: !ActionsUi.busy; clicked => { ActionsUi.remove(i); } } }
+        }
+        Opt { shown: ActionsUi.rows.length == 0; gap: 0; Hint { text: "No actions yet."; } }
+        HorizontalLayout {
+            padding-top: 12px;
+            spacing: 8px;
+            alignment: start;
+            Button { text: "Add"; enabled: !ActionsUi.busy && ActionsUi.can-add; clicked => { ActionsUi.add(); } }
+            Button { text: "Save"; primary: ActionsUi.changed && ActionsUi.problem == ""; enabled: !ActionsUi.busy && ActionsUi.changed && ActionsUi.problem == ""; clicked => { ActionsUi.save(); } }
+            Button { text: "Undo changes"; enabled: !ActionsUi.busy && ActionsUi.changed; clicked => { ActionsUi.undo(); } }
+            Text { text: ActionsUi.problem; color: Theme.danger; font-size: Theme.small; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+        }
+        Opt { gap: 12px; Hint { text: ActionsUi.shortcuts; } }
+        Opt { gap: 6px; Hint { text: ActionsUi.typing; color: ActionsUi.typing-bad ? Theme.danger : Theme.text-dim; } }
+        Opt { shown: ActionsUi.hyprland; gap: 12px; VerticalLayout {
+            spacing: 8px;
+            Hint { text: "Hyprland binds these keys only from its config. In hyprland.lua:"; }
+            CopyLines { text: ActionsUi.lua; }
+            Hint { text: "or in hyprland.conf:"; }
+            CopyLines { text: ActionsUi.conf; }
+        } }
+        Opt { shown: ActionsUi.error != ""; ErrorLine { text: ActionsUi.error; } }
+    }
+}

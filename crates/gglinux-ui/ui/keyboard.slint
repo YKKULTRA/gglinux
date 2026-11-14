@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// The Apex Pro TKL Gen 3: lighting, switches and the screen, in one card.
+// The Apex Pro TKL Gen 3: its lighting, and what the keyboard card's panels
+// share. The card itself is put together in app.slint.
 
-import { ComboBox, TextEdit } from "std-widgets.slint";
+import { ComboBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { Card, Hint, ErrorLine, Toggle, Button, Segmented, AccentSlider, PanelHead, Row, Unit, Head, Divider, Shown, ColorPick, Board, Key } from "widgets.slint";
+import { Hint, ErrorLine, Toggle, Button, Segmented, AccentSlider, Row, Unit, Head, Divider, ColorPick, Board, Key } from "widgets.slint";
+import { Pick } from "devices.slint";
+
+/// One zone in the list: its name, its keys and effect in words, and whether it's the
+/// one being edited.
+export struct LightZone {
+    name: string,
+    summary: string,
+    selected: bool,
+}
 
 export global KeyboardUi {
     in property <bool> known;
@@ -12,12 +22,36 @@ export global KeyboardUi {
     in property <float> rows: 6.5;
     /// Lighting: gglinux draws it, or the keyboard's own profile does.
     in property <bool> enabled;
-    /// 0 static, 1 breathing, 2 wave, 3 spectrum, 4 audio.
+    /// The zone stack, bottom first; later zones paint over earlier ones.
+    in property <[LightZone]> zones;
+    /// The zone being edited, or -1.
+    in property <int> zone: -1;
+    in property <string> zone-name;
+    /// The choices for a new zone's keys: the presets, then the picked keys.
+    in property <[string]> preset-names;
+    in property <[string]> effect-names;
+    /// The edited zone's effect, in `effect-names` order: 0 painted keys, 1 one colour,
+    /// 2 breathing, 3 wave, 4 gradient, 5 spectrum, 6 audio, 7 reactive, 8 reflect.
     in property <int> effect;
-    in property <color> breathing-color;
+    in property <color> zone-color;
+    in property <color> zone-color-2;
     in property <bool> has-period;
     in property <float> period: 4;
     in property <float> sensitivity: 1;
+    in property <int> zone-mode;
+    in property <float> zone-duration: 0.6;
+    /// The idle scene: on, after how many minutes, and which (0 off, 1 one colour,
+    /// 2 breathing, 3 wave, 4 spectrum; -1 one set up in ggctl).
+    in property <bool> idle;
+    in property <int> idle-minutes: 5;
+    in property <int> idle-scene;
+    in property <color> idle-color;
+    in property <bool> idle-now;
+    /// Reflect: a Reflect zone is in the stack; its gate is on, or the gate's sentence.
+    in property <bool> reflect;
+    in property <bool> reflect-allowed;
+    in property <string> reflect-refusal;
+    in property <string> reflect-status;
     in property <int> brightness: 100;
     in property <bool> reactive;
     in property <int> reactive-mode;
@@ -39,10 +73,27 @@ export global KeyboardUi {
     in property <bool> busy;
     in property <string> error;
     callback set-enabled(bool);
+    callback select-zone(int);
+    /// A new zone on top: `preset-names[i]`'s keys, one colour (the brush's).
+    callback add-zone(int);
+    callback remove-zone();
+    /// The edited zone one place up (painted later) or down.
+    callback move-zone(bool);
+    /// The edited zone's keys become the picked keys.
+    callback use-picked-keys();
+    /// The edited zone's effect, colours and numbers.
     callback set-effect(int);
-    callback set-breathing-color(color);
+    callback set-zone-color(color);
+    callback set-zone-color-2(color);
     callback set-period(float);
     callback set-sensitivity(float);
+    callback set-zone-mode(int);
+    callback set-zone-duration(float);
+    callback set-idle(bool);
+    callback set-idle-minutes(int);
+    callback set-idle-scene(int);
+    callback set-idle-color(color);
+    callback set-reflect(bool);
     callback set-brightness(int);
     callback set-reactive(bool);
     callback set-reactive-mode(int);
@@ -58,86 +109,11 @@ export global KeyboardUi {
     callback apply-static();
 }
 
-export struct TapRow {
-    a: int,
-    b: int,
-    mode: int,
-    both: bool,
-}
-
-export global SwitchesUi {
-    in property <bool> enabled;
-    in property <int> actuation: 20;
-    in property <[Key]> keys;
-    in property <int> selected;
-    in-out property <int> own-level: 15;
-    in property <bool> rapid;
-    in property <int> rapid-distance: 2;
-    in property <string> rapid-keys;
-    in property <bool> rapid-some;
-    in property <bool> tap;
-    in property <[string]> key-names;
-    in property <[TapRow]> pairs;
-    in property <string> refused;
-    in property <bool> busy;
-    in property <string> error;
-    out property <[string]> tap-modes: ["Last pressed wins", "Neither counts", "First key wins", "Second key wins"];
-    callback set-enabled(bool);
-    callback set-actuation(int);
-    callback key-clicked(int);
-    callback set-own(bool);
-    callback clear-selection();
-    callback set-rapid(bool);
-    callback set-rapid-distance(int);
-    callback rapid-only-selected();
-    callback rapid-every-key();
-    callback set-tap(bool);
-    callback set-pair(int, int, int, int, bool);
-    callback add-pair();
-    callback remove-pair(int);
-}
-
-export global ScreenUi {
-    /// 0 the keyboard's own, 1 text, 2 clock, 3 picture: the tab shown.
-    in property <int> kind;
-    in-out property <string> text;
-    in property <bool> too-long;
-    /// Nothing but spaces: nothing to show.
-    in property <bool> blank: true;
-    in property <bool> h24: true;
-    in property <bool> seconds;
-    in property <bool> date: true;
-    in property <string> file-name;
-    in property <bool> has-source;
-    in property <bool> has-preview;
-    in property <image> preview;
-    in property <int> threshold: 128;
-    in property <bool> dither: true;
-    in property <bool> invert;
-    in property <bool> care;
-    in property <bool> shift;
-    in property <bool> away;
-    in property <bool> own-too;
-    in property <bool> resting;
-    in property <string> refused;
-    in property <bool> busy;
-    in property <string> error;
-    callback pick(int);
-    callback text-edited(string);
-    callback show-text();
-    callback set-clock(bool, bool, bool);
-    callback choose-picture();
-    callback set-threshold(int);
-    callback set-dither(bool);
-    callback set-invert(bool);
-    callback show-picture();
-    callback set-care(bool, bool, bool);
-}
-
 /// Its content with `gap` above, or nothing at all, gap included, while not
 /// `shown`. A layout's spacing also goes around children that take no room, so
-/// the sections here use none and each piece brings its own gap.
-component Opt {
+/// the sections here use none and each piece brings its own gap. The card's
+/// other panels use it too.
+export component Opt {
     in property <bool> shown: true;
     in property <length> gap: 10px;
     visible: root.shown;
@@ -149,7 +125,7 @@ component Opt {
 }
 
 /// A heading inside a section ("Rapid Trigger"), lighter than the section's own.
-component SubTitle inherits Text {
+export component SubTitle inherits Text {
     color: Theme.text;
     font-size: Theme.small;
     font-weight: 600;
@@ -177,7 +153,29 @@ component CopyCode inherits Rectangle {
     }
 }
 
-component Lighting {
+/// A zone in the list; a click picks it for editing.
+component ZoneRow inherits Rectangle {
+    in property <LightZone> zone;
+    callback clicked();
+    height: 38px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.zone.selected ? Theme.accent : Theme.line;
+    background: root.zone.selected ? Theme.accent.with-alpha(0.12) : (touch.has-hover ? Theme.surface-2 : transparent);
+    accessible-role: button;
+    accessible-label: root.zone.name + ": " + root.zone.summary;
+    accessible-action-default => { root.clicked(); }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 12px;
+        Text { text: root.zone.name; color: Theme.text; font-size: Theme.font; font-weight: 600; vertical-alignment: center; horizontal-stretch: 0; }
+        Text { text: root.zone.summary; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; overflow: elide; min-width: 0; horizontal-stretch: 1; }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export component LightingPanel {
     VerticalLayout {
         Toggle {
             text: "gglinux controls the lighting (off: the keyboard's own profile)";
@@ -187,34 +185,77 @@ component Lighting {
         }
         Opt { shown: KeyboardUi.enabled; gap: 14px; VerticalLayout {
             Divider { }
-            Opt { gap: 14px; Head { text: "EFFECT"; } }
+            Opt { gap: 14px; Head { text: "ZONES"; state: "later zones paint over earlier ones"; } }
+            Opt { shown: KeyboardUi.zones.length == 0; Hint { text: "No zones: every key is dark. Add one below."; } }
+            Opt { shown: KeyboardUi.zones.length > 0; VerticalLayout {
+                spacing: 6px;
+                for z[i] in KeyboardUi.zones : ZoneRow { zone: z; clicked => { KeyboardUi.select-zone(i); } }
+            } }
             Opt { HorizontalLayout {
+                spacing: 8px;
                 alignment: start;
-                Segmented {
-                    options: ["Static", "Breathing", "Wave", "Spectrum", "Audio"];
-                    current: KeyboardUi.effect;
-                    enabled: !KeyboardUi.busy;
-                    picked(i) => { KeyboardUi.set-effect(i); }
-                }
-            } }
-            Opt { shown: KeyboardUi.effect == 1; Row {
-                label: "Colour";
-                ColorPick { value: KeyboardUi.breathing-color; enabled: !KeyboardUi.busy; picked(c) => { KeyboardUi.set-breathing-color(c); } }
+                preset := Pick { width: 170px; model: KeyboardUi.preset-names; index: 0; enabled: !KeyboardUi.busy; busy: KeyboardUi.busy; picked(i) => { self.index = i; } }
+                Button { text: "Add zone"; enabled: !KeyboardUi.busy; clicked => { KeyboardUi.add-zone(preset.index); } }
                 Rectangle { horizontal-stretch: 1; }
+                Button { text: "Down"; small: true; enabled: !KeyboardUi.busy && KeyboardUi.zone > 0; clicked => { KeyboardUi.move-zone(false); } }
+                Button { text: "Up"; small: true; enabled: !KeyboardUi.busy && KeyboardUi.zone >= 0 && KeyboardUi.zone < KeyboardUi.zones.length - 1; clicked => { KeyboardUi.move-zone(true); } }
+                Button { text: "Remove"; small: true; enabled: !KeyboardUi.busy && KeyboardUi.zone >= 0; clicked => { KeyboardUi.remove-zone(); } }
             } }
-            Opt { shown: KeyboardUi.has-period; Row {
-                label: "Speed";
-                speed := AccentSlider { minimum: 0.5; maximum: max(20, KeyboardUi.period); step: 0.5; value: KeyboardUi.period; enabled: !KeyboardUi.busy; released(v) => { KeyboardUi.set-period(v); } }
-                Unit { text: speed.shown + " s"; }
-            } }
-            Opt { shown: KeyboardUi.effect == 4; VerticalLayout {
-                spacing: 10px;
-                Row {
-                    label: "Sensitivity";
-                    sens := AccentSlider { minimum: 0.25; maximum: 4; step: 0.25; value: KeyboardUi.sensitivity; enabled: !KeyboardUi.busy; released(v) => { KeyboardUi.set-sensitivity(v); } }
-                    Unit { text: sens.shown.to-fixed(2) + "×"; }
+            Opt { shown: KeyboardUi.zone >= 0; gap: 14px; Rectangle {
+                background: Theme.surface-2;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Theme.line;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 0;
+                    Text { text: "Zone “" + KeyboardUi.zone-name + "”"; color: Theme.text; font-size: Theme.small; font-weight: 600; }
+                    Opt { Row {
+                        label: "Effect";
+                        Pick { width: 200px; model: KeyboardUi.effect-names; index: KeyboardUi.effect; enabled: !KeyboardUi.busy; busy: KeyboardUi.busy; picked(i) => { KeyboardUi.set-effect(i); } }
+                        Rectangle { horizontal-stretch: 1; }
+                    } }
+                    Opt { shown: KeyboardUi.effect == 1 || KeyboardUi.effect == 2 || KeyboardUi.effect == 7; Row {
+                        label: "Colour";
+                        ColorPick { value: KeyboardUi.zone-color; enabled: !KeyboardUi.busy; picked(c) => { KeyboardUi.set-zone-color(c); } }
+                        Rectangle { horizontal-stretch: 1; }
+                    } }
+                    Opt { shown: KeyboardUi.effect == 4; Row {
+                        label: "From, to";
+                        ColorPick { value: KeyboardUi.zone-color; enabled: !KeyboardUi.busy; picked(c) => { KeyboardUi.set-zone-color(c); } }
+                        ColorPick { value: KeyboardUi.zone-color-2; enabled: !KeyboardUi.busy; picked(c) => { KeyboardUi.set-zone-color-2(c); } }
+                        Rectangle { horizontal-stretch: 1; }
+                    } }
+                    Opt { shown: KeyboardUi.has-period; Row {
+                        label: "Speed";
+                        speed := AccentSlider { minimum: 0.5; maximum: max(20, KeyboardUi.period); step: 0.5; value: KeyboardUi.period; enabled: !KeyboardUi.busy; released(v) => { KeyboardUi.set-period(v); } }
+                        Unit { text: speed.shown + " s"; }
+                    } }
+                    Opt { shown: KeyboardUi.effect == 6; VerticalLayout {
+                        spacing: 10px;
+                        Row {
+                            label: "Sensitivity";
+                            sens := AccentSlider { minimum: 0.25; maximum: 4; step: 0.25; value: KeyboardUi.sensitivity; enabled: !KeyboardUi.busy; released(v) => { KeyboardUi.set-sensitivity(v); } }
+                            Unit { text: sens.shown.to-fixed(2) + "×"; }
+                        }
+                        Hint { text: "What's playing is analysed live and never recorded; your desktop may show that audio is being captured."; }
+                    } }
+                    Opt { shown: KeyboardUi.effect == 7; VerticalLayout {
+                        spacing: 10px;
+                        HorizontalLayout {
+                            alignment: start;
+                            Segmented { options: ["Fade", "Ripple"]; current: KeyboardUi.zone-mode; enabled: !KeyboardUi.busy; picked(i) => { KeyboardUi.set-zone-mode(i); } }
+                        }
+                        Row {
+                            label: "Duration";
+                            zdur := AccentSlider { minimum: 0.1; maximum: 3; step: 0.1; value: KeyboardUi.zone-duration; enabled: !KeyboardUi.busy; released(v) => { KeyboardUi.set-zone-duration(v); } }
+                            Unit { text: zdur.shown.to-fixed(1) + " s"; }
+                        }
+                        Hint { text: "Keys of this zone light as you press them; between presses the zones below show."; }
+                    } }
+                    Opt { shown: KeyboardUi.effect == 0; Hint { text: "Each key shows the colour painted on it below; unpainted keys are dark."; } }
+                    Opt { shown: KeyboardUi.effect == 8; Hint { text: "Each key takes the colour of the screen above it. Until the screen can be seen, the zones below show."; } }
                 }
-                Hint { text: "What's playing is analysed live and never recorded; your desktop may show that audio is being captured."; }
             } }
             Opt { Row {
                 label: "Brightness";
@@ -241,7 +282,7 @@ component Lighting {
                     Unit { text: dur.shown.to-fixed(1) + " s"; }
                 }
             } }
-            Opt { shown: KeyboardUi.reactive && KeyboardUi.no-access; Rectangle {
+            Opt { shown: KeyboardUi.no-access; Rectangle {
                 background: Theme.surface-2;
                 border-radius: 8px;
                 border-width: 1px;
@@ -256,6 +297,29 @@ component Lighting {
                 }
             } }
             Opt { gap: 14px; Divider { } }
+            Opt { gap: 14px; Head { text: "WHILE YOU'RE AWAY"; state: KeyboardUi.idle-now ? "showing now" : ""; } }
+            Opt { Toggle { text: "Change the lighting while you're away"; checked: KeyboardUi.idle; enabled: !KeyboardUi.busy; toggled(v) => { KeyboardUi.set-idle(v); } } }
+            Opt { shown: KeyboardUi.idle; VerticalLayout {
+                spacing: 10px;
+                Row {
+                    label: "After";
+                    mins := AccentSlider { minimum: 0; maximum: 60; step: 1; value: KeyboardUi.idle-minutes; enabled: !KeyboardUi.busy; released(v) => { KeyboardUi.set-idle-minutes(v); } }
+                    Unit { text: mins.shown + " min"; }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Segmented { options: ["Off", "One colour", "Breathing", "Wave", "Spectrum"]; current: KeyboardUi.idle-scene; enabled: !KeyboardUi.busy; picked(i) => { KeyboardUi.set-idle-scene(i); } }
+                    if KeyboardUi.idle-scene == 1 || KeyboardUi.idle-scene == 2 : ColorPick { value: KeyboardUi.idle-color; enabled: !KeyboardUi.busy; picked(c) => { KeyboardUi.set-idle-color(c); } }
+                }
+                Hint { text: KeyboardUi.idle-scene == -1 ? "The idle scene was set up with ggctl; picking one here replaces it." : "Counted from when your desktop says you're away: the screen locked or idle, or the screensaver on. gglinux doesn't read your keys for this."; }
+            } }
+            Opt { gap: 14px; Divider { } }
+            Opt { gap: 14px; Head { text: "REFLECT"; } }
+            Opt { Toggle { text: "Reflect screen colours on every key"; checked: KeyboardUi.reflect; enabled: !KeyboardUi.busy && (KeyboardUi.reflect-allowed || KeyboardUi.reflect); toggled(v) => { KeyboardUi.set-reflect(v); } } }
+            Opt { shown: !KeyboardUi.reflect-allowed; Hint { text: KeyboardUi.reflect-refusal; } }
+            Opt { shown: KeyboardUi.reflect-allowed && KeyboardUi.reflect-status != ""; Hint { text: KeyboardUi.reflect-status; } }
+            Opt { gap: 14px; Divider { } }
             Opt { gap: 14px; Head { text: "MIC MUTE LIGHT"; } }
             Opt { Toggle { text: "Light a key while the microphone is muted"; checked: KeyboardUi.mute; enabled: !KeyboardUi.busy; toggled(v) => { KeyboardUi.set-mute(v); } } }
             Opt { shown: KeyboardUi.mute; Row {
@@ -264,13 +328,14 @@ component Lighting {
                 ColorPick { value: KeyboardUi.mute-color; enabled: !KeyboardUi.busy; picked(c) => { KeyboardUi.set-mute-color(c); } }
                 Rectangle { horizontal-stretch: 1; }
             } }
-            Opt { shown: KeyboardUi.effect == 0; gap: 14px; VerticalLayout {
+            Opt { gap: 14px; VerticalLayout {
                 spacing: 10px;
                 Divider { }
                 VerticalLayout {
                     padding-top: 4px;
                     Head { text: "KEYS"; state: KeyboardUi.dirty ? "not applied yet" : ""; }
                 }
+                Hint { text: "Click keys to pick them: paint them, or give them to the zone being edited. Picking a zone picks its keys."; }
                 Board { keys: KeyboardUi.keys; cols: KeyboardUi.cols; rows: KeyboardUi.rows; clicked(i) => { KeyboardUi.key-clicked(i); } }
                 HorizontalLayout {
                     spacing: 8px;
@@ -281,206 +346,18 @@ component Lighting {
                         picked(c) => { KeyboardUi.brush = c; }
                         changed asked => { self.open(); }
                     }
-                    Button { text: "Paint selected (\{KeyboardUi.selected})"; enabled: KeyboardUi.selected > 0; clicked => { KeyboardUi.paint-selected(); } }
+                    Button { text: "Paint picked (\{KeyboardUi.selected})"; enabled: KeyboardUi.selected > 0; clicked => { KeyboardUi.paint-selected(); } }
                     Button { text: "Paint all"; clicked => { KeyboardUi.paint-all(); } }
-                    Button { text: "Clear selection"; enabled: KeyboardUi.selected > 0; clicked => { KeyboardUi.clear-selection(); } }
+                    Button { text: "Clear picks"; enabled: KeyboardUi.selected > 0; clicked => { KeyboardUi.clear-selection(); } }
                 }
                 HorizontalLayout {
+                    spacing: 8px;
                     alignment: start;
-                    Button { text: "Apply to keyboard"; primary: KeyboardUi.dirty; enabled: !KeyboardUi.busy; clicked => { KeyboardUi.apply-static(); } }
+                    Button { text: "Apply paint"; primary: KeyboardUi.dirty; enabled: !KeyboardUi.busy; clicked => { KeyboardUi.apply-static(); } }
+                    Button { text: "Use picked keys for “" + KeyboardUi.zone-name + "”"; enabled: !KeyboardUi.busy && KeyboardUi.zone >= 0 && KeyboardUi.selected > 0; clicked => { KeyboardUi.use-picked-keys(); } }
                 }
             } }
         } }
         Opt { shown: KeyboardUi.error != ""; ErrorLine { text: KeyboardUi.error; } }
     }
-}
-
-component Switches {
-    VerticalLayout {
-        Head { text: "SWITCHES"; }
-        Opt { Toggle { text: "gglinux sets the switches (off: the keyboard keeps its own)"; checked: SwitchesUi.enabled; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-enabled(v); } } }
-        Opt { Hint { text: "The keyboard keeps these in memory, not in its flash, so gglinux sends them again each time it connects. Turned off, the keyboard keeps the last ones until it's unplugged."; } }
-        Opt { shown: SwitchesUi.enabled; gap: 14px; VerticalLayout {
-            Row {
-                label: "Actuation";
-                act := AccentSlider { minimum: 1; maximum: 40; value: SwitchesUi.actuation; enabled: !SwitchesUi.busy; released(v) => { SwitchesUi.set-actuation(v); } }
-                Unit { text: (act.shown / 10).to-fixed(1) + " mm for every key without its own"; }
-            }
-            Opt { gap: 12px; Board { keys: SwitchesUi.keys; cols: KeyboardUi.cols; rows: KeyboardUi.rows; clicked(i) => { SwitchesUi.key-clicked(i); } } }
-            Opt { Hint { text: "Click keys to select them. Grey keys have fixed switches; keys with their own point are outlined, and Rapid Trigger keys are tinted."; } }
-            Opt { Row {
-                label: "Selected (\{SwitchesUi.selected})";
-                own := AccentSlider { minimum: 1; maximum: 40; value: SwitchesUi.own-level; released(v) => { SwitchesUi.own-level = v; } }
-                Unit { text: (own.shown / 10).to-fixed(1) + " mm"; }
-            } }
-            Opt { HorizontalLayout {
-                spacing: 8px;
-                alignment: start;
-                Button { text: "Set for selected"; enabled: !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.set-own(true); } }
-                Button { text: "Back to the default"; enabled: !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.set-own(false); } }
-                Button { text: "Clear selection"; enabled: SwitchesUi.selected > 0; clicked => { SwitchesUi.clear-selection(); } }
-            } }
-            Opt { gap: 20px; SubTitle { text: "Rapid Trigger"; } }
-            Opt { Toggle { text: "A key resets as soon as it starts to rise, and fires again as soon as it goes back down"; checked: SwitchesUi.rapid; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-rapid(v); } } }
-            Opt { shown: SwitchesUi.rapid; VerticalLayout {
-                spacing: 10px;
-                Row {
-                    label: "Distance";
-                    dist := AccentSlider { minimum: 1; maximum: 20; value: SwitchesUi.rapid-distance; enabled: !SwitchesUi.busy; released(v) => { SwitchesUi.set-rapid-distance(v); } }
-                    Unit { text: (dist.shown / 10).to-fixed(1) + " mm"; }
-                }
-                Row {
-                    label: "Keys";
-                    HorizontalLayout {
-                        spacing: 8px;
-                        alignment: start;
-                        Unit { text: SwitchesUi.rapid-keys; min-width: 0; }
-                        Button { text: "Only the selected"; small: true; enabled: !SwitchesUi.busy && SwitchesUi.selected > 0; clicked => { SwitchesUi.rapid-only-selected(); } }
-                        Button { text: "Every key"; small: true; enabled: !SwitchesUi.busy && SwitchesUi.rapid-some; clicked => { SwitchesUi.rapid-every-key(); } }
-                    }
-                }
-            } }
-            Opt { gap: 20px; SubTitle { text: "Rapid Tap"; } }
-            Opt { Toggle { text: "With both keys of a pair held, the keyboard decides which one counts (SOCD)"; checked: SwitchesUi.tap; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-tap(v); } } }
-            Opt { shown: SwitchesUi.tap; VerticalLayout {
-                spacing: 10px;
-                // The lists give way to the rest in a narrow window.
-                for p[i] in SwitchesUi.pairs : HorizontalLayout {
-                    spacing: 8px;
-                    ComboBox { min-width: 60px; preferred-width: 100px; max-width: 100px; horizontal-stretch: 0; model: SwitchesUi.key-names; current-index: p.a; enabled: !SwitchesUi.busy; selected => { SwitchesUi.set-pair(i, self.current-index, p.b, p.mode, p.both); } }
-                    Text { text: "and"; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; horizontal-stretch: 0; }
-                    ComboBox { min-width: 60px; preferred-width: 100px; max-width: 100px; horizontal-stretch: 0; model: SwitchesUi.key-names; current-index: p.b; enabled: !SwitchesUi.busy; selected => { SwitchesUi.set-pair(i, p.a, self.current-index, p.mode, p.both); } }
-                    ComboBox { min-width: 120px; preferred-width: 170px; max-width: 170px; horizontal-stretch: 0; model: SwitchesUi.tap-modes; current-index: p.mode; enabled: !SwitchesUi.busy; selected => { SwitchesUi.set-pair(i, p.a, p.b, self.current-index, p.both); } }
-                    // Kept on one line: wrapped, a row would come out shorter than it is.
-                    Toggle { min-width: 92px; horizontal-stretch: 0; text: "send both"; checked: p.both; enabled: !SwitchesUi.busy; toggled(v) => { SwitchesUi.set-pair(i, p.a, p.b, p.mode, v); } }
-                    VerticalLayout {
-                        alignment: center;
-                        horizontal-stretch: 0;
-                        Button { text: "Remove"; small: true; enabled: !SwitchesUi.busy; clicked => { SwitchesUi.remove-pair(i); } }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    alignment: start;
-                    Button { text: "Add a pair"; enabled: !SwitchesUi.busy && SwitchesUi.pairs.length < 10; clicked => { SwitchesUi.add-pair(); } }
-                    Unit { text: "\{SwitchesUi.pairs.length} of 10"; }
-                }
-                Hint { text: "What each mode does comes from other projects' notes; it hasn't been checked on this keyboard yet."; }
-            } }
-        } }
-        Opt { shown: SwitchesUi.refused != ""; ErrorLine { text: "The keyboard refused the switch settings: " + SwitchesUi.refused; } }
-        Opt { shown: SwitchesUi.error != ""; ErrorLine { text: SwitchesUi.error; } }
-    }
-}
-
-component Screen {
-    VerticalLayout {
-        Head { text: "SCREEN"; }
-        Opt { HorizontalLayout {
-            alignment: start;
-            Segmented { options: ["Keyboard's own", "Text", "Clock", "Picture"]; current: ScreenUi.kind; enabled: !ScreenUi.busy; picked(i) => { ScreenUi.pick(i); } }
-        } }
-        Opt { shown: ScreenUi.kind == 1; gap: 12px; VerticalLayout {
-            spacing: 10px;
-            HorizontalLayout {
-                alignment: start;
-                TextEdit {
-                    width: 220px;
-                    height: 128px;
-                    font-size: 14px;
-                    font-family: Theme.mono;
-                    text <=> ScreenUi.text;
-                    enabled: !ScreenUi.busy;
-                    edited(t) => { ScreenUi.text-edited(t); }
-                }
-            }
-            Text {
-                text: "Up to 5 lines of 16 characters, plain ASCII. Short text is drawn bigger.";
-                color: ScreenUi.too-long ? Theme.danger : Theme.text-dim;
-                font-size: Theme.small;
-                wrap: word-wrap;
-            }
-            HorizontalLayout {
-                alignment: start;
-                Button { text: "Show on the keyboard"; enabled: !ScreenUi.busy && !ScreenUi.too-long && !ScreenUi.blank; clicked => { ScreenUi.show-text(); } }
-            }
-        } }
-        Opt { shown: ScreenUi.kind == 2; gap: 12px; HorizontalLayout {
-            spacing: 18px;
-            alignment: start;
-            Toggle { text: "24-hour"; checked: ScreenUi.h24; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-clock(v, ScreenUi.seconds, ScreenUi.date); } }
-            Toggle { text: "Seconds"; checked: ScreenUi.seconds; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-clock(ScreenUi.h24, v, ScreenUi.date); } }
-            Toggle { text: "Date"; checked: ScreenUi.date; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-clock(ScreenUi.h24, ScreenUi.seconds, v); } }
-        } }
-        Opt { shown: ScreenUi.kind == 3; gap: 12px; VerticalLayout {
-            HorizontalLayout {
-                spacing: 10px;
-                alignment: start;
-                Button { text: "Choose a picture…"; enabled: !ScreenUi.busy; clicked => { ScreenUi.choose-picture(); } }
-                Text { text: ScreenUi.file-name; color: Theme.text-dim; font-size: Theme.small; vertical-alignment: center; overflow: elide; }
-            }
-            Opt { shown: ScreenUi.has-preview; HorizontalLayout {
-                alignment: start;
-                Rectangle {
-                    width: 386px;
-                    height: 122px;
-                    background: #0a0a0a;
-                    border-radius: 6px;
-                    border-width: 1px;
-                    border-color: Theme.line;
-                    clip: true;
-                    Image { width: 384px; height: 120px; source: ScreenUi.preview; image-rendering: pixelated; }
-                }
-            } }
-            Opt { shown: ScreenUi.has-source; VerticalLayout {
-                spacing: 10px;
-                Row {
-                    label: "Threshold";
-                    thr := AccentSlider { minimum: 1; maximum: 254; value: ScreenUi.threshold; changed(v) => { ScreenUi.set-threshold(v); } released(v) => { ScreenUi.set-threshold(v); } }
-                    Unit { text: thr.shown; }
-                }
-                HorizontalLayout {
-                    spacing: 18px;
-                    alignment: start;
-                    Toggle { text: "Dither"; checked: ScreenUi.dither; toggled(v) => { ScreenUi.set-dither(v); } }
-                    Toggle { text: "Invert"; checked: ScreenUi.invert; toggled(v) => { ScreenUi.set-invert(v); } }
-                }
-                HorizontalLayout {
-                    alignment: start;
-                    Button { text: "Show on the keyboard"; enabled: !ScreenUi.busy; clicked => { ScreenUi.show-picture(); } }
-                }
-            } }
-        } }
-        Opt { shown: ScreenUi.care; gap: 18px; VerticalLayout {
-            SubTitle { text: "Burn-in care"; }
-            Opt { gap: 8px; Toggle { text: "Move the picture a pixel every couple of minutes"; checked: ScreenUi.shift; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-care(v, ScreenUi.away, ScreenUi.own-too); } } }
-            Opt { gap: 8px; Toggle { text: "Dark while nobody's at the computer (locked, asleep, or logged out)"; checked: ScreenUi.away; enabled: !ScreenUi.busy; toggled(v) => { ScreenUi.set-care(ScreenUi.shift, v, ScreenUi.own-too); } } }
-            Opt { gap: 8px; HorizontalLayout {
-                padding-left: 24px;
-                Toggle { text: "The keyboard's own screen too"; checked: ScreenUi.own-too; enabled: !ScreenUi.busy && ScreenUi.away; toggled(v) => { ScreenUi.set-care(ScreenUi.shift, ScreenUi.away, v); } }
-            } }
-            Opt { shown: ScreenUi.resting; gap: 8px; Hint { text: "Resting now: nobody's at the computer."; } }
-        } }
-        Opt { shown: ScreenUi.refused != ""; ErrorLine { text: "The keyboard refused the picture: " + ScreenUi.refused; } }
-        Opt { shown: ScreenUi.error != ""; ErrorLine { text: ScreenUi.error; } }
-    }
-}
-
-export component KeyboardPanel inherits Card {
-    PanelHead {
-        icon: @image-url("icons/keyboard.svg");
-        title: "Apex Pro TKL Gen 3";
-        meta: KeyboardUi.connected ? "connected" : "not connected";
-    }
-    Shown { shown: KeyboardUi.known; gap: 0; VerticalLayout {
-        padding-top: 4px;
-        spacing: 16px;
-        Divider { }
-        Lighting { }
-        Divider { }
-        Switches { }
-        Divider { }
-        Screen { }
-    } }
 }

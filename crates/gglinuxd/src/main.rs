@@ -16,15 +16,19 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use gg_ipc::{DeviceInfo, Event, Part, Parts, Request, RequestFrame, ResponseData, ServerMessage};
+use gg_ipc::{
+    DeviceInfo, Event, Feature, Part, Parts, Request, RequestFrame, ResponseData, ServerMessage,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{broadcast, watch, Notify};
 use tracing::{debug, error, info, warn};
 
+mod actions;
 mod clips;
 mod clock;
+mod experimental;
 mod gamesense;
 mod headset;
 mod keyboard;
@@ -59,6 +63,10 @@ struct Workers {
     gamesense: GamesenseHandle,
     profiles: ProfilesHandle,
     clips: ClipsHandle,
+    /// The experimental gates: features not tried on the owner's hardware yet.
+    experimental: Arc<experimental::Gates>,
+    /// The actions on the spare keys F13–F24.
+    actions: Arc<actions::Service>,
     /// The parts as saved when this daemon started; the handles of those not running
     /// lead nowhere.
     parts: Parts,
@@ -102,25 +110,49 @@ async fn main() -> Result<()> {
     for part in Part::ALL.into_iter().filter(|&p| !run.on(p)) {
         info!(part = part.label(), "turned off; not started");
     }
+    // The experimental gates, before the keyboard worker: it starts with them.
+    let experimental_path = experimental::path();
+    let gates_now = experimental::load(&experimental_path);
     // GameSense's registry exists before the keyboard worker, which draws it.
     let engine = run.gamesense.then(gamesense::Engine::load);
     let keyboard = if run.keyboard {
         let overlays = engine.iter().map(|e| e.overlay()).collect();
-        let keyboard = keyboard::spawn(event_tx.clone(), overlays);
+        let keyboard = keyboard::spawn(event_tx.clone(), overlays, gates_now);
         presence::spawn(keyboard.clone());
         keyboard
     } else {
         KeyboardHandle::off()
     };
+    let gates = Arc::new(experimental::Gates::new(
+        experimental_path,
+        gates_now,
+        event_tx.clone(),
+        keyboard.clone(),
+    ));
     // The game from the profiles' rules that's running now; games-only clips follow it.
     let (game_tx, game_rx) = watch::channel::<Option<String>>(None);
     // Where everything playing mixes, from Sonar; clips' desktop audio follows it.
     let (mixed_tx, mixed_rx) = watch::channel::<Option<String>>(None);
     // Kept here while the part that sends on them is off, so clips just hear nothing.
     let (mut game_tx, mut mixed_tx) = (Some(game_tx), Some(mixed_tx));
+    let profiles = match (run.profiles, game_tx.take()) {
+        (true, Some(tx)) => profiles::spawn(event_tx.clone(), keyboard.clone(), tx),
+        (_, tx) => {
+            game_tx = tx;
+            ProfilesHandle::off()
+        }
+    };
+    let clips = if run.clips {
+        clips::spawn(event_tx.clone(), game_rx, mixed_rx)
+    } else {
+        ClipsHandle::off()
+    };
+    // Actions run whichever parts are on; a profile or clip action says so while its
+    // part is off.
+    let actions = actions::spawn(event_tx.clone(), profiles.clone(), clips.clone());
     let workers = Workers {
         mouse: if run.mouse {
-            mouse::spawn(event_tx.clone())
+            mouse::spawn(event_tx.clone(), gates.subscribe())
         } else {
             MouseHandle::off()
         },
@@ -136,18 +168,8 @@ async fn main() -> Result<()> {
                 GamesenseHandle::off()
             }
         },
-        profiles: match (run.profiles, game_tx.take()) {
-            (true, Some(tx)) => profiles::spawn(event_tx.clone(), keyboard.clone(), tx),
-            (_, tx) => {
-                game_tx = tx;
-                ProfilesHandle::off()
-            }
-        },
-        clips: if run.clips {
-            clips::spawn(event_tx.clone(), game_rx, mixed_rx)
-        } else {
-            ClipsHandle::off()
-        },
+        profiles,
+        clips,
         // Sonar tells the keyboard's visualizer and clips where everything playing mixes.
         sonar: match (run.sonar, mixed_tx.take()) {
             (true, Some(tx)) => sonar::spawn(event_tx.clone(), keyboard.clone(), tx),
@@ -158,9 +180,14 @@ async fn main() -> Result<()> {
             }
         },
         keyboard,
+        experimental: gates,
+        actions,
         parts,
         restart: Arc::new(Notify::new()),
     };
+    // Profiles apply their sections through `dispatch`: they get the workers at start, so
+    // automatic switching works before the first profiles request.
+    profiles::connect(&workers);
 
     let result = accept_loop(&listener, snapshot_rx, event_tx, workers.clone()).await;
 
@@ -437,6 +464,29 @@ async fn dispatch(
                 .await,
         ),
         Request::SaveMouse => outcome(workers.mouse.send(MouseCommand::Save).await),
+        Request::SetMouseRadio { radio, save } => {
+            match workers.experimental.current().refusal(Feature::MousePower) {
+                Some(message) => ResponseData::Error { message },
+                None => outcome(
+                    workers
+                        .mouse
+                        .send::<()>(|reply| MouseCommand::SetRadio { radio, save, reply })
+                        .await,
+                ),
+            }
+        }
+        // Refused here too, so the gate holds before the worker is even asked.
+        Request::SetMouseSleep { minutes } => {
+            match workers.experimental.current().refusal(Feature::MousePower) {
+                Some(message) => ResponseData::Error { message },
+                None => outcome(
+                    workers
+                        .mouse
+                        .send::<()>(|reply| MouseCommand::SetSleep { minutes, reply })
+                        .await,
+                ),
+            }
+        }
         Request::GetHeadsetState => match workers.headset.send(HeadsetCommand::GetState).await {
             Ok(state) => ResponseData::Headset { state },
             Err(message) => ResponseData::Error { message },
@@ -577,12 +627,22 @@ async fn dispatch(
                 .send::<()>(|reply| KeyboardCommand::SetLighting { lighting, reply })
                 .await,
         ),
-        Request::SetSwitches { switches } => outcome(
-            workers
-                .keyboard
-                .send::<()>(|reply| KeyboardCommand::SetSwitches { switches, reply })
-                .await,
-        ),
+        Request::SetSwitches { switches } => {
+            // Protection Mode is refused while its gate is off, before anything is saved.
+            let gates = workers.experimental.current();
+            match gates
+                .refusal(Feature::KeyboardProtection)
+                .filter(|_| switches.protection.enabled)
+            {
+                Some(message) => ResponseData::Error { message },
+                None => outcome(
+                    workers
+                        .keyboard
+                        .send::<()>(|reply| KeyboardCommand::SetSwitches { switches, reply })
+                        .await,
+                ),
+            }
+        }
         Request::SetScreen { screen } => outcome(
             workers
                 .keyboard
@@ -624,34 +684,28 @@ async fn dispatch(
                 .await,
         ),
         Request::GamesenseTest => outcome(workers.gamesense.send(GamesenseCommand::RunTest).await),
-        Request::GetProfiles => match workers.profiles.send(ProfilesCommand::GetState).await {
-            Ok(state) => ResponseData::Profiles { state },
-            Err(message) => ResponseData::Error { message },
-        },
-        Request::SaveProfile { name } => outcome(
+        Request::GamesenseTestScreen => outcome(
             workers
-                .profiles
-                .send::<()>(|reply| ProfilesCommand::Save { name, reply })
+                .gamesense
+                .send(GamesenseCommand::RunTestScreen)
                 .await,
         ),
-        Request::ApplyProfile { name } => outcome(
-            workers
-                .profiles
-                .send::<()>(|reply| ProfilesCommand::Apply { name, reply })
-                .await,
-        ),
-        Request::DeleteProfile { name } => outcome(
-            workers
-                .profiles
-                .send::<()>(|reply| ProfilesCommand::Delete { name, reply })
-                .await,
-        ),
-        Request::SetGameRules { rules } => outcome(
-            workers
-                .profiles
-                .send::<()>(|reply| ProfilesCommand::SetRules { rules, reply })
-                .await,
-        ),
+        // Profiles apply their sections through `dispatch` too: each request hands them the
+        // workers (only the first one sends them).
+        Request::GetProfiles => {
+            profiles::connect(workers);
+            match workers.profiles.send(ProfilesCommand::GetState).await {
+                Ok(state) => ResponseData::Profiles { state },
+                Err(message) => ResponseData::Error { message },
+            }
+        }
+        req @ (Request::SaveProfile { .. }
+        | Request::ApplyProfile { .. }
+        | Request::DeleteProfile { .. }
+        | Request::SetGameRules { .. }
+        | Request::GetProfile { .. }
+        | Request::ImportProfile { .. }
+        | Request::CopyProfile { .. }) => profiles::serve(req, workers).await,
         Request::GetClipsState => match workers.clips.send(ClipsCommand::GetState).await {
             Ok(state) => ResponseData::Clips { state },
             Err(message) => ResponseData::Error { message },
@@ -669,6 +723,24 @@ async fn dispatch(
                 .send::<()>(|reply| ClipsCommand::Delete { name, reply })
                 .await,
         ),
+        req @ (Request::GetExperimental | Request::SetExperimental { .. }) => {
+            experimental::handle(req, &workers.experimental)
+        }
+        // The keyboard's own modules answer these; while the keyboard part is off they
+        // were refused above.
+        req @ (Request::GetBindings | Request::ReadBindings | Request::SetBindings { .. }) => {
+            keyboard::bindings::handle(req, &workers.keyboard).await
+        }
+        req @ (Request::GetOnboard
+        | Request::ReadOnboard { .. }
+        | Request::LoadOnboard { .. }
+        | Request::WriteOnboard { .. }) => keyboard::onboard::serve(req, &workers.keyboard).await,
+        req @ (Request::GetMacros | Request::SetMacros { .. } | Request::WriteMacros { .. }) => {
+            keyboard::macros::handle(req, &workers.keyboard).await
+        }
+        req @ (Request::GetActions | Request::SetActions { .. }) => {
+            actions::serve(req, &workers.actions).await
+        }
     };
     ServerMessage::response(frame.id, result)
 }
@@ -712,10 +784,42 @@ fn outcome(result: Result<(), String>) -> ResponseData {
     }
 }
 
+/// Wait, at most `longest`, for the keyboard slot writes asked for to end: stopping in the
+/// middle of one can leave the slot erased or half written. Says so in the log. Whether
+/// they ended.
+async fn wait_for_slot_write(keyboard: &KeyboardHandle, longest: Duration) -> bool {
+    let writes = keyboard.slot_writes();
+    if !writes.running() {
+        return true;
+    }
+    info!(
+        "waiting for the keyboard slot write to finish (at most {} s)",
+        longest.as_secs()
+    );
+    let deadline = tokio::time::Instant::now() + longest;
+    while writes.running() {
+        if tokio::time::Instant::now() >= deadline {
+            warn!(
+                "the keyboard slot write didn't finish in {} s; stopping anyway",
+                longest.as_secs()
+            );
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    info!("the keyboard slot write finished");
+    true
+}
+
 /// Leave the devices as their owner expects them — base-station screen dark,
-/// keyboard lighting back on its own profile — waiting at most [`SHUTDOWN_GRACE`].
+/// keyboard lighting back on its own profile — waiting at most [`SHUTDOWN_GRACE`], after
+/// any keyboard slot write has ended (at most [`keyboard::onboard::longest_write`]). A
+/// restart for a change of parts comes through here too.
 async fn shutdown_devices(workers: &Workers) {
     let run = workers.parts.running();
+    if run.keyboard {
+        wait_for_slot_write(&workers.keyboard, keyboard::onboard::longest_write()).await;
+    }
     let all = async {
         tokio::join!(
             async {
@@ -764,16 +868,16 @@ async fn write_message(
     Ok(())
 }
 
+/// Private folders for tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod scratch {
     use std::path::PathBuf;
 
-    /// A new private folder for one test's socket, removed when the test ends.
-    struct Scratch(PathBuf);
+    /// A new private folder for one test, removed when the test ends.
+    pub struct Scratch(pub PathBuf);
 
     impl Scratch {
-        fn new(tag: &str) -> Self {
+        pub fn new(tag: &str) -> Self {
             use std::hash::BuildHasher;
             use std::os::unix::fs::DirBuilderExt;
             let random = std::collections::hash_map::RandomState::new().hash_one(tag);
@@ -791,6 +895,14 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scratch::Scratch;
+    use gg_device_keyboard::testing::FakeTransport;
+    use gg_ipc::Experimental;
 
     #[tokio::test]
     async fn a_second_daemon_leaves_the_running_ones_socket_alone() {
@@ -997,7 +1109,14 @@ mod tests {
     }
 
     fn workers_with(parts: Parts) -> Workers {
+        let (event_tx, _) = broadcast::channel(8);
         Workers {
+            // Never saved by the tests that use these workers; fakes, so nothing runs.
+            actions: Arc::new(actions::testing::Fakes::default().service(
+                std::env::temp_dir().join("gglinuxd-tests-never-written/actions.json"),
+                Err("no typing in tests".into()),
+                event_tx.clone(),
+            )),
             mouse: MouseHandle::off(),
             headset: HeadsetHandle::off(),
             keyboard: KeyboardHandle::off(),
@@ -1005,6 +1124,13 @@ mod tests {
             gamesense: GamesenseHandle::off(),
             profiles: ProfilesHandle::off(),
             clips: ClipsHandle::off(),
+            // Never saved by the tests that use these workers.
+            experimental: Arc::new(experimental::Gates::new(
+                std::env::temp_dir().join("gglinuxd-tests-never-written/experimental.json"),
+                Experimental::default(),
+                event_tx,
+                KeyboardHandle::off(),
+            )),
             parts,
             restart: Arc::new(Notify::new()),
         }
@@ -1070,6 +1196,201 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), workers.restart.notified())
             .await
             .expect("a restart is asked for once the answer is out");
+    }
+
+    #[tokio::test]
+    async fn stopping_waits_for_a_keyboard_slot_write_but_not_forever() {
+        let workers = workers_with(Parts::default());
+        // None running: no wait.
+        let start = std::time::Instant::now();
+        assert!(wait_for_slot_write(&workers.keyboard, Duration::from_secs(5)).await);
+        assert!(start.elapsed() < Duration::from_millis(100));
+        // One running: until it ends.
+        let write = workers.keyboard.slot_writes().start();
+        let ends = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(write);
+        });
+        let start = std::time::Instant::now();
+        assert!(wait_for_slot_write(&workers.keyboard, Duration::from_secs(5)).await);
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        ends.await.unwrap();
+        // One that never ends is given up on.
+        let _stuck = workers.keyboard.slot_writes().start();
+        let start = std::time::Instant::now();
+        assert!(!wait_for_slot_write(&workers.keyboard, Duration::from_millis(200)).await);
+        let waited = start.elapsed();
+        assert!(waited >= Duration::from_millis(200) && waited < Duration::from_secs(2));
+    }
+
+    /// The answer to one request line.
+    async fn answer(line: &str, workers: &Workers) -> ResponseData {
+        let (_tx, snapshot) = watch::channel(Vec::new());
+        match dispatch(line, &snapshot, workers).await {
+            ServerMessage::Response { result, .. } => result,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_m11_requests_reach_their_modules_and_the_keyboards_wait_for_its_part() {
+        let d = Scratch::new("m11-routing");
+        let (event_tx, _) = broadcast::channel(8);
+        let fake = FakeTransport::new();
+        let kb = keyboard::spawn_fake_unasked(
+            fake.keyboard(),
+            d.0.join("keyboard"),
+            event_tx.clone(),
+            Experimental::default(),
+        );
+        let workers = Workers {
+            experimental: Arc::new(experimental::Gates::new(
+                d.0.join("experimental.json"),
+                Experimental::default(),
+                event_tx,
+                kb.clone(),
+            )),
+            keyboard: kb.clone(),
+            ..workers_with(Parts::default())
+        };
+        let ask = |method: &str, params: &str| {
+            let line = match params {
+                "" => format!(r#"{{"id":1,"req":{{"method":"{method}"}}}}"#),
+                p => format!(r#"{{"id":1,"req":{{"method":"{method}","params":{p}}}}}"#),
+            };
+            let workers = &workers;
+            async move { answer(&line, workers).await }
+        };
+
+        assert!(matches!(
+            ask("get_bindings", "").await,
+            ResponseData::Bindings { state } if state == gg_ipc::BindingsState::default()
+        ));
+        assert!(matches!(
+            ask("get_onboard", "").await,
+            ResponseData::Onboard { state } if state == gg_ipc::OnboardState::default()
+        ));
+        assert!(matches!(
+            ask("get_actions", "").await,
+            ResponseData::Actions { state } if state == gg_ipc::ActionsState::default()
+        ));
+        assert!(matches!(
+            ask("get_experimental", "").await,
+            ResponseData::Experimental { experimental } if experimental == Experimental::default()
+        ));
+        assert!(matches!(
+            ask(
+                "set_experimental",
+                r#"{"experimental":{"keyboard_onboard":true}}"#
+            )
+            .await,
+            ResponseData::Success
+        ));
+        assert!(matches!(
+            ask("get_experimental", "").await,
+            ResponseData::Experimental { experimental } if experimental.keyboard_onboard
+        ));
+        // Bindings are built: with only keyboard_onboard on, they're refused by their own gate.
+        for (method, params) in [
+            ("read_bindings", ""),
+            ("set_bindings", r#"{"bindings":{},"enabled":true}"#),
+        ] {
+            match ask(method, params).await {
+                ResponseData::Error { message } => assert!(
+                    message.contains("hasn't been tried on your hardware yet"),
+                    "{method}: {message}"
+                ),
+                other => panic!("{method}: {other:?}"),
+            }
+        }
+        assert!(fake.sent().is_empty(), "none of it reached the keyboard");
+        // The mouse's sleep timer has its own gate, off here: refused before the worker.
+        match ask("set_mouse_sleep", r#"{"minutes":20}"#).await {
+            ResponseData::Error { message } => assert!(
+                message.contains("Mouse: sleep timer") && message.contains("Experimental"),
+                "{message}"
+            ),
+            other => panic!("set_mouse_sleep: {other:?}"),
+        }
+        // Protection Mode has its own gate too: switch settings that turn it on are refused
+        // whole, and the same settings without it go through to the keyboard worker.
+        match ask(
+            "set_switches",
+            r#"{"switches":{"enabled":false,"actuation":15,"protection":{"enabled":true}}}"#,
+        )
+        .await
+        {
+            ResponseData::Error { message } => assert!(
+                message.contains("Keyboard: Protection Mode") && message.contains("Experimental"),
+                "{message}"
+            ),
+            other => panic!("set_switches: {other:?}"),
+        }
+        assert!(matches!(
+            ask(
+                "set_switches",
+                r#"{"switches":{"enabled":false,"actuation":15}}"#
+            )
+            .await,
+            ResponseData::Success
+        ));
+        match ask("set_mouse_radio", r#"{"radio":"stable"}"#).await {
+            ResponseData::Error { message } => {
+                assert!(message.contains("Settings → Experimental"), "{message}")
+            }
+            other => panic!("set_mouse_radio: {other:?}"),
+        }
+        // The onboard slots are built: with the gate on (above), a read reaches the keyboard,
+        // whose unscripted answers aren't a slot image, and says so.
+        match ask("read_onboard", r#"{"slot":0}"#).await {
+            ResponseData::Error { message } => assert!(message.contains("slot 1"), "{message}"),
+            other => panic!("read_onboard: {other:?}"),
+        }
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 25);
+        assert!(sent.iter().all(|s| s.report[1] == 0x83), "chunk reads only");
+        // The actions service answers its own: an empty list is no change, F12 isn't a spare key.
+        assert!(matches!(
+            ask("set_actions", r#"{"bindings":[]}"#).await,
+            ResponseData::Success
+        ));
+        match ask(
+            "set_actions",
+            r#"{"bindings":[{"key":69,"label":"x","action":{"kind":"clip_save"}}]}"#,
+        )
+        .await
+        {
+            ResponseData::Error { message } => assert!(message.contains("F13–F24"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        kb.send::<()>(KeyboardCommand::Shutdown).await.unwrap();
+
+        // With the keyboard part off its requests are refused first; the others aren't.
+        let off = workers_with(Parts {
+            keyboard: false,
+            ..Parts::default()
+        });
+        for method in ["get_bindings", "get_onboard"] {
+            match answer(
+                &format!(r#"{{"id":2,"req":{{"method":"{method}"}}}}"#),
+                &off,
+            )
+            .await
+            {
+                ResponseData::Error { message } => {
+                    assert!(message.contains("turned off in Settings"), "{message}")
+                }
+                other => panic!("{method}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            answer(r#"{"id":3,"req":{"method":"get_actions"}}"#, &off).await,
+            ResponseData::Actions { .. }
+        ));
+        assert!(matches!(
+            answer(r#"{"id":4,"req":{"method":"get_experimental"}}"#, &off).await,
+            ResponseData::Experimental { .. }
+        ));
     }
 
     #[tokio::test]

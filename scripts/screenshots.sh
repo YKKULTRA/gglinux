@@ -21,9 +21,9 @@ out="$repo/docs/screenshots"
 pictures=(
   "engine|engine|1180|820|||"
   # The keyboard is the Engine page's second card, after the row with the mouse and the
-  # headset side by side. WASD (keys 35, 51, 52 and 53) get painted, and their own actuation
+  # headset side by side. WASD (keys 33, 49, 50 and 51) get painted, and their own actuation
   # point.
-  "keyboard|engine|1180|1780|card:2-18||keyboard.set-enabled:1,keyboard.set-effect:0,keyboard.key:35,keyboard.key:51,keyboard.key:52,keyboard.key:53,keyboard.paint-selected,switches.set-enabled:1,switches.key:35,switches.key:51,switches.key:52,switches.key:53,switches.set-own:1,switches.set-rapid:1"
+  "keyboard|engine|1180|1780|card:2-18||keyboard.set-enabled:1,keyboard.set-effect:0,keyboard.key:33,keyboard.key:49,keyboard.key:50,keyboard.key:51,keyboard.paint-selected,switches.set-enabled:1,switches.key:33,switches.key:49,switches.key:50,switches.key:51,switches.set-own:1,switches.set-rapid:1"
   "sonar|sonar|1180|820|||"
   # The EQ editor ends the Sonar card; one band is dragged up so the curve isn't flat.
   "eq|sonar|1180|540|end:1||sonar.eq-drag:4"

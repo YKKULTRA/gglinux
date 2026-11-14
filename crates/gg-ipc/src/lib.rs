@@ -7,6 +7,28 @@
 
 use serde::{Deserialize, Serialize};
 
+mod actions;
+mod bindings;
+mod experimental;
+mod gamesense;
+mod lighting;
+mod macros;
+pub mod mouse_keys;
+mod onboard;
+mod profiles;
+
+pub use actions::{validate as validate_actions, Action, ActionBinding, ActionsState};
+pub use bindings::{Bindings, BindingsState, KeyAction, KeyBinding, Layer};
+pub use experimental::{Experimental, Feature};
+pub use gamesense::{Draws, HandlerInfo};
+pub use lighting::{IdleLighting, ReflectStatus, Zone, ZoneEffect, ZoneKeys, ZonePreset};
+pub use macros::{Macro, MacroBinding, MacroEvent, MacroLibrary, MacroMode, MacrosState};
+pub use onboard::{check_slot, OnboardSlot, OnboardSource, OnboardState, SLOTS as ONBOARD_SLOTS};
+pub use profiles::{
+    Applied, FocusStatus, FocusedWindow, GameRule, PresetInfo, Profile, ProfileBindings,
+    ProfileFile, ProfilesState, RuleMatch, RuleWhen, Section,
+};
+
 /// Broad device category, used by the UI to pick the right panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,18 +88,73 @@ pub struct MouseDpi {
 
 /// Mouse settings, as written by gglinux.
 ///
-/// Each part is `None` until it has been written. The mouse cannot be read back,
-/// so a part never written is unknown, not its factory default.
+/// Each part is `None` until it has been written. A part never written is unknown, not its
+/// factory default; what the mouse itself reports is in [`MouseState`] (`sleep_secs`,
+/// `radio`, `reported_dpi`, `reported_polling_hz`). The buttons and the wheel aren't read
+/// back: the mouse has no query for them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseSettings {
     pub dpi: Option<MouseDpi>,
     pub polling_hz: Option<u16>,
-    /// One action name per physical button, in button order.
+    /// One action name per physical button, in button order, then the wheel's two (up,
+    /// down) once they've been written: 6 names, or 8. A write of six buttons keeps the
+    /// wheel's two as they were.
     pub buttons: Option<Vec<String>>,
+    /// The sleep timer, in minutes ([`MOUSE_SLEEP_MINUTES`]).
+    #[serde(default)]
+    pub sleep_minutes: Option<u8>,
+    #[serde(default)]
+    pub radio: Option<MouseRadio>,
 }
 
+/// How the mouse talks to its dongle: GG's High-Efficiency Mode and Wireless Stability
+/// switches, as the three states GG sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseRadio {
+    /// GG's High-Efficiency Mode: longer battery life.
+    HighEfficiency,
+    /// Neither switch on.
+    Normal,
+    /// GG's Wireless Stability: for places with much radio traffic.
+    Stable,
+}
+
+impl MouseRadio {
+    pub const ALL: [MouseRadio; 3] = [
+        MouseRadio::Normal,
+        MouseRadio::Stable,
+        MouseRadio::HighEfficiency,
+    ];
+
+    /// The name `ggctl mouse radio` takes.
+    pub fn key(self) -> &'static str {
+        match self {
+            MouseRadio::HighEfficiency => "efficient",
+            MouseRadio::Normal => "normal",
+            MouseRadio::Stable => "stable",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MouseRadio::HighEfficiency => "High-Efficiency Mode",
+            MouseRadio::Normal => "Normal",
+            MouseRadio::Stable => "Wireless Stability",
+        }
+    }
+}
+
+/// The sleep timers the mouse takes, in whole minutes: GG's own range, the only values seen
+/// on the wire.
+pub const MOUSE_SLEEP_MINUTES: std::ops::RangeInclusive<u8> = 1..=20;
+
+/// The answer to a mouse write while the mouse is asleep. An asleep mouse drops what it's
+/// sent, so nothing is sent; the daemon decides from a status read made for that request.
+pub const MOUSE_ASLEEP: &str = "the mouse is asleep: move it, then try again";
+
 /// What the daemon knows about the mouse.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseState {
     pub connected: bool,
     /// `None` while the mouse is asleep or has not reported yet.
@@ -85,10 +162,25 @@ pub struct MouseState {
     /// Settings this daemon has written since it started.
     ///
     /// `None` means we have not written any: the mouse is running whatever is in
-    /// its onboard memory. The vendor protocol is write-only — there is no command
-    /// to read settings back — so this is the only honest answer available, and it
-    /// deliberately does not pretend to reflect the hardware's actual state.
+    /// its onboard memory. Most settings can't be read back (rivalcfg has no reads),
+    /// so this deliberately does not pretend to reflect the hardware's actual state.
     pub applied: Option<MouseSettings>,
+    /// The sleep timer as the mouse reports it, in seconds. Read only while
+    /// [`Feature::MousePower`] is on; `None` while it's off, or the mouse is asleep (what
+    /// it reported before it fell asleep isn't kept: it can't be checked until it wakes).
+    #[serde(default)]
+    pub sleep_secs: Option<u16>,
+    /// The radio mode as the mouse reports it; read and `None` as [`MouseState::sleep_secs`].
+    #[serde(default)]
+    pub radio: Option<MouseRadio>,
+    /// The DPI stages as the mouse reports them; read and `None` as
+    /// [`MouseState::sleep_secs`].
+    #[serde(default)]
+    pub reported_dpi: Option<MouseDpi>,
+    /// The polling rate as the mouse reports it; read and `None` as
+    /// [`MouseState::sleep_secs`].
+    #[serde(default)]
+    pub reported_polling_hz: Option<u16>,
 }
 
 /// Burn-in protection for the headset base station's screen.
@@ -170,7 +262,81 @@ pub enum RadioMode {
     Range,
 }
 
+/// What a Bluetooth call does to the game sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BluetoothCall {
+    Nothing,
+    /// Game sound 12 dB lower during the call.
+    LowerGame,
+    MuteGame,
+}
+
+/// The base station's output gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadsetGain {
+    Low,
+    High,
+}
+
+/// What the base station's line out carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineOut {
+    /// The headset's sound, for speakers.
+    Speakers,
+    /// A mix of main, aux and mic at their own levels ([`LineOutMix`]).
+    Stream,
+}
+
+/// The base station's line-out stream mix, 0..=[`LINE_OUT_LEVEL_MAX`] each. Not
+/// Sonar's [`StreamMix`]: this one is mixed in the base station.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineOutMix {
+    pub main: u8,
+    pub aux: u8,
+    pub mic: u8,
+}
+
+/// Highest level in a [`LineOutMix`].
+pub const LINE_OUT_LEVEL_MAX: u8 = 100;
+
+/// The base station's home screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeScreen {
+    Detailed,
+    Simple,
+}
+
+/// The base station screen's dim timeout choices, in minutes; 0 never dims.
+pub const SCREEN_DIM_MINUTES: [u16; 7] = [0, 1, 5, 10, 15, 30, 60];
+
+/// Bluetooth's link to a phone, as the base station reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BluetoothLink {
+    Off,
+    Connected,
+    /// On, with nothing connected.
+    NotConnected,
+}
+
+/// The 2.4 GHz link between the base station and the headset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadsetPairing {
+    NotPaired,
+    /// Paired, but the headset is off or out of reach.
+    PairedOffline,
+    Connected,
+}
+
 /// One headset setting to change: `{"setting":"sidetone","value":2}`.
+///
+/// The base station's own settings at the end need [`Feature::HeadsetExtras`]
+/// ([`HeadsetChange::feature`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "setting", content = "value", rename_all = "snake_case")]
 pub enum HeadsetChange {
@@ -190,11 +356,46 @@ pub enum HeadsetChange {
     EqPreset(u8),
     /// Ten gains in dB, -10.0..=10.0 in 0.5 steps. Selects the Custom preset.
     EqBands(Vec<f32>),
+    /// Bluetooth on when the headset powers on.
+    BluetoothAtPowerOn(bool),
+    BluetoothCall(BluetoothCall),
+    Gain(HeadsetGain),
+    LineOut(LineOut),
+    /// All three levels at once, as the base station takes them.
+    LineOutMix(LineOutMix),
+    HomeScreen(HomeScreen),
+    /// One of [`SCREEN_DIM_MINUTES`].
+    ScreenDimMinutes(u16),
 }
 
-/// Headset settings. The first group is read from the base station every
-/// second; the second is what gglinux wrote this session, because the device
-/// cannot report it. `None` means not known.
+impl HeadsetChange {
+    /// The experimental gate this change needs, if any.
+    pub fn feature(&self) -> Option<Feature> {
+        match self {
+            HeadsetChange::BluetoothAtPowerOn(_)
+            | HeadsetChange::BluetoothCall(_)
+            | HeadsetChange::Gain(_)
+            | HeadsetChange::LineOut(_)
+            | HeadsetChange::LineOutMix(_)
+            | HeadsetChange::HomeScreen(_)
+            | HeadsetChange::ScreenDimMinutes(_) => Some(Feature::HeadsetExtras),
+            HeadsetChange::NoiseMode(_)
+            | HeadsetChange::Transparency(_)
+            | HeadsetChange::Sidetone(_)
+            | HeadsetChange::MicVolume(_)
+            | HeadsetChange::MicLed(_)
+            | HeadsetChange::AutoOffMinutes(_)
+            | HeadsetChange::RadioMode(_)
+            | HeadsetChange::EqPreset(_)
+            | HeadsetChange::EqBands(_) => None,
+        }
+    }
+}
+
+/// Headset settings, as the base station reports them where it does (its `b0` and
+/// `20` replies each second; the home screen and the dim timeout from its `80`
+/// reply, asked only while [`Feature::HeadsetExtras`] is on), else as gglinux wrote
+/// them this session. `None` means not known.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HeadsetControls {
     pub noise_mode: Option<NoiseMode>,
@@ -207,6 +408,29 @@ pub struct HeadsetControls {
     pub mic_volume: Option<u8>,
     pub eq_preset: Option<u8>,
     pub eq_bands: Option<Vec<f32>>,
+    #[serde(default)]
+    pub bluetooth_at_power_on: Option<bool>,
+    #[serde(default)]
+    pub bluetooth_call: Option<BluetoothCall>,
+    /// Whether Bluetooth is on now. Read only.
+    #[serde(default)]
+    pub bluetooth_on: Option<bool>,
+    /// Read only.
+    #[serde(default)]
+    pub bluetooth_link: Option<BluetoothLink>,
+    /// The 2.4 GHz link to the headset. Read only.
+    #[serde(default)]
+    pub pairing: Option<HeadsetPairing>,
+    #[serde(default)]
+    pub gain: Option<HeadsetGain>,
+    #[serde(default)]
+    pub line_out: Option<LineOut>,
+    #[serde(default)]
+    pub line_out_mix: Option<LineOutMix>,
+    #[serde(default)]
+    pub home_screen: Option<HomeScreen>,
+    #[serde(default)]
+    pub screen_dim_minutes: Option<u16>,
 }
 
 /// What the daemon knows about the headset and its base station.
@@ -509,7 +733,7 @@ impl Default for MicMuteLight {
     fn default() -> Self {
         MicMuteLight {
             enabled: false,
-            key: 0x48,
+            key: 0xFB,
             color: Rgb { r: 255, g: 0, b: 0 },
         }
     }
@@ -531,6 +755,14 @@ pub struct Lighting {
     /// Absent in files saved before it existed.
     #[serde(default)]
     pub mic_mute: MicMuteLight,
+    /// The zone stack, bottom first. `None` in lighting saved before zones existed, which
+    /// [`Lighting::stack`] reads as `effect` over every key; `effect` counts only then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zones: Option<Vec<Zone>>,
+    /// The scene drawn while nobody is at the computer. Absent in files saved before it
+    /// existed.
+    #[serde(default)]
+    pub idle: IdleLighting,
 }
 
 impl Lighting {
@@ -568,7 +800,7 @@ impl Lighting {
         if !(d.is_finite() && Reactive::DURATION_S.contains(&d)) {
             return Err(format!("reactive duration {d} s out of range (0.1..=3)"));
         }
-        Ok(())
+        self.validate_zones()
     }
 }
 
@@ -581,6 +813,8 @@ impl Default for Lighting {
             brightness: 100,
             reactive: Reactive::default(),
             mic_mute: MicMuteLight::default(),
+            zones: None,
+            idle: IdleLighting::default(),
         }
     }
 }
@@ -603,12 +837,40 @@ pub enum Screen {
     /// A 128 × 40 picture: 640 bytes, 16 a row from the top, the leftmost pixel in each
     /// byte's high bit.
     Image { pixels: Vec<u8> },
+    /// An animation: pictures laid out as [`Screen::Image`]'s, each shown for its delay, looping.
+    Animation {
+        frames: Vec<Vec<u8>>,
+        delays_ms: Vec<u16>,
+    },
+    /// Live readings of the computer, one to four of them.
+    Monitor { items: Vec<MonitorItem> },
+}
+
+/// One reading on the System Monitor screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorItem {
+    /// CPU use, %.
+    Cpu,
+    /// CPU package temperature.
+    CpuTemp,
+    /// Memory in use.
+    Ram,
+    /// Graphics card use, % (shown as idle while the card sleeps: it is never woken to ask).
+    Gpu,
+    /// Graphics card temperature, under the same rule.
+    GpuTemp,
+    /// The time.
+    Clock,
 }
 
 impl Screen {
     pub const MAX_LINES: usize = 5;
     pub const MAX_COLUMNS: usize = 16;
     pub const IMAGE_BYTES: usize = 640;
+    pub const MAX_FRAMES: usize = 256;
+    pub const FRAME_DELAY_MS: std::ops::RangeInclusive<u16> = 100..=10_000;
+    pub const MAX_MONITOR_ITEMS: usize = 4;
 
     /// Check what the screen can show, with a message meant for the user.
     pub fn validate(&self) -> Result<(), String> {
@@ -643,6 +905,49 @@ impl Screen {
                 Self::IMAGE_BYTES,
                 pixels.len()
             )),
+            Screen::Animation { frames, delays_ms } => {
+                if frames.is_empty() || frames.len() > Self::MAX_FRAMES {
+                    return Err(format!(
+                        "an animation has 1 to {} pictures, not {}",
+                        Self::MAX_FRAMES,
+                        frames.len()
+                    ));
+                }
+                if delays_ms.len() != frames.len() {
+                    return Err("every picture of an animation needs its own delay".into());
+                }
+                if let Some(f) = frames.iter().find(|f| f.len() != Self::IMAGE_BYTES) {
+                    return Err(format!(
+                        "a screen picture is {} bytes, not {}",
+                        Self::IMAGE_BYTES,
+                        f.len()
+                    ));
+                }
+                if let Some(d) = delays_ms.iter().find(|d| !Self::FRAME_DELAY_MS.contains(d)) {
+                    return Err(format!(
+                        "a picture shows for 0.1 to 10 seconds, not {} ms",
+                        d
+                    ));
+                }
+                Ok(())
+            }
+            Screen::Monitor { items } => {
+                if items.is_empty() || items.len() > Self::MAX_MONITOR_ITEMS {
+                    return Err(format!(
+                        "the monitor shows 1 to {} readings, not {}",
+                        Self::MAX_MONITOR_ITEMS,
+                        items.len()
+                    ));
+                }
+                let mut seen = Vec::new();
+                for i in items {
+                    if seen.contains(i) {
+                        return Err(format!("{i:?} is on the monitor twice"));
+                    }
+                    seen.push(*i);
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -720,6 +1025,16 @@ pub struct RapidTrigger {
     pub sensitivity: u8,
 }
 
+/// GG's Protection Mode: a protected key is guarded against being set off by accident
+/// while a key next to it is pressed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Protection {
+    pub enabled: bool,
+    /// The keys it's on for, by HID code; empty means every adjustable key.
+    #[serde(default)]
+    pub keys: Vec<u8>,
+}
+
 impl Default for RapidTrigger {
     fn default() -> Self {
         RapidTrigger {
@@ -754,6 +1069,13 @@ pub struct Switches {
     pub rapid_trigger: RapidTrigger,
     #[serde(default)]
     pub rapid_tap: RapidTap,
+    /// Protection Mode. Needs [`Feature::KeyboardProtection`].
+    #[serde(default)]
+    pub protection: Protection,
+    /// Keys with a second (deep-press) actuation point, deeper than their first; what they do
+    /// there is their binding on [`Layer::Second`]. Needs [`Feature::KeyboardBindings`].
+    #[serde(default)]
+    pub second: Vec<KeyActuation>,
 }
 
 impl Switches {
@@ -812,6 +1134,31 @@ impl Switches {
                 in_pairs.push(code);
             }
         }
+        let mut seen = Vec::new();
+        for k in &self.second {
+            if !Self::ACTUATION.contains(&k.actuation) {
+                return Err(format!(
+                    "second actuation point {} of key {:#04x} out of range (0.1 to 4.0 mm)",
+                    mm(k.actuation),
+                    k.code
+                ));
+            }
+            if k.actuation <= self.actuation_of(k.code) {
+                return Err(format!(
+                    "the second actuation point of key {:#04x} ({}) must be deeper than its first ({})",
+                    k.code,
+                    mm(k.actuation),
+                    mm(self.actuation_of(k.code))
+                ));
+            }
+            if seen.contains(&k.code) {
+                return Err(format!(
+                    "key {:#04x} has two second actuation points",
+                    k.code
+                ));
+            }
+            seen.push(k.code);
+        }
         Ok(())
     }
 
@@ -828,6 +1175,12 @@ impl Switches {
         let rt = &self.rapid_trigger;
         rt.enabled && (rt.keys.is_empty() || rt.keys.contains(&code))
     }
+
+    /// Whether `code` has Protection Mode.
+    pub fn protection_on(&self, code: u8) -> bool {
+        let p = &self.protection;
+        p.enabled && (p.keys.is_empty() || p.keys.contains(&code))
+    }
 }
 
 impl Default for Switches {
@@ -838,6 +1191,8 @@ impl Default for Switches {
             keys: Vec::new(),
             rapid_trigger: RapidTrigger::default(),
             rapid_tap: RapidTap::default(),
+            protection: Protection::default(),
+            second: Vec::new(),
         }
     }
 }
@@ -872,6 +1227,12 @@ pub struct KeyboardState {
     pub layout: Vec<KeyInfo>,
     pub lighting: Lighting,
     pub reactive: ReactiveStatus,
+    /// The idle scene is drawn now, as nobody has been at the computer for a while.
+    #[serde(default)]
+    pub lighting_idle: bool,
+    /// Whether Reflect is looking at the screen.
+    #[serde(default)]
+    pub reflect: ReflectStatus,
     /// The keys with adjustable switches, by HID code.
     #[serde(default)]
     pub analog_keys: Vec<u8>,
@@ -903,6 +1264,13 @@ pub struct GameInfo {
     /// Heard from within its timeout, so drawing now.
     pub active: bool,
     pub events: Vec<String>,
+    /// What each event's handlers draw on, a handler each, in event order.
+    #[serde(default)]
+    pub handlers: Vec<HandlerInfo>,
+    /// Showing on the keyboard's screen right now, over the screen gglinux or the
+    /// keyboard shows otherwise.
+    #[serde(default)]
+    pub on_screen: bool,
 }
 
 /// The GameSense server as the daemon runs it.
@@ -915,30 +1283,6 @@ pub struct GameSenseState {
     /// How many Proton prefixes hold gglinux's coreProps.json.
     pub prefixes: u32,
     pub games: Vec<GameInfo>,
-}
-
-/// A saved keyboard look.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Profile {
-    pub name: String,
-    pub lighting: Lighting,
-}
-
-/// While a process with this name runs, use this profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GameRule {
-    pub process: String,
-    pub profile: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ProfilesState {
-    pub profiles: Vec<String>,
-    pub rules: Vec<GameRule>,
-    /// The rule applied right now, if a game from the list is running.
-    pub active: Option<GameRule>,
-    /// Process names running now, for picking rules. Only in answers, not in events.
-    pub running: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1066,7 +1410,11 @@ pub enum Request {
         #[serde(default)]
         save: bool,
     },
-    /// One action name per button, e.g. `["button1", ..., "dpi"]`.
+    /// One action name per button, e.g. `["button1", ..., "dpi"]`: six, or eight with the
+    /// wheel's two after them (`[..., "dpi", "button4", "scrolldown"]`). With six the wheel
+    /// is left alone. The wheel takes only the actions a capture shows
+    /// ([`mouse_keys::WHEEL`]) and anything but its factory pair needs
+    /// [`Feature::MouseWheel`]. Neither buttons nor wheel can be read back.
     SetMouseButtons {
         actions: Vec<String>,
         #[serde(default)]
@@ -1074,6 +1422,19 @@ pub enum Request {
     },
     /// Commit current settings to the mouse's onboard memory.
     SaveMouse,
+    /// Set the sleep timer ([`MOUSE_SLEEP_MINUTES`]) and save it, as GG does: unsaved, the
+    /// mouse would forget it when it next sleeps. The save also commits the other settings
+    /// the mouse is running to its onboard memory. Needs [`Feature::MousePower`].
+    SetMouseSleep {
+        minutes: u8,
+    },
+    /// Set how the mouse talks to its dongle, at once as GG does. Needs
+    /// [`Feature::MousePower`].
+    SetMouseRadio {
+        radio: MouseRadio,
+        #[serde(default)]
+        save: bool,
+    },
     /// Headset battery, power, and screen settings.
     GetHeadsetState,
     /// Replace the base-station screen settings.
@@ -1184,19 +1545,51 @@ pub enum Request {
     },
     /// Play the built-in test game: an F-key health bar.
     GamesenseTest,
+    /// Show the built-in test game's short sequence on the keyboard's screen.
+    GamesenseTestScreen,
     GetProfiles,
-    /// Save the current lighting under this name.
+    /// Save the current settings of `sections` under this name, replacing a profile of that
+    /// name. Without `sections`: those of the profile it replaces, else every section that can
+    /// be read now.
     SaveProfile {
         name: String,
+        #[serde(default)]
+        sections: Option<Vec<Section>>,
     },
+    /// Apply a saved profile, or with `preset` one of gglinux's own presets. Each section goes
+    /// through its own request, gated as that request is; what was skipped or failed is in
+    /// [`ProfilesState::applied`].
     ApplyProfile {
         name: String,
+        #[serde(default)]
+        preset: bool,
     },
     DeleteProfile {
         name: String,
     },
     SetGameRules {
         rules: Vec<GameRule>,
+    },
+    /// A saved profile, or a preset, as a file to share.
+    GetProfile {
+        name: String,
+        #[serde(default)]
+        preset: bool,
+    },
+    /// Save a profile from a file; `replace` saves over one of the same name.
+    ImportProfile {
+        profile: Box<Profile>,
+        #[serde(default)]
+        replace: bool,
+    },
+    /// Copy a saved profile, or a preset, into a new saved profile: named `to`, or else after
+    /// it ("Typing", "Typing 2", ...).
+    CopyProfile {
+        from: String,
+        #[serde(default)]
+        preset: bool,
+        #[serde(default)]
+        to: Option<String>,
     },
     GetClipsState,
     SetClipsSettings {
@@ -1213,6 +1606,56 @@ pub enum Request {
     SetParts {
         parts: Parts,
     },
+    /// Which experimental (not yet hardware-tried) features are on.
+    GetExperimental,
+    /// Turn experimental features on or off.
+    SetExperimental {
+        experimental: Experimental,
+    },
+    /// The keyboard bindings gglinux applies, and the keyboard's own as last read.
+    GetBindings,
+    /// Read the keyboard's bindings now, all three layers. Needs [`Feature::KeyboardBindings`].
+    ReadBindings,
+    /// Replace the bindings gglinux applies; `enabled` false sends nothing more (what was sent
+    /// stays until the keyboard is unplugged).
+    SetBindings {
+        bindings: Bindings,
+        enabled: bool,
+    },
+    /// The keyboard's onboard slots as last read.
+    GetOnboard,
+    /// Read one slot (`None`: all five) and back it up to a file. Needs
+    /// [`Feature::KeyboardOnboard`].
+    ReadOnboard {
+        slot: Option<u8>,
+    },
+    /// Make the keyboard run one of its slots.
+    LoadOnboard {
+        slot: u8,
+    },
+    /// Write a slot, as one checked transaction that restores the backup on any mismatch.
+    WriteOnboard {
+        slot: u8,
+        from: OnboardSource,
+    },
+    /// The actions on the spare keys F13–F24.
+    GetActions,
+    SetActions {
+        bindings: Vec<ActionBinding>,
+    },
+    /// The keyboard macros and the keys that play them.
+    GetMacros,
+    /// Replace the macros and their keys. Saved; nothing is sent to the keyboard. Needs
+    /// [`Feature::KeyboardMacros`].
+    SetMacros {
+        library: MacroLibrary,
+    },
+    /// Write the macros and their keys into onboard slot `slot` (0..=4), as one checked
+    /// transaction like [`Request::WriteOnboard`]. Needs [`Feature::KeyboardMacros`] and
+    /// [`Feature::KeyboardOnboard`].
+    WriteMacros {
+        slot: u8,
+    },
 }
 
 impl Request {
@@ -1220,12 +1663,21 @@ impl Request {
     pub fn part(&self) -> Option<Part> {
         use Request as R;
         Some(match self {
-            R::ListDevices | R::Ping | R::GetParts | R::SetParts { .. } => return None,
+            R::ListDevices
+            | R::Ping
+            | R::GetParts
+            | R::SetParts { .. }
+            | R::GetExperimental
+            | R::SetExperimental { .. }
+            | R::GetActions
+            | R::SetActions { .. } => return None,
             R::GetMouseState
             | R::SetMouseDpi { .. }
             | R::SetMousePolling { .. }
             | R::SetMouseButtons { .. }
-            | R::SaveMouse => Part::Mouse,
+            | R::SaveMouse
+            | R::SetMouseSleep { .. }
+            | R::SetMouseRadio { .. } => Part::Mouse,
             R::GetHeadsetState | R::SetHeadsetScreen { .. } | R::SetHeadset { .. } => Part::Headset,
             R::GetSonarState
             | R::SetSonarEnabled { .. }
@@ -1247,17 +1699,31 @@ impl Request {
             | R::SetLighting { .. }
             | R::SetSwitches { .. }
             | R::SetScreen { .. }
-            | R::SetScreenCare { .. } => Part::Keyboard,
+            | R::SetScreenCare { .. }
+            | R::GetBindings
+            | R::ReadBindings
+            | R::SetBindings { .. }
+            | R::GetOnboard
+            | R::ReadOnboard { .. }
+            | R::LoadOnboard { .. }
+            | R::WriteOnboard { .. }
+            | R::GetMacros
+            | R::SetMacros { .. }
+            | R::WriteMacros { .. } => Part::Keyboard,
             R::GetGamesenseState
             | R::SetGamesenseEnabled { .. }
             | R::SetGameEnabled { .. }
             | R::RemoveGame { .. }
-            | R::GamesenseTest => Part::Gamesense,
+            | R::GamesenseTest
+            | R::GamesenseTestScreen => Part::Gamesense,
             R::GetProfiles
             | R::SaveProfile { .. }
             | R::ApplyProfile { .. }
             | R::DeleteProfile { .. }
-            | R::SetGameRules { .. } => Part::Profiles,
+            | R::SetGameRules { .. }
+            | R::GetProfile { .. }
+            | R::ImportProfile { .. }
+            | R::CopyProfile { .. } => Part::Profiles,
             R::GetClipsState | R::SetClipsSettings { .. } | R::SaveClip | R::DeleteClip { .. } => {
                 Part::Clips
             }
@@ -1413,11 +1879,30 @@ pub enum ResponseData {
     Profiles {
         state: ProfilesState,
     },
+    /// One profile as a file, for `get_profile`.
+    Profile {
+        file: ProfileFile,
+    },
     Clips {
         state: ClipsState,
     },
     Parts {
         parts: Parts,
+    },
+    Experimental {
+        experimental: Experimental,
+    },
+    Bindings {
+        state: BindingsState,
+    },
+    Onboard {
+        state: OnboardState,
+    },
+    Actions {
+        state: ActionsState,
+    },
+    Macros {
+        state: MacrosState,
     },
     /// A command was accepted and applied.
     Success,
@@ -1465,6 +1950,26 @@ pub enum Event {
     /// The recorder started or stopped, a clip was saved or deleted, or settings changed.
     ClipsChanged {
         state: ClipsState,
+    },
+    /// An experimental feature was turned on or off.
+    ExperimentalChanged {
+        experimental: Experimental,
+    },
+    /// The keyboard bindings changed, or were read.
+    BindingsChanged {
+        state: BindingsState,
+    },
+    /// An onboard slot was read, loaded or written, or an operation started or ended.
+    OnboardChanged {
+        state: OnboardState,
+    },
+    /// The actions changed, or one ran or failed.
+    ActionsChanged {
+        state: ActionsState,
+    },
+    /// The macros changed, or a write of them started or ended.
+    MacrosChanged {
+        state: MacrosState,
     },
 }
 
@@ -1601,6 +2106,7 @@ mod tests {
                 charging: false,
             }),
             applied: None,
+            ..MouseState::default()
         };
         let json = serde_json::to_string(&ResponseData::Mouse { state }).unwrap();
         assert!(json.contains(r#""applied":null"#), "{json}");
@@ -1614,7 +2120,44 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_string(&applied).unwrap();
-        assert_eq!(json, r#"{"dpi":null,"polling_hz":500,"buttons":null}"#);
+        assert_eq!(
+            json,
+            r#"{"dpi":null,"polling_hz":500,"buttons":null,"sleep_minutes":null,"radio":null}"#
+        );
+    }
+
+    /// The sleep timer's request, and a state from an older daemon without the reading.
+    #[test]
+    fn the_sleep_timer_has_its_request_and_an_older_state_still_reads() {
+        let line = r#"{"id":5,"req":{"method":"set_mouse_sleep","params":{"minutes":20}}}"#;
+        let req = serde_json::from_str::<RequestFrame>(line).unwrap().req;
+        assert!(
+            matches!(req, Request::SetMouseSleep { minutes: 20 }),
+            "{req:?}"
+        );
+        assert_eq!(req.part(), Some(Part::Mouse));
+        let old = r#"{"connected":true,"battery":null,"applied":{"dpi":null,"polling_hz":null,"buttons":null}}"#;
+        let state: MouseState = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            (state.sleep_secs, state.applied.unwrap().sleep_minutes),
+            (None, None)
+        );
+    }
+
+    /// Eight button actions, the wheel's two last, as the app and ggctl send them.
+    #[test]
+    fn the_buttons_request_takes_the_wheel_after_the_six_buttons() {
+        let line = r#"{"id":6,"req":{"method":"set_mouse_buttons","params":{"actions":
+            ["button1","button2","button3","button4","button5","dpi","button4","scrolldown"],
+            "save":false}}}"#;
+        match serde_json::from_str::<RequestFrame>(line).unwrap().req {
+            Request::SetMouseButtons { actions, save } => {
+                assert_eq!((actions.len(), save), (8, false));
+                assert_eq!(actions[6..], ["button4", "scrolldown"]);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        assert!(MOUSE_ASLEEP.contains("asleep") && MOUSE_ASLEEP.contains("move it"));
     }
 
     #[test]
@@ -1747,6 +2290,99 @@ mod tests {
         assert!(json.contains(r#""sidetone":null"#), "{json}");
         assert!(json.contains(r#""noise_mode":null"#), "{json}");
         assert!(json.contains(r#""eq_bands":null"#), "{json}");
+    }
+
+    #[test]
+    fn base_station_changes_parse_from_their_documented_json() {
+        let cases = [
+            (
+                r#"{"setting":"bluetooth_at_power_on","value":true}"#,
+                HeadsetChange::BluetoothAtPowerOn(true),
+            ),
+            (
+                r#"{"setting":"bluetooth_call","value":"lower_game"}"#,
+                HeadsetChange::BluetoothCall(BluetoothCall::LowerGame),
+            ),
+            (
+                r#"{"setting":"gain","value":"high"}"#,
+                HeadsetChange::Gain(HeadsetGain::High),
+            ),
+            (
+                r#"{"setting":"line_out","value":"stream"}"#,
+                HeadsetChange::LineOut(LineOut::Stream),
+            ),
+            (
+                r#"{"setting":"line_out_mix","value":{"main":50,"aux":100,"mic":0}}"#,
+                HeadsetChange::LineOutMix(LineOutMix {
+                    main: 50,
+                    aux: 100,
+                    mic: 0,
+                }),
+            ),
+            (
+                r#"{"setting":"home_screen","value":"simple"}"#,
+                HeadsetChange::HomeScreen(HomeScreen::Simple),
+            ),
+            (
+                r#"{"setting":"screen_dim_minutes","value":5}"#,
+                HeadsetChange::ScreenDimMinutes(5),
+            ),
+        ];
+        for (json, expected) in cases {
+            assert_eq!(
+                serde_json::from_str::<HeadsetChange>(json).unwrap(),
+                expected,
+                "{json}"
+            );
+            assert_eq!(serde_json::to_string(&expected).unwrap(), json);
+        }
+    }
+
+    #[test]
+    fn only_the_base_station_settings_need_headset_extras() {
+        let gated = [
+            HeadsetChange::BluetoothAtPowerOn(false),
+            HeadsetChange::BluetoothCall(BluetoothCall::Nothing),
+            HeadsetChange::Gain(HeadsetGain::Low),
+            HeadsetChange::LineOut(LineOut::Speakers),
+            HeadsetChange::LineOutMix(LineOutMix {
+                main: 100,
+                aux: 100,
+                mic: 100,
+            }),
+            HeadsetChange::HomeScreen(HomeScreen::Detailed),
+            HeadsetChange::ScreenDimMinutes(1),
+        ];
+        for change in gated {
+            assert_eq!(change.feature(), Some(Feature::HeadsetExtras), "{change:?}");
+        }
+        for change in [
+            HeadsetChange::NoiseMode(NoiseMode::Off),
+            HeadsetChange::Sidetone(0),
+            HeadsetChange::AutoOffMinutes(30),
+            HeadsetChange::EqBands(vec![0.0; 10]),
+        ] {
+            assert_eq!(change.feature(), None, "{change:?}");
+        }
+        assert!(
+            SCREEN_DIM_MINUTES.contains(&60),
+            "captured in arctis-5 (83 06)"
+        );
+    }
+
+    /// A daemon from before the base-station settings sends none of their fields.
+    #[test]
+    fn controls_without_the_base_station_fields_read_as_unknown() {
+        let old = r#"{"noise_mode":"anc","transparency":5,"mic_led":7,"mic_muted":false,
+            "auto_off_minutes":30,"radio_mode":"speed","sidetone":null,"mic_volume":null,
+            "eq_preset":null,"eq_bands":null}"#;
+        let c: HeadsetControls = serde_json::from_str(old).unwrap();
+        assert_eq!(c.noise_mode, Some(NoiseMode::Anc));
+        assert_eq!((c.gain, c.line_out, c.line_out_mix), (None, None, None));
+        assert_eq!(
+            (c.pairing, c.bluetooth_on, c.screen_dim_minutes),
+            (None, None, None)
+        );
     }
 
     #[test]
@@ -1997,6 +2633,10 @@ mod tests {
                 r#"{"id":5,"req":{"method":"gamesense_test"}}"#,
                 "GamesenseTest",
             ),
+            (
+                r#"{"id":6,"req":{"method":"gamesense_test_screen"}}"#,
+                "GamesenseTestScreen",
+            ),
         ] {
             let req = serde_json::from_str::<RequestFrame>(line).unwrap().req;
             assert!(
@@ -2004,6 +2644,7 @@ mod tests {
                 "{line} parsed as {req:?}"
             );
         }
+        assert_eq!(Request::GamesenseTestScreen.part(), Some(Part::Gamesense));
         let state = GameSenseState {
             enabled: true,
             address: Some("127.0.0.1:5000".into()),
@@ -2015,6 +2656,13 @@ mod tests {
                 enabled: true,
                 active: false,
                 events: vec!["E".into()],
+                handlers: vec![HandlerInfo {
+                    event: "E".into(),
+                    draws: Draws::PartialBitmap {
+                        excluded: vec!["AMMO".into()],
+                    },
+                }],
+                on_screen: true,
             }],
         };
         let v = serde_json::to_value(Event::GamesenseChanged {
@@ -2023,6 +2671,17 @@ mod tests {
         .unwrap();
         assert_eq!(v["event"], "gamesense_changed");
         assert_eq!(v["data"]["state"]["prefixes"], 17);
+        assert_eq!(
+            v["data"]["state"]["games"][0]["handlers"][0],
+            serde_json::json!({ "event": "E", "draws": { "on": "partial_bitmap", "excluded": ["AMMO"] } })
+        );
+        assert_eq!(v["data"]["state"]["games"][0]["on_screen"], true);
+        // A daemon from before screens and bitmaps sends neither field.
+        let old: GameInfo = serde_json::from_str(
+            r#"{"name":"G","display_name":null,"developer":null,"enabled":true,"active":false,"events":[]}"#,
+        )
+        .unwrap();
+        assert!(old.handlers.is_empty() && !old.on_screen);
         let r = serde_json::to_value(ResponseData::Gamesense { state }).unwrap();
         assert_eq!(r["type"], "gamesense");
         assert_eq!(
@@ -2053,14 +2712,264 @@ mod tests {
     }
 
     #[test]
-    fn the_mic_mute_light_defaults_off_on_pause_in_red_and_old_files_still_load() {
+    fn the_mic_mute_light_defaults_off_on_the_screen_button_in_red_and_old_files_still_load() {
         let d = MicMuteLight::default();
         assert_eq!(
             (d.enabled, d.key, d.color),
-            (false, 0x48, Rgb { r: 255, g: 0, b: 0 })
+            (false, 0xFB, Rgb { r: 255, g: 0, b: 0 })
         );
         let old = r#"{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}"#;
         assert_eq!(serde_json::from_str::<Lighting>(old).unwrap().mic_mute, d);
+    }
+
+    /// `lighting.json` as the daemon saved it before zones: `serde_json::to_string_pretty`
+    /// of a `Lighting` with every field it had then.
+    const SAVED_BEFORE_ZONES: &str = r#"{
+  "enabled": true,
+  "effect": {
+    "kind": "static"
+  },
+  "keys": [
+    {
+      "code": 26,
+      "color": {
+        "r": 255,
+        "g": 0,
+        "b": 0
+      }
+    }
+  ],
+  "brightness": 80,
+  "reactive": {
+    "enabled": true,
+    "mode": "ripple",
+    "color": {
+      "r": 0,
+      "g": 0,
+      "b": 255
+    },
+    "duration_s": 0.6
+  },
+  "mic_mute": {
+    "enabled": false,
+    "key": 251,
+    "color": {
+      "r": 255,
+      "g": 0,
+      "b": 0
+    }
+  }
+}"#;
+
+    #[test]
+    fn lighting_saved_before_zones_reads_as_one_zone_over_every_key_and_saves_back_the_same() {
+        let l: Lighting = serde_json::from_str(SAVED_BEFORE_ZONES).unwrap();
+        assert_eq!(l.zones, None);
+        assert_eq!(
+            l.stack().into_owned(),
+            vec![Zone::new("all", ZoneKeys::All, ZoneEffect::PerKey)],
+            "the static colours, from the key list as before"
+        );
+        assert_eq!(l.keys.len(), 1);
+        assert_eq!(l.idle, IdleLighting::default());
+        assert!(!l.idle.enabled, "no idle scene until asked");
+        let again: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string_pretty(&l).unwrap()).unwrap();
+        let mut was: serde_json::Value = serde_json::from_str(SAVED_BEFORE_ZONES).unwrap();
+        was["idle"] = serde_json::to_value(IdleLighting::default()).unwrap();
+        assert_eq!(
+            again, was,
+            "nothing lost, nothing but the idle defaults added"
+        );
+
+        let wave =
+            SAVED_BEFORE_ZONES.replace(r#""kind": "static""#, r#""kind": "wave", "period_s": 3.0"#);
+        let l: Lighting = serde_json::from_str(&wave).unwrap();
+        assert_eq!(
+            l.stack()[0].effect,
+            ZoneEffect::Wave { period_s: 3.0 },
+            "every effect comes across"
+        );
+        for (old, new) in [
+            (
+                Effect::Breathing {
+                    color: Rgb { r: 1, g: 2, b: 3 },
+                    period_s: 2.0,
+                },
+                ZoneEffect::Breathing {
+                    color: Rgb { r: 1, g: 2, b: 3 },
+                    period_s: 2.0,
+                },
+            ),
+            (
+                Effect::Spectrum { period_s: 6.0 },
+                ZoneEffect::Spectrum { period_s: 6.0 },
+            ),
+            (
+                Effect::Visualizer { sensitivity: 1.5 },
+                ZoneEffect::Visualizer { sensitivity: 1.5 },
+            ),
+        ] {
+            assert_eq!(ZoneEffect::from(old), new);
+        }
+    }
+
+    #[test]
+    fn editing_the_zones_writes_the_old_effect_out_first() {
+        let mut l: Lighting = serde_json::from_str(SAVED_BEFORE_ZONES).unwrap();
+        l.zones_mut().push(Zone::new(
+            "WASD",
+            ZonePreset::Wasd.keys(),
+            ZoneEffect::Static {
+                color: Rgb { r: 0, g: 255, b: 0 },
+            },
+        ));
+        let zones = l.zones.as_ref().unwrap();
+        assert_eq!(zones.len(), 2);
+        assert_eq!(
+            zones[0].effect,
+            ZoneEffect::PerKey,
+            "the base stays at the bottom"
+        );
+        assert!(l.validate().is_ok());
+        let json = serde_json::to_value(&l).unwrap();
+        assert_eq!(json["zones"][1]["keys"]["kind"], "keys");
+        assert_eq!(json["zones"][1]["keys"]["codes"][0], 0x1A);
+        assert_eq!(json["zones"][1]["effect"]["kind"], "static");
+        assert_eq!(json["zones"][0]["keys"]["kind"], "all");
+        let back: Lighting = serde_json::from_value(json).unwrap();
+        assert_eq!(back, l);
+        let mut dark = Lighting::default();
+        dark.zones_mut().clear();
+        assert!(
+            dark.stack().is_empty(),
+            "an empty stack stays empty: every key dark"
+        );
+    }
+
+    #[test]
+    fn zones_are_validated_with_messages_for_the_user() {
+        let zone = |name: &str, effect| Zone::new(name, ZonePreset::Arrows.keys(), effect);
+        let with = |zones: Vec<Zone>| Lighting {
+            zones: Some(zones),
+            ..Lighting::default()
+        };
+        let red = Rgb { r: 255, g: 0, b: 0 };
+        let ok = ZoneEffect::Static { color: red };
+        assert!(with(vec![zone("a", ok), zone("b", ok)]).validate().is_ok());
+        let two = with(vec![zone("a", ok), zone("a", ok)]).validate();
+        assert_eq!(two.unwrap_err(), "two zones are called 'a'");
+        assert!(with(vec![zone("", ok)]).validate().is_err());
+        assert!(with(vec![zone(" a", ok)]).validate().is_err());
+        assert!(with(vec![zone(&"x".repeat(33), ok)]).validate().is_err());
+        let no_keys = Zone::new("a", ZoneKeys::Keys { codes: vec![] }, ok);
+        assert_eq!(
+            with(vec![no_keys]).validate().unwrap_err(),
+            "zone 'a' has no keys"
+        );
+        let slow = zone("a", ZoneEffect::Wave { period_s: 0.1 });
+        assert!(with(vec![slow])
+            .validate()
+            .unwrap_err()
+            .starts_with("zone 'a': effect period"));
+        let quick = ZoneEffect::Reactive {
+            mode: ReactiveMode::Fade,
+            color: red,
+            duration_s: 5.0,
+        };
+        assert!(with(vec![zone("a", quick)]).validate().is_err());
+        let loud = ZoneEffect::Visualizer { sensitivity: 9.0 };
+        assert!(with(vec![zone("a", loud)]).validate().is_err());
+        let many = (0..17).map(|i| zone(&i.to_string(), ok)).collect();
+        assert!(with(many).validate().is_err(), "at most 16");
+
+        let mut l = Lighting::default();
+        l.idle.after_minutes = 121;
+        assert!(l.validate().unwrap_err().contains("idle time"));
+        l.idle.after_minutes = 0;
+        l.idle.zones = vec![zone("a", ok), zone("a", ok)];
+        assert!(l.validate().is_err(), "the idle scene's zones too");
+    }
+
+    #[test]
+    fn the_presets_name_their_keys_and_every_key_is_all() {
+        assert_eq!(
+            ZonePreset::Wasd.keys(),
+            ZoneKeys::Keys {
+                codes: vec![0x1A, 0x04, 0x16, 0x07]
+            }
+        );
+        assert_eq!(ZonePreset::All.keys(), ZoneKeys::All);
+        let f = ZonePreset::FRow.keys();
+        assert!(f.contains(0x3A) && f.contains(0x45) && !f.contains(0x46));
+        let n = ZonePreset::NumberRow.keys();
+        assert!(n.contains(0x1E) && n.contains(0x27) && !n.contains(0x35));
+        assert!(ZonePreset::Arrows.keys().contains(0x52));
+        assert!(ZoneKeys::All.contains(0xFB));
+        for p in ZonePreset::ALL {
+            assert_eq!(ZonePreset::from_key(p.key()), Some(p));
+        }
+    }
+
+    #[test]
+    fn reflect_goes_over_the_last_every_key_zone_and_comes_out_again() {
+        let mut l = Lighting::default();
+        l.zones_mut().push(Zone::new(
+            "WASD",
+            ZonePreset::Wasd.keys(),
+            ZoneEffect::Static {
+                color: Rgb { r: 0, g: 255, b: 0 },
+            },
+        ));
+        assert!(!l.uses_reflect());
+        l.reflect_on();
+        let names: Vec<String> = l.stack().iter().map(|z| z.name.clone()).collect();
+        assert_eq!(
+            names,
+            ["all", "Screen", "WASD"],
+            "WASD still shows over the screen"
+        );
+        assert!(l.uses_reflect());
+        l.reflect_on();
+        assert_eq!(l.stack().len(), 3, "once");
+        assert_eq!(
+            serde_json::to_value(l.stack()[1].effect).unwrap()["kind"],
+            "reflect"
+        );
+        l.reflect_off();
+        assert_eq!(l.stack().len(), 2);
+        assert!(!l.uses_reflect());
+        l.idle.zones = vec![Zone::new("s", ZoneKeys::All, ZoneEffect::Reflect)];
+        assert!(l.uses_reflect(), "the idle scene's count too");
+
+        let mut fresh = Lighting {
+            zones: Some(vec![]),
+            ..Lighting::default()
+        };
+        fresh.reflect_on();
+        assert_eq!(
+            fresh.stack()[0].name,
+            "Screen",
+            "an empty stack: at the bottom"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_state_tells_the_idle_scene_and_reflect() {
+        let json = r#"{"connected":true,"layout":[],"lighting":{"enabled":false,"effect":{"kind":"static"},"keys":[],"brightness":100},"reactive":"off"}"#;
+        let state: KeyboardState = serde_json::from_str(json).unwrap();
+        assert!(!state.lighting_idle);
+        assert_eq!(state.reflect, ReflectStatus::Off);
+        let stopped = ReflectStatus::Stopped {
+            why: ReflectStatus::NOT_BUILT.into(),
+        };
+        let v = serde_json::to_value(&stopped).unwrap();
+        assert_eq!(v["state"], "stopped");
+        assert!(v["why"].as_str().unwrap().contains("isn't built"));
+        assert_eq!(
+            serde_json::to_value(ReflectStatus::Running).unwrap(),
+            serde_json::json!({"state": "running"})
+        );
     }
 
     #[test]
@@ -2076,16 +2985,75 @@ mod tests {
         }
         let state = ProfilesState {
             profiles: vec!["Night".into()],
-            rules: vec![GameRule {
-                process: "RDR2.exe".into(),
-                profile: "Night".into(),
-            }],
-            active: None,
-            running: vec![],
+            rules: vec![GameRule::running("RDR2.exe", "Night")],
+            ..ProfilesState::default()
         };
         let v = serde_json::to_value(Event::ProfilesChanged { state }).unwrap();
         assert_eq!(v["event"], "profiles_changed");
         assert_eq!(v["data"]["state"]["rules"][0]["process"], "RDR2.exe");
+    }
+
+    #[test]
+    fn profiles_v2_requests_read_with_and_without_their_new_fields() {
+        let req = |json: &str| {
+            serde_json::from_str::<RequestFrame>(&format!(r#"{{"id":1,"req":{json}}}"#))
+                .unwrap_or_else(|e| panic!("{json}: {e}"))
+                .req
+        };
+        assert!(matches!(
+            req(r#"{"method":"save_profile","params":{"name":"Night"}}"#),
+            Request::SaveProfile { sections: None, .. }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"save_profile","params":{"name":"FPS","sections":["switches","mouse"]}}"#),
+            Request::SaveProfile { sections: Some(s), .. } if s == [Section::Switches, Section::Mouse]
+        ));
+        assert!(matches!(
+            req(r#"{"method":"apply_profile","params":{"name":"Typing","preset":true}}"#),
+            Request::ApplyProfile { preset: true, .. }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"get_profile","params":{"name":"Night"}}"#),
+            Request::GetProfile { preset: false, .. }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"import_profile","params":{"profile":{"name":"N","lighting":{"enabled":true,"effect":{"kind":"static"},"keys":[],"brightness":70}}}}"#),
+            Request::ImportProfile { replace: false, profile } if profile.sections() == [Section::Lighting]
+        ));
+        assert!(matches!(
+            req(r#"{"method":"copy_profile","params":{"from":"Typing","preset":true}}"#),
+            Request::CopyProfile {
+                preset: true,
+                to: None,
+                ..
+            }
+        ));
+        for r in [
+            Request::GetProfile {
+                name: "x".into(),
+                preset: false,
+            },
+            Request::CopyProfile {
+                from: "x".into(),
+                preset: false,
+                to: None,
+            },
+        ] {
+            assert_eq!(r.part(), Some(Part::Profiles), "{r:?}");
+        }
+        let mut p = Profile::named("Night");
+        p.lighting = Some(Lighting::default());
+        let answer = ResponseData::Profile {
+            file: ProfileFile::new(p, ""),
+        };
+        let v = serde_json::to_value(&answer).unwrap();
+        assert_eq!(v["type"], "profile");
+        assert_eq!(v["file"]["format"], "gglinux-profile");
+        // A state from a daemon before v2 still reads.
+        let old: ProfilesState =
+            serde_json::from_str(r#"{"profiles":["Night"],"rules":[],"active":null,"running":[]}"#)
+                .unwrap();
+        assert!(old.sections.is_empty() && old.applied.is_none());
     }
 
     #[test]
@@ -2266,7 +3234,7 @@ mod tests {
         assert!(text("Hello\nworld").validate().is_ok());
         assert!(text("1\n2\n3\n4\n5\n6").validate().is_err());
         assert!(text("seventeen chars!!").validate().is_err());
-        assert!(text("Yağız").validate().unwrap_err().contains("'ğ'"));
+        assert!(text("Doğa").validate().unwrap_err().contains("'ğ'"));
         assert!(Screen::Image {
             pixels: vec![0; 640]
         }
@@ -2382,5 +3350,167 @@ mod tests {
             None
         );
         assert_eq!(Request::ListDevices.part(), None);
+    }
+}
+
+/// The M11 additions: what the daemon, the app and `ggctl` agree on.
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    fn req(json: &str) -> Request {
+        serde_json::from_str::<RequestFrame>(&format!(r#"{{"id":1,"req":{json}}}"#))
+            .unwrap()
+            .req
+    }
+
+    #[test]
+    fn new_requests_have_their_documented_json_and_part() {
+        assert!(matches!(
+            req(r#"{"method":"get_experimental"}"#),
+            Request::GetExperimental
+        ));
+        assert!(matches!(
+            req(r#"{"method":"set_experimental","params":{"experimental":{"keyboard_onboard":true}}}"#),
+            Request::SetExperimental { experimental } if experimental.on(Feature::KeyboardOnboard)
+        ));
+        assert!(matches!(
+            req(r#"{"method":"read_bindings"}"#),
+            Request::ReadBindings
+        ));
+        assert!(matches!(
+            req(r#"{"method":"set_bindings","params":{"bindings":{"normal":[{"code":57,"action":{"kind":"keys","codes":[224,4]}}]},"enabled":true}}"#),
+            Request::SetBindings { bindings, enabled: true } if bindings.normal.len() == 1
+        ));
+        assert!(matches!(
+            req(r#"{"method":"read_onboard","params":{"slot":null}}"#),
+            Request::ReadOnboard { slot: None }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"write_onboard","params":{"slot":4,"from":{"kind":"current"}}}"#),
+            Request::WriteOnboard {
+                slot: 4,
+                from: OnboardSource::Current
+            }
+        ));
+        assert!(matches!(
+            req(r#"{"method":"set_actions","params":{"bindings":[]}}"#),
+            Request::SetActions { .. }
+        ));
+        for (r, part) in [
+            (Request::GetExperimental, None),
+            (Request::GetActions, None),
+            (Request::GetBindings, Some(Part::Keyboard)),
+            (Request::ReadBindings, Some(Part::Keyboard)),
+            (Request::GetOnboard, Some(Part::Keyboard)),
+            (Request::LoadOnboard { slot: 0 }, Some(Part::Keyboard)),
+        ] {
+            assert_eq!(r.part(), part, "{r:?}");
+        }
+    }
+
+    #[test]
+    fn new_responses_and_events_round_trip() {
+        let msgs = [
+            ResponseData::Experimental {
+                experimental: Experimental::default(),
+            },
+            ResponseData::Bindings {
+                state: BindingsState::default(),
+            },
+            ResponseData::Onboard {
+                state: OnboardState::default(),
+            },
+            ResponseData::Actions {
+                state: ActionsState::default(),
+            },
+        ];
+        for m in msgs {
+            let json = serde_json::to_string(&m).unwrap();
+            let back: ResponseData = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+        let e = Event::OnboardChanged {
+            state: OnboardState::default(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.starts_with(r#"{"event":"onboard_changed""#), "{json}");
+    }
+
+    #[test]
+    fn animations_and_the_monitor_are_checked() {
+        let frame = vec![0u8; Screen::IMAGE_BYTES];
+        let ok = Screen::Animation {
+            frames: vec![frame.clone(), frame.clone()],
+            delays_ms: vec![100, 10_000],
+        };
+        ok.validate().unwrap();
+        for bad in [
+            Screen::Animation {
+                frames: vec![],
+                delays_ms: vec![],
+            },
+            Screen::Animation {
+                frames: vec![frame.clone()],
+                delays_ms: vec![],
+            },
+            Screen::Animation {
+                frames: vec![vec![0; 639]],
+                delays_ms: vec![100],
+            },
+            Screen::Animation {
+                frames: vec![frame.clone()],
+                delays_ms: vec![99],
+            },
+            Screen::Monitor { items: vec![] },
+            Screen::Monitor {
+                items: vec![MonitorItem::Cpu, MonitorItem::Cpu],
+            },
+            Screen::Monitor {
+                items: vec![
+                    MonitorItem::Cpu,
+                    MonitorItem::Ram,
+                    MonitorItem::Gpu,
+                    MonitorItem::Clock,
+                    MonitorItem::CpuTemp,
+                ],
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        Screen::Monitor {
+            items: vec![MonitorItem::Cpu, MonitorItem::Clock],
+        }
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn a_second_actuation_point_must_be_deeper_than_the_first() {
+        let mut s = Switches {
+            actuation: 15,
+            ..Switches::default()
+        };
+        s.second = vec![KeyActuation {
+            code: 0x1A,
+            actuation: 30,
+        }];
+        s.validate().unwrap();
+        s.second[0].actuation = 15;
+        assert!(s.validate().unwrap_err().contains("deeper"));
+        s.second = vec![
+            KeyActuation {
+                code: 0x1A,
+                actuation: 30,
+            },
+            KeyActuation {
+                code: 0x1A,
+                actuation: 31,
+            },
+        ];
+        assert!(s.validate().is_err());
+        // Old settings files without the field still load.
+        let old: Switches = serde_json::from_str(r#"{"enabled":true,"actuation":15}"#).unwrap();
+        assert!(old.second.is_empty());
     }
 }

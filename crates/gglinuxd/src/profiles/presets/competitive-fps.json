@@ -1,0 +1,39 @@
+{
+  "format": "gglinux-profile",
+  "version": 2,
+  "about": "gglinux's own preset, not SteelSeries': 1.0 mm actuation, Rapid Trigger on W A S D at 0.2 mm, Rapid Tap on A and D.",
+  "profile": {
+    "name": "Competitive FPS",
+    "switches": {
+      "enabled": true,
+      "actuation": 10,
+      "keys": [],
+      "rapid_trigger": {
+        "enabled": true,
+        "keys": [
+          26,
+          4,
+          22,
+          7
+        ],
+        "sensitivity": 2
+      },
+      "rapid_tap": {
+        "enabled": true,
+        "pairs": [
+          {
+            "a": 4,
+            "b": 7,
+            "mode": "last_wins",
+            "report_both": false
+          }
+        ]
+      },
+      "protection": {
+        "enabled": false,
+        "keys": []
+      },
+      "second": []
+    }
+  }
+}

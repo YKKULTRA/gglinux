@@ -1,0 +1,492 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The Rival 3 Wireless Gen 2 panel on the Engine page.
+
+import { Theme } from "theme.slint";
+import { Card, Hint, ErrorLine, Toggle, Button, Segmented, PanelHead, Battery, Row, Head, Divider, Shown } from "widgets.slint";
+import { NumberBox, Pick } from "devices.slint";
+import { LineEdit, ListView } from "std-widgets.slint";
+
+export global MouseUi {
+    in property <bool> known;
+    in property <bool> connected;
+    /// -1: not known (the mouse reports nothing while asleep).
+    in property <int> battery: -1;
+    in property <bool> charging;
+    /// What this daemon wrote this session, or "".
+    in property <string> applied;
+    /// Each stage's X (with X and Y together, its one number).
+    in property <[int]> stages: [800, 1600];
+    /// Each stage's Y, in the same order.
+    in property <[int]> stages-y: [800, 1600];
+    /// X and Y are set apart: two boxes per stage.
+    in property <bool> split;
+    in property <int> active;
+    in property <int> polling: 1000;
+    /// The sleep timer to send, in minutes.
+    in property <int> sleep: 5;
+    /// What the mouse reports for it, or "" while it isn't read.
+    in property <string> sleep-read;
+    /// `mouse_power` is on in Settings → Experimental.
+    in property <bool> power-gated;
+    /// The sentence shown while it's off.
+    in property <string> power-refusal;
+    /// The wireless mode to send: its place in "Normal", "Stability", "High efficiency".
+    in property <int> radio;
+    /// The first line of the card's note: what the mouse reports, or why nothing is read.
+    in property <string> reported;
+    /// Per button, its place in `actions`, or -1 for a name set elsewhere that
+    /// the menu doesn't offer.
+    in property <[int]> buttons: [0, 1, 2, 3, 4, 6];
+    /// Per button, the line under it: the key it's bound to ("Key: F13"), a
+    /// name set elsewhere, or "".
+    in property <[string]> button-keys: ["", "", "", "", "", ""];
+    /// `mouse_wheel` is on in Settings → Experimental.
+    in property <bool> wheel-gated;
+    /// The sentence shown while it's off.
+    in property <string> wheel-refusal;
+    /// Per direction: turned up its place in `actions`, as for a button (GG offers the
+    /// wheel what it offers a button); turned down its place in `down-actions`. -1 for a
+    /// name set elsewhere.
+    in property <[int]> wheel: [7, 0];
+    /// Per direction, the line under it, as `button-keys` has it for a button.
+    in property <[string]> wheel-keys: ["", ""];
+    /// The row whose key list is open: a button (0 to 5), the wheel up (6) or down (7);
+    /// -1 for none.
+    in property <int> key-button: -1;
+    /// The open list is the media keys, not the keyboard's.
+    in property <bool> key-media;
+    /// The open list's labels, as the search leaves them.
+    in property <[string]> key-choices;
+    /// The label of that button's key now, marked in the list, or "".
+    in property <string> key-current;
+    /// The search typed above the list.
+    in-out property <string> key-filter;
+    in-out property <bool> persist;
+    in property <string> busy;
+    in property <string> error;
+    out property <[int]> rates: [125, 250, 500, 1000];
+    out property <[string]> button-names: ["Left", "Right", "Middle", "Back", "Forward", "DPI"];
+    out property <[string]> wheel-names: ["Scroll up", "Scroll down"];
+    /// The wheel turned down offers only the two entries a capture shows there
+    /// (mouse.rs: WHEEL_DOWN).
+    out property <[string]> down-actions: ["Scroll down", "Back"];
+    /// The last two open a list to pick from (mouse.rs: KEY_ITEM, MEDIA_ITEM).
+    out property <[string]> actions: [
+        "Left click", "Right click", "Middle click", "Back", "Forward", "Button 6", "Cycle DPI",
+        "Scroll up", "Scroll down", "Play / pause", "Next track", "Previous track",
+        "Mute", "Volume up", "Volume down", "Disabled", "Keyboard key…", "Media key…",
+    ];
+    /// While typing: the number as it stands. With X and Y together it sets both.
+    callback edit-stage(int, int);
+    /// Done typing: the number, snapped to the mouse's steps.
+    callback set-stage(int, int);
+    /// The same two for a stage's Y, while X and Y are apart.
+    callback edit-stage-y(int, int);
+    callback set-stage-y(int, int);
+    callback set-split(bool);
+    /// A key from the open list, by its place in `key-choices`.
+    callback pick-key(int);
+    callback filter-keys(string);
+    callback close-keys();
+    callback add-stage();
+    callback remove-stage(int);
+    callback pick-stage(int);
+    callback pick-polling(int);
+    callback pick-sleep(int);
+    callback apply-sleep();
+    callback pick-radio(int);
+    callback apply-radio();
+    callback pick-button(int, int);
+    /// Wheel direction (0 up, 1 down), and its place in `actions` (up) or `down-actions`.
+    callback pick-wheel(int, int);
+    callback factory-buttons();
+    callback apply-dpi();
+    callback apply-polling();
+    callback apply-buttons();
+    callback save();
+}
+
+/// What the mouse reports (or why nothing is read), and what this session wrote.
+component Caveat inherits Rectangle {
+    in property <string> applied;
+    in property <string> reported;
+    background: Theme.surface-2;
+    border-radius: 8px;
+    VerticalLayout {
+        padding-left: 11px;
+        padding-right: 11px;
+        padding-top: 8px;
+        padding-bottom: 8px;
+        spacing: 2px;
+        Hint { text: root.reported; }
+        HorizontalLayout {
+            spacing: root.applied != "" ? 5px : 0;
+            Hint {
+                text: root.applied != "" ? "Applied this session:" : "Nothing has been written this session: the mouse is running its onboard configuration.";
+                wrap: root.applied != "" ? no-wrap : word-wrap;
+                horizontal-stretch: root.applied != "" ? 0 : 1;
+            }
+            Text {
+                text: root.applied != "" ? root.applied + "." : "";
+                color: Theme.text;
+                font-size: Theme.small;
+                wrap: word-wrap;
+                horizontal-stretch: root.applied != "" ? 1 : 0;
+                max-width: root.applied != "" ? 100000px : 0px;
+            }
+        }
+    }
+}
+
+/// One axis of a stage while X and Y are apart: its letter, then its box.
+component AxisBox {
+    in property <string> axis;
+    in property <int> value;
+    callback edited(int);
+    callback committed(int);
+    HorizontalLayout {
+        spacing: 6px;
+        Text { text: root.axis; color: Theme.text-dim; vertical-alignment: center; }
+        // A SpinBox is never narrower than 128 px.
+        NumberBox {
+            width: 128px;
+            minimum: 100;
+            maximum: 18000;
+            step: 100;
+            value: root.value;
+            edited(v) => { root.edited(v); }
+            committed(v) => { root.committed(v); }
+        }
+    }
+}
+
+/// The list a button's key is picked from, with a search above it.
+component KeyPicker inherits Rectangle {
+    in property <bool> open;
+    in property <string> title;
+    in property <string> example;
+    in property <[string]> choices;
+    /// The button's key now, marked in the list.
+    in property <string> current;
+    in-out property <string> filter;
+    callback filtered(string);
+    callback chosen(int);
+    callback cancelled();
+    background: Theme.surface-2;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.line;
+    // Typing can start as soon as it opens.
+    changed open => {
+        if self.open {
+            search.focus();
+        }
+    }
+    VerticalLayout {
+        padding: 10px;
+        spacing: 8px;
+        HorizontalLayout {
+            Text { text: root.title; color: Theme.text; font-size: Theme.small; font-weight: 600; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Cancel"; small: true; clicked => { root.cancelled(); } }
+        }
+        search := LineEdit {
+            placeholder-text: "Search, e.g. " + root.example;
+            text <=> root.filter;
+            edited(t) => { root.filtered(t); }
+            // Enter takes the first match.
+            accepted => {
+                if root.choices.length > 0 {
+                    root.chosen(0);
+                }
+            }
+        }
+        ListView {
+            height: 168px;
+            for label[j] in root.choices : TouchArea {
+                height: 28px;
+                mouse-cursor: pointer;
+                clicked => { root.chosen(j); }
+                Rectangle {
+                    border-radius: 6px;
+                    background: parent.has-hover ? Theme.accent.with-alpha(0.16) : label == root.current ? Theme.line : transparent;
+                    Text {
+                        x: 8px;
+                        text: label;
+                        color: label == root.current ? Theme.accent : Theme.text;
+                        font-size: Theme.font;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        Text {
+            text: root.choices.length == 0 ? "No key matches that." : "Click a key, or press Enter for the first one.";
+            color: Theme.text-dim;
+            font-size: Theme.small;
+        }
+    }
+}
+
+export component MousePanel inherits Card {
+    PanelHead {
+        icon: @image-url("icons/mouse.svg");
+        title: "Rival 3 Wireless Gen 2";
+        meta: MouseUi.battery >= 0 ? (MouseUi.charging ? "·  charging" : "·  on battery")
+            : MouseUi.connected ? "battery unknown: the mouse reports nothing while asleep"
+            : "not connected";
+        if MouseUi.battery >= 0 : Battery { level: MouseUi.battery; }
+    }
+    Caveat { applied: MouseUi.applied; reported: MouseUi.reported; }
+    Divider { }
+    Head {
+        text: "DPI STAGES";
+        HorizontalLayout {
+            spacing: 14px;
+            horizontal-stretch: 0;
+            Toggle {
+                text: "Separate X and Y";
+                label-color: Theme.text-dim;
+                checked: MouseUi.split;
+                toggled(v) => { MouseUi.set-split(v); }
+            }
+            Button { text: "Add stage"; small: true; enabled: MouseUi.stages.length < 5; clicked => { MouseUi.add-stage(); } }
+        }
+    }
+    for dpi[i] in MouseUi.stages : HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        // Two boxes need the room: the narrowest card side by side has about
+        // 388 px, and the row takes 370 apart.
+        TouchArea {
+            width: MouseUi.split ? 30px : 46px;
+            mouse-cursor: pointer;
+            clicked => { MouseUi.pick-stage(i); }
+            Rectangle {
+                width: 30px;
+                height: 26px;
+                x: 0;
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: i == MouseUi.active ? Theme.accent : Theme.line;
+                background: i == MouseUi.active ? Theme.accent.with-alpha(0.16) : Theme.surface-2;
+                Text { text: i + 1; color: i == MouseUi.active ? Theme.accent : Theme.text-dim; font-weight: 600; }
+            }
+        }
+        // Together, one box sets both axes; apart, a box for each.
+        if !MouseUi.split : NumberBox {
+            width: 130px;
+            minimum: 100;
+            maximum: 18000;
+            step: 100;
+            value: dpi;
+            edited(v) => { MouseUi.edit-stage(i, v); }
+            committed(v) => { MouseUi.set-stage(i, v); }
+        }
+        if MouseUi.split : AxisBox {
+            axis: "X";
+            value: dpi;
+            edited(v) => { MouseUi.edit-stage(i, v); }
+            committed(v) => { MouseUi.set-stage(i, v); }
+        }
+        if MouseUi.split : AxisBox {
+            axis: "Y";
+            value: MouseUi.stages-y[i];
+            edited(v) => { MouseUi.edit-stage-y(i, v); }
+            committed(v) => { MouseUi.set-stage-y(i, v); }
+        }
+        if !MouseUi.split : Text { text: "dpi"; color: Theme.text-dim; vertical-alignment: center; }
+        Button { text: "×"; small: true; enabled: MouseUi.stages.length > 1; clicked => { MouseUi.remove-stage(i); } }
+    }
+    Hint {
+        text: MouseUi.split ? "The highlighted stage is the one the mouse switches to; click a number to pick it. X is side to side, Y is up and down."
+            : "The highlighted stage is the one the mouse switches to; click a number to pick it.";
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "dpi" ? "Applying…" : "Apply DPI"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-dpi(); } }
+    }
+    Divider { }
+    Head { text: "POLLING RATE"; }
+    HorizontalLayout {
+        alignment: start;
+        Segmented {
+            options: ["125 Hz", "250 Hz", "500 Hz", "1000 Hz"];
+            current: MouseUi.polling == 125 ? 0 : MouseUi.polling == 250 ? 1 : MouseUi.polling == 500 ? 2 : MouseUi.polling == 1000 ? 3 : -1;
+            picked(i) => { MouseUi.pick-polling(MouseUi.rates[i]); }
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "polling" ? "Applying…" : "Apply polling rate"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-polling(); } }
+    }
+    Divider { }
+    Head { text: "SLEEP TIMER"; }
+    Shown { shown: !MouseUi.power-gated; gap: 0; Hint { text: MouseUi.power-refusal; color: Theme.accent; } }
+    HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        NumberBox {
+            width: 130px;
+            minimum: 1;
+            maximum: 20;
+            step: 1;
+            value: MouseUi.sleep;
+            enabled: MouseUi.power-gated;
+            edited(v) => { MouseUi.pick-sleep(v); }
+            committed(v) => { MouseUi.pick-sleep(v); }
+        }
+        Text { text: "minutes without use"; color: Theme.text-dim; vertical-alignment: center; }
+    }
+    Shown { shown: MouseUi.sleep-read != ""; gap: 0; Hint { text: MouseUi.sleep-read; } }
+    Hint { text: "1 to 20 minutes, as in GG. The mouse takes the timer with a save, so this also writes its other current settings to its onboard memory."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "sleep" ? "Saving…" : "Save sleep timer"; enabled: MouseUi.busy == "" && MouseUi.power-gated; clicked => { MouseUi.apply-sleep(); } }
+    }
+    Divider { }
+    Head { text: "WIRELESS MODE"; }
+    Shown { shown: !MouseUi.power-gated; gap: 0; Hint { text: MouseUi.power-refusal; color: Theme.accent; } }
+    HorizontalLayout {
+        alignment: start;
+        Segmented {
+            options: ["Normal", "Stability", "High efficiency"];
+            current: MouseUi.radio;
+            picked(i) => { MouseUi.pick-radio(i); }
+        }
+    }
+    Hint { text: "Stability is for places with a lot of radio traffic; High efficiency makes the battery last longer. GG calls them Wireless Stability and High-Efficiency Mode."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "radio" ? "Applying…" : "Apply wireless mode"; enabled: MouseUi.busy == "" && MouseUi.power-gated; clicked => { MouseUi.apply-radio(); } }
+    }
+    Divider { }
+    Head {
+        text: "BUTTONS";
+        Button { text: "Reset to factory"; small: true; clicked => { MouseUi.factory-buttons(); } }
+    }
+    // Each row brings its own optional lines, so `spacing: 0` inside it: hidden,
+    // they take no room.
+    for name[i] in MouseUi.button-names : VerticalLayout {
+        spacing: 0;
+        Row {
+            label: name;
+            Pick {
+                width: 220px;
+                model: MouseUi.actions;
+                index: MouseUi.buttons[i];
+                picked(a) => { MouseUi.pick-button(i, a); }
+            }
+        }
+        // The key it's bound to, or a name set elsewhere (with ggctl) that the
+        // menu doesn't offer, kept as it is. Under the menu, where it has room.
+        Shown {
+            shown: MouseUi.button-keys[i] != "";
+            gap: 0;
+            HorizontalLayout {
+                padding-left: 122px;
+                padding-top: 4px;
+                Text { text: MouseUi.button-keys[i]; color: Theme.text-dim; font-size: Theme.small; }
+            }
+        }
+        Shown {
+            shown: MouseUi.key-button == i;
+            gap: 0;
+            HorizontalLayout {
+                padding-left: 122px;
+                padding-top: 8px;
+                KeyPicker {
+                    open: MouseUi.key-button == i;
+                    title: (MouseUi.key-media ? "Media key for " : "Keyboard key for ") + name;
+                    example: MouseUi.key-media ? "volume" : "F13";
+                    choices: MouseUi.key-choices;
+                    current: MouseUi.key-current;
+                    filter <=> MouseUi.key-filter;
+                    filtered(t) => { MouseUi.filter-keys(t); }
+                    chosen(j) => { MouseUi.pick-key(j); }
+                    cancelled => { MouseUi.close-keys(); }
+                }
+            }
+        }
+    }
+    // The wheel: greyed, with the reason, while its gate is off. Turned up, a row like a
+    // button's, with the same menu and key lists, as in GG; turned down, only the two
+    // entries a capture shows there.
+    Shown { shown: !MouseUi.wheel-gated; gap: 0; Hint { text: MouseUi.wheel-refusal; color: Theme.accent; } }
+    VerticalLayout {
+        spacing: 0;
+        Row {
+            label: MouseUi.wheel-names[0];
+            Pick {
+                width: 220px;
+                model: MouseUi.actions;
+                index: MouseUi.wheel[0];
+                enabled: MouseUi.wheel-gated;
+                picked(a) => { MouseUi.pick-wheel(0, a); }
+            }
+        }
+        Shown {
+            shown: MouseUi.wheel-keys[0] != "";
+            gap: 0;
+            HorizontalLayout {
+                padding-left: 122px;
+                padding-top: 4px;
+                Text { text: MouseUi.wheel-keys[0]; color: Theme.text-dim; font-size: Theme.small; }
+            }
+        }
+        Shown {
+            shown: MouseUi.key-button == 6;
+            gap: 0;
+            HorizontalLayout {
+                padding-left: 122px;
+                padding-top: 8px;
+                KeyPicker {
+                    open: MouseUi.key-button == 6;
+                    title: (MouseUi.key-media ? "Media key for " : "Keyboard key for ") + MouseUi.wheel-names[0];
+                    example: MouseUi.key-media ? "volume" : "F13";
+                    choices: MouseUi.key-choices;
+                    current: MouseUi.key-current;
+                    filter <=> MouseUi.key-filter;
+                    filtered(t) => { MouseUi.filter-keys(t); }
+                    chosen(j) => { MouseUi.pick-key(j); }
+                    cancelled => { MouseUi.close-keys(); }
+                }
+            }
+        }
+    }
+    VerticalLayout {
+        spacing: 0;
+        Row {
+            label: MouseUi.wheel-names[1];
+            Pick {
+                width: 220px;
+                model: MouseUi.down-actions;
+                index: MouseUi.wheel[1];
+                enabled: MouseUi.wheel-gated;
+                picked(a) => { MouseUi.pick-wheel(1, a); }
+            }
+        }
+        Shown {
+            shown: MouseUi.wheel-keys[1] != "";
+            gap: 0;
+            HorizontalLayout {
+                padding-left: 122px;
+                padding-top: 4px;
+                Text { text: MouseUi.wheel-keys[1]; color: Theme.text-dim; font-size: Theme.small; }
+            }
+        }
+    }
+    Hint { text: "Turned down, the wheel offers only Scroll down or Back for now: no capture of GG shows anything else there. The mouse can't report its buttons or its wheel back."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "buttons" ? "Applying…" : "Apply buttons"; enabled: MouseUi.busy == ""; clicked => { MouseUi.apply-buttons(); } }
+    }
+    Divider { }
+    Toggle { text: "Write to onboard memory as well"; checked: MouseUi.persist; toggled(v) => { MouseUi.persist = v; } }
+    Hint { text: "Saves the settings in the mouse, so they come back after it's switched off and on. They overwrite what was stored, which cannot be recovered."; }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: MouseUi.busy == "save" ? "Saving…" : "Save current settings to mouse"; enabled: MouseUi.busy == ""; clicked => { MouseUi.save(); } }
+    }
+    ErrorLine { text: MouseUi.error; }
+}

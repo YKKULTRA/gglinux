@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// The experimental switches: a card on the Settings page, after the actions (placed
+// in app.slint). One row per feature not tried on real hardware yet.
+
+import { Theme } from "theme.slint";
+import { Card, Title, Hint, ErrorLine, Toggle } from "widgets.slint";
+import { Opt } from "keyboard.slint";
+
+export struct GateRow {
+    label: string,
+    on: bool,
+}
+
+export global ExperimentalUi {
+    /// Show the card: on the Settings page, once the daemon has said which
+    /// features are on. Off, it takes no room.
+    in property <bool> shown: false;
+    in property <[GateRow]> gates;
+    in property <bool> busy;
+    in property <string> error;
+    /// Turn feature `i` (in `gg_ipc::Feature::ALL` order) on or off.
+    callback set(int, bool);
+}
+
+export component ExperimentalPanel inherits Card {
+    Title { text: "Experimental"; }
+    Hint { text: "These features send commands to a device that haven't been tried on real hardware yet. Each one stays off, and gglinuxd refuses its commands, until you turn it on here."; }
+    VerticalLayout {
+        spacing: 0;
+        for g[i] in ExperimentalUi.gates : VerticalLayout {
+            padding-top: i == 0 ? 2px : 10px;
+            spacing: 2px;
+            Toggle { text: g.label; checked: g.on; enabled: !ExperimentalUi.busy; toggled(v) => { ExperimentalUi.set(i, v); } }
+            HorizontalLayout {
+                padding-left: 24px;
+                Text {
+                    text: "Not tried on your hardware yet. Turn on only while testing, with the device in view.";
+                    color: g.on ? Theme.danger : Theme.text-dim;
+                    font-size: Theme.small;
+                    overflow: elide;
+                }
+            }
+        }
+        Opt { shown: ExperimentalUi.error != ""; ErrorLine { text: ExperimentalUi.error; } }
+    }
+}

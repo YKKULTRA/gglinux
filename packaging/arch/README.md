@@ -6,7 +6,7 @@ This directory holds the AUR package for gglinux:
 |---|---|
 | `PKGBUILD` | Builds `gglinuxd`, `ggctl` and the desktop app from the latest `master` of `github.com/YKKULTRA/gglinux`. |
 | `.SRCINFO` | Package metadata the AUR reads. Generated with `makepkg --printsrcinfo`; never edit it by hand. |
-| `gglinux.install` | Messages pacman prints after install and upgrade: removing an old `install-local.sh` copy, enabling the user service, and the opt-in reactive-lighting rule. |
+| `gglinux.install` | Messages pacman prints after install and upgrade: removing an old `install-local.sh` copy, enabling the user service, the opt-in reactive-lighting rule, and turning on the KWin focus script on KDE Plasma. |
 
 ## What the package installs
 
@@ -17,6 +17,7 @@ This directory holds the AUR package for gglinux:
 | `/usr/lib/udev/rules.d/60-gglinux.rules` | the narrow device-access rule (control interfaces only) |
 | `/usr/share/gglinux/61-gglinux-reactive.rules` | the opt-in reactive-lighting rule, **not** active until the user copies it to `/etc/udev/rules.d/` |
 | `/usr/share/applications/io.github.ykk.gglinux.desktop`, `/usr/share/icons/hicolor/128x128/apps/gglinux.png` | menu entry and icon |
+| `/usr/share/kwin/scripts/gglinux-focus/` | the KWin script that tells the daemon which window has the focus, for profile rules that act on focus (KDE Plasma only); **off** until the user enables it in System Settings → Window Management → KWin Scripts |
 | `/usr/share/licenses/gglinux-git/LICENSE` | GPL-3.0 text |
 
 The user still runs `systemctl --user enable --now gglinuxd` (the install message says so).

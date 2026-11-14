@@ -1,32 +1,164 @@
 # Changelog
 
 All notable changes to gglinux are recorded in this file, in the style of
-[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). gglinux has not been released or
-tagged yet (the Cargo version is 0.0.1), so everything sits under Unreleased, grouped by the
-milestones in [PLAN.md](PLAN.md). Dates are commit dates.
+[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). The first release is 0.1.0
+(2026-11-14); everything up to it sits under that version, grouped by the milestones in
+[PLAN.md](PLAN.md). Dates are commit dates.
 
 ## Hardware status
 
 Most of gglinux is built and tested against fakes, not against real devices. Target devices: Apex
 Pro TKL Gen 3 keyboard (`1038:1642`), Arctis Nova Pro Wireless headset and base station
-(`1038:12e0`), Rival 3 Wireless Gen 2 mouse (`1038:1872`, parked).
+(`1038:12e0`), Rival 3 Wireless Gen 2 mouse (`1038:1872`). Every feature of GG, row by row:
+[docs/PARITY.md](docs/PARITY.md).
 
-- **Verified live on hardware:** only two features. Base-station screen burn-in protection on the
-  Arctis Nova Pro Wireless (M2), and keyboard lighting on the Apex Pro TKL Gen 3 (M4a): static
-  per-key colours, the wave effect, and handing lighting back to the keyboard's onboard mode.
+- **Verified live on hardware:** base-station screen burn-in protection on the Arctis Nova Pro
+  Wireless (M2), and keyboard lighting on the Apex Pro TKL Gen 3 (M4a): static per-key colours,
+  the wave effect, and handing lighting back to the keyboard's onboard mode. Since M11
+  (2026-11-13): on the keyboard, a remapped key and an Fn-layer key (typed by hand), reading its
+  bindings back, reading and backing up its onboard slots and writing the spare one, and the
+  screen's System Monitor and animations; on the mouse, DPI stages with separate X and Y, polling
+  rate, a key on a button, saving across a power cycle, the sleep timer, High-Efficiency Mode and
+  Wireless Stability, all read back from the mouse.
 - **Read-only checks:** the device list, the headset's status and battery, the mouse's battery, and
   the daemon's read-only headset, Sonar and keyboard queries matched the real devices. That confirms
   the transports, not the features built on them.
 - **Built, untested on hardware:** everything else, including all of Sonar, every headset setting
-  write, the other lighting effects, reactive lighting, GameSense, profiles, clips, streamer mode,
-  Smart Volume, start at login and the Arch package.
-- **Built from published protocol notes, untested on this keyboard:** M4b (the Apex screen) and M5
-  (actuation, Rapid Trigger, Rapid Tap). Key remapping and saving to the keyboard's flash are not
-  built.
-- **Parked:** M1 (the Rival 3 Wireless Gen 2 mouse) is built, but no write was ever confirmed on the
-  device and the mouse is no longer in use.
+  write and the base station's own settings, the other lighting effects, lighting zones and the
+  idle scene, reactive lighting, keyboard macros, the mouse's wheel actions, GameSense, profiles,
+  clips, streamer mode, Smart Volume, start at login and the Arch package.
+- **On hold on the developer's keyboard:** the switch settings (actuation, Rapid Trigger, Rapid
+  Tap, Protection Mode) and deep press. They went out without an error but were never checked by
+  hand, and twice a key typed by itself not long after such changes; the cause isn't known.
+- **Frozen as built:** Sonar and Moments stay and keep working, but nothing more is planned for
+  them (the owner's choice, 2026-11-13).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-11-14
+
+### Mouse and keyboard parity, profiles, GameSense screens, lighting zones (M11)
+
+2026-11-06 to 2026-11-13. Built and tested against fake devices that answer late, as real ones do.
+What was tried on the owner's devices on 2026-11-13 is said per item. Every new device write is
+behind an experimental switch, off by default.
+
+- **Experimental switches.** Settings → Experimental and `ggctl experimental` list eight switches,
+  one per feature that writes to a device and hasn't been tried on the owner's hardware (saved in
+  `~/.config/gglinux/experimental.json`, all off). While one is off the daemon refuses its commands
+  with "… hasn't been tried on your hardware yet", and the app greys its controls with that
+  sentence. Seen working: the app's switch reaches the daemon and follows a change made elsewhere.
+- **The Rival 3 Wireless Gen 2 is back** (un-parked 2026-11-06): the owner uses it again.
+- **Mouse: its own settings read back.** Queries found in our USB captures of SteelSeries GG read
+  the mouse's DPI stages, polling rate, sleep timer and wireless mode, so `ggctl mouse` and the app
+  show what the mouse reports instead of what gglinux applied (with `mouse_power` on). Verified.
+- **Mouse: sleep timer, High-Efficiency Mode and Wireless Stability** (`mouse_power`), as GG sends
+  them. Verified: each read back from the mouse, and a 1-minute timer put it to sleep after about a
+  minute.
+- **Mouse: separate X and Y DPI, and any key on a button, in the app.** "Separate X and Y" above
+  the DPI stages, and "Keyboard key…" / "Media key…" with a searchable list for each button.
+  Verified: a button set to a key from the app typed it.
+- **Mouse: an asleep mouse is told nothing.** Every write starts with a battery query; an asleep
+  mouse gets "the mouse is asleep: move it, then try again" instead of a false "ok", and its last
+  report is no longer shown as current. After a write the mouse's settings are read back, so one it
+  dropped is reported as an error.
+- **Mouse: scroll wheel actions** (`mouse_wheel`): turned up, the wheel can do anything a button can
+  (buttons 1–6, DPI, scrolling, off, a key, a media key); turned down, scroll down or Back, the only
+  two GG was seen sending there (captures `rival-5`, `rival-8` … `rival-10`). Scroll up / Scroll
+  down rows under the mouse's buttons, and `ggctl mouse wheel`.
+- **Actions on the spare keys F13–F24.** Bind a mouse button to one, then give the key an action in
+  Settings → Actions or with `ggctl actions`: start a program, type text (with wtype, on Hyprland
+  and other wlroots desktops), apply a profile, save the instant replay, or a media key. The daemon
+  hears the key through the desktop's shortcuts portal and never reads an input device. KDE asks
+  once per new key; Hyprland takes the binds from its config, and Settings shows the lines.
+- **Keyboard: the real board.** The picture no longer shows Print Screen, Scroll Lock and Pause,
+  which the Apex Pro TKL Gen 3 doesn't have; the button beside the screen is a key you can light
+  and the new default mic-mute key. UK, German, French, Nordic, Turkish and Japanese boards get
+  their own drawing, picked by the region the keyboard reports, asked only once gglinux takes the
+  keyboard anyway. Verified on a US board; the other drawings are inferred.
+- **Keyboard: key bindings** (`keyboard_bindings`): remap a key to a key or a combination of up to
+  four, a media key, a mouse button, CPI or the wheel, or nothing, on the normal layer, with Fn held,
+  or past a deep press; move the Fn key; read the keyboard's bindings back. Every write starts from
+  a read, the keyboard's own Fn shortcuts are kept byte for byte, and gglinux sends the bindings
+  again each time the keyboard connects. Each layer written is read back, written again up to three
+  times, and put back as it was if the keyboard doesn't keep it. `ggctl bind` and a Key bindings
+  panel. Verified: Caps Lock → `b` and Fn+F1 → `c` typed as set, and every layer read back.
+- **Keyboard: deep press** as GG sends it (captures `apex-4`, `apex-5`, `apex-17`): the second points before the bindings,
+  `00 00` for keys without a point, at most 8 deep-press bindings. On hold: GG's bytes typed `w` and
+  `wxw` as they should through a probe, but through the daemon deep-layer writes were dropped at
+  random, before the read-back above existed.
+- **Keyboard: onboard profile slots** (`keyboard_onboard`): read all five, back each up to
+  `~/.config/gglinux/onboard-backups/`, load one, write gglinux's screen picture and Rapid Tap into
+  one, or put a backup back (`ggctl onboard`, and an Onboard panel). A write is one checked
+  transaction: read and check the slot, save a backup and read it back, check the new image, erase,
+  write, read everything back, and put the old image back on any failure. A damaged slot can be
+  fixed with `ggctl onboard restore N <backup> --damaged`. Verified: all slots read twice
+  identically, and two writes into the spare slot read back byte for byte. What the keyboard does
+  after a load wasn't watched.
+- **Keyboard: macros** (`keyboard_macros` and `keyboard_onboard`): a list of macros with steps as
+  words (`a`, `ctrl+c`, `down:shift`, `wait:100`, `click:1`, `text:"hello"`), played once per press,
+  a number of times, while held, or toggled on and off, with the wait between plays, written into a
+  slot exactly as GG stores them (captures `apex-20` … `apex-22`, `apex-30`). Only the macro area
+  and the bound keys change, after a backup; a slot holding macros gglinux can't read is left alone.
+  At most two keys and 64 steps a macro for now. A write never loads the slot (run `ggctl onboard
+  load N`), and the app writes into slot 5 unless another is picked. `ggctl macro` and a Macros
+  panel. Untested.
+- **Keyboard: Protection Mode** (`keyboard_protection`): release modes `03` and `04` in the switch
+  tables, as GG sends them (captures `apex-2` … `apex-8`). On hold.
+- **Keyboard: switch settings as GG sends them** (capture `apex-10`): only the table that changed,
+  with GG's values for the keys the board doesn't have. All five go again after a connect or a slot
+  load, when the settings are turned on, and with the first change five minutes after the last full
+  send; `ggctl switches resend` sends them all now. Every report to the keyboard keeps 5 ms from the
+  one before.
+- **Keyboard screen: animations and a System Monitor.** The screen plays a GIF, APNG or WebP (up to
+  256 pictures, each for its own delay), or shows up to four of CPU use, CPU temperature, memory,
+  GPU use, GPU temperature and the time. The graphics card is only asked while it's already awake.
+  `ggctl screen gif`, `ggctl screen monitor`. Verified by eye.
+- **Lighting zones, an idle scene, and Reflect.** Name sets of keys (WASD, arrows, F-row, number row,
+  every key, or keys you pick) and give each its own effect (one colour, painted keys, breathing, a
+  wave or gradient across the zone, spectrum, audio, reactive); later zones paint over earlier ones,
+  and saved lighting becomes the zone "all" unchanged. A scene of its own (or lights off) while
+  you're away, some minutes after the desktop says so. Reflect (each key the colour of the screen
+  above it) is built behind `lighting_reflect`, but the screen capture itself isn't yet, so it shows
+  "stopped". `ggctl lighting …`. Untested.
+- **Headset: the base station's own settings** (`headset_extras`): Bluetooth on at power-on, what a
+  Bluetooth call does to the game sound, gain, line out (speakers, or a stream mix of main, aux and
+  mic), the home screen and how soon its screen dims, as GG sends them (captures `arctis-1` …
+  `arctis-3`, `arctis-5`). gglinux now shows what the base station reports for gain, line out,
+  sidetone, mic volume, EQ, Bluetooth and the headset link, instead of "unknown until changed here".
+  Commands to the base station keep 50 ms apart. The app's stream sliders send the other two levels
+  as gglinux last set them. `ggctl headset` and new rows in the headset card. Untested.
+- **GameSense: screen and bitmap handlers.** Games' screen handlers (text, progress bars, pictures,
+  timed and repeated as the SDK describes) show on the keyboard's screen over your own picture,
+  which comes back when the game's frames end or it goes quiet; full-keyboard `bitmap` and
+  `partial-bitmap` handlers paint every key (which key takes which grid cell is gglinux's reading of
+  the SDK doc). `ggctl gamesense` lists what each event draws, and `ggctl gamesense test screen` (or
+  "Test the screen" in Games) plays a short test. Untested with a real game.
+- **Profiles of any device settings.** A profile holds any of headset, mouse, keyboard switches, key
+  bindings, keyboard screen and lighting, each ticked when saving, and applied through the same
+  checks and switches as your own changes (a gated part is skipped with a note). A rule acts while
+  its program runs or, as GG does, while its window has the focus (Hyprland, or KDE Plasma with
+  gglinux's KWin script, which the Arch package now installs), and your own settings come back when
+  you switch away. gglinux's own switch presets (Competitive FPS, MOBA, Typing, Default switches),
+  import and export as JSON files. Older `profiles.json` files read as before and are kept as
+  `profiles.json.v1`. Untested.
+- **Sonar and Moments frozen** (the owner's choice, 2026-11-13): what is built stays and keeps
+  working; no more Sonar or Moments features, and no Aim Trainer.
+- **Documentation:** `docs/PARITY.md` gives every row of the GG feature audit its status;
+  `docs/PROTOCOLS.md` has what our GG captures showed, each fact with its capture.
+
+### Fixed in M11 (found on the owner's devices, 2026-11-13)
+
+- **Mouse:** a setting sent with `--save` was lost since M1, because the save came straight after it
+  and the mouse drops a command sent too soon after another. Commands now keep 35 ms apart across
+  requests, and 3 s after a polling-rate or wireless-mode command, as GG waits.
+- **Mouse:** a write to a sleeping mouse said "ok" and the old report stayed on screen (see the
+  asleep item above).
+- **Keyboard:** a bindings read right after another got the previous answer; it now waits 13 ms and
+  asks again if the answer is for another layer.
+- **Keyboard:** a deep-press binding written before its point was dropped by the keyboard; the points
+  go first, and the bindings 20 ms after them.
+- **Keyboard screen:** the GPU temperature showed `--` when `nvidia-smi` printed a fraction.
 
 ### Native desktop app (M10)
 
@@ -119,7 +251,7 @@ module); not yet tried on Plasma or under X11.
   each request decoded, so the UI can be exercised without hardware.
 - Verified on hardware: all three devices enumerate. Not yet seen: a physical unplug and replug.
 
-### Mouse (M1, parked)
+### Mouse (M1, parked until M11)
 
 2026-07-27 to 2026-08-12. Parked because the mouse is no longer in use; only the transport and the
 battery were verified on hardware.
@@ -344,6 +476,12 @@ compared against a real PipeWire graph.
 - **Keyboard firmware safety** (`7958283`). Only seven vetted opcodes can be framed or written to
   the Apex, checked again at the write, so the firmware update commands on the same interface can
   never be sent.
+- **Gated keyboard allowlist** (M11). Key bindings, the onboard slots and Protection Mode's release
+  modes are families that the open keyboard lets out only while their experimental switch is on.
+  Flash commands pass only for the five profile slots, in 500-byte chunks, and gglinux sends
+  them only from the checked slot transaction; the firmware's file checksum (`04`), other files and sub-commands, the
+  region write (`75`), a screen picture to flash (`38 83`) and any bootloader entry stay impossible
+  to frame. A random-report test runs 120 000 reports against the listed shapes.
 - **GameSense closed to web pages** (`96b7d46`). The server listens on loopback only, refuses any
   request carrying an `Origin` header, requires `Content-Type: application/json` on every POST, and
   caps request bodies at 64 KiB. It never touches a `coreProps.json` it didn't write (`f7eae84`).

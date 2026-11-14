@@ -1,0 +1,27 @@
+{
+  "format": "gglinux-profile",
+  "version": 2,
+  "about": "gglinux's own preset, not SteelSeries': 2.0 mm so resting fingers don't type, no Rapid Trigger.",
+  "profile": {
+    "name": "Typing",
+    "switches": {
+      "enabled": true,
+      "actuation": 20,
+      "keys": [],
+      "rapid_trigger": {
+        "enabled": false,
+        "keys": [],
+        "sensitivity": 2
+      },
+      "rapid_tap": {
+        "enabled": false,
+        "pairs": []
+      },
+      "protection": {
+        "enabled": false,
+        "keys": []
+      },
+      "second": []
+    }
+  }
+}

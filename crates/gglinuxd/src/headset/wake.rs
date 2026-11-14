@@ -58,6 +58,11 @@ mod tests {
             mic_status_raw: 0,
             anc_raw: 2,
             transparency_raw: 8,
+            bluetooth_at_power_on: None,
+            bluetooth_call: None,
+            bluetooth_on: None,
+            bluetooth_link: None,
+            pairing: None,
         }
     }
 

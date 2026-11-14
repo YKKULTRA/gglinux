@@ -4,7 +4,7 @@
 //! Interface 0 sends the 8-byte boot report (a modifier bitmask, a reserved
 //! byte, six key slots); interface 2 sends a 32-byte N-key-rollover bitmap,
 //! one bit per usage. Both use HID keyboard usage codes — the numbering of
-//! [`crate::proto::KEYS`] and [`crate::layout::ANSI_TKL`], all but Menu's:
+//! [`crate::proto::KEYS`] and [`crate::layout::for_region`]'s boards, all but Menu's:
 //! [`led`] gives the LED a usage lights.
 //!
 //! Which keys someone types is private: nothing here logs, and `Debug` on a
@@ -104,7 +104,7 @@ pub fn led(usage: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::ANSI_TKL;
+    use crate::layout::US;
 
     fn codes(set: KeySet) -> Vec<u8> {
         set.iter().collect()
@@ -173,16 +173,17 @@ mod tests {
     fn every_key_a_us_tkl_types_lights_a_drawn_key() {
         let typed = (0x04..=0x52u8)
             .filter(|&u| u != 0x32) // Non-US #: ISO boards only
+            .filter(|u| !(0x46..=0x48).contains(u)) // not on this board
             .chain([APPLICATION]) // Menu
             .chain(0xE0..=0xE6); // the modifiers; there's no Right GUI, and Fn types nothing
         for usage in typed {
             let led = led(usage);
             assert!(
-                ANSI_TKL.iter().any(|k| k.0 == led),
+                US.iter().any(|k| k.0 == led),
                 "usage {usage:#04x} lights nothing"
             );
         }
-        let menu = ANSI_TKL.iter().find(|k| k.1 == "Menu").unwrap().0;
+        let menu = US.iter().find(|k| k.1 == "Menu").unwrap().0;
         assert_eq!(led(APPLICATION), menu, "the key the layout calls Menu");
     }
 
