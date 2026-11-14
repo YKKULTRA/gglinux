@@ -69,9 +69,8 @@ published. It contains nothing private; it is session bookkeeping. To leave it o
   steps. Left as is.
 - **AUR maintainer line.** `packaging/arch/PKGBUILD` says `# Maintainer: YKKULTRA` with no email.
   Add one if you want (`Name <user at example dot com>`).
-- **Version and tags.** Released as `0.1.0` (tag `v0.1.0`, 2026-11-14). Tag something
-  like `v0.1.0` only if you want a release; the CHANGELOG would then move its `[Unreleased]`
-  content under that version.
+- **Version and tags.** Released as `0.1.0` (tag `v0.1.0`, 2026-11-14); the CHANGELOG lists it
+  under `[0.1.0]`. Later changes go under `[Unreleased]` until the next tag.
 - **Screenshots.** `docs/screenshots/` has the six the README shows, drawn headless against the
   fake daemon by `./scripts/screenshots.sh`. Rerun it after UI changes; pictures taken on your
   desktop could replace them if you'd rather show the real thing.
