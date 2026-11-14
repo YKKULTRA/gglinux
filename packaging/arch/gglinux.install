@@ -15,6 +15,10 @@ post_install() {
     which lets any program you run read what you type on it. Opt in only if you want it:
       sudo install -m644 /usr/share/gglinux/61-gglinux-reactive.rules /etc/udev/rules.d/
       sudo udevadm control --reload   # then replug the keyboard
+==> On KDE Plasma, profile rules that act on the focused window need gglinux's KWin script.
+    Turn on "gglinux focus" in System Settings -> Window Management -> KWin Scripts, or:
+      kwriteconfig6 --file kwinrc --group Plugins --key gglinux-focusEnabled true
+      qdbus6 org.kde.KWin /KWin reconfigure
 EOF
 }
 

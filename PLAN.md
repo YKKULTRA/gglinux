@@ -150,7 +150,13 @@ Still unverified: physical unplug/replug (no one at the machine). `diff()` is un
 add/remove/swap/interface-churn instead, and the udev wake path is confirmed live (the monitor thread
 parks in `poll()`, no busy-spin).
 
-### M1 — Mouse: Rival 3 Wireless Gen 2  *(quick win)*  — **built; parked, hardware retired**
+### M1 — Mouse: Rival 3 Wireless Gen 2  *(quick win)*  — **built; un-parked in M11, verified 2026-11-13**
+
+> **Un-parked 2026-11-06:** the owner uses the Rival 3 again ("i use the rival rn"). On 2026-11-13
+> its DPI stages (separate X and Y too), polling rate, a key on a button and saving across a power
+> cycle were verified on the mouse, after M11 found and fixed why a saved setting was lost (see
+> M11). The protocol does have getters after all (our GG captures). The text below is kept as it
+> was written in July.
 
 > **Parked 2026-07-27.** The Rival 3 is no longer in use — the owner moved to a Razer mouse — so the
 > acceptance test below cannot be run and M1 stops here rather than counting as complete. The code is
@@ -405,64 +411,148 @@ Not tried yet:
 - the colour picker and EQ dragging with a real mouse;
 - `makepkg -si`.
 
+### M11 — Mouse and keyboard parity  — **built 2026-11-06 to 2026-11-13; hands-on session partly done**
+
+Asked for by the owner on 2026-11-06: parity with GG for the three devices, with every earlier
+exclusion lifted ("remove all the exclusions"), measured against the GG feature audit of
+2026-11-05 (83 rows). Mouse and keyboard first. Built in waves of parallel units, each in its own
+worktree, against fake devices that answer late as real ones do. Every new device write sits behind
+an experimental switch, off by default, until it passes on the owner's hardware. The status of every
+audit row is in [docs/PARITY.md](docs/PARITY.md).
+
+- **Core:** experimental switches (`experimental.json`, Settings → Experimental, `ggctl
+  experimental`); the keyboard behind a transport seam with a lagging fake and a gated allowlist;
+  the keyboard worker, `ggctl` and the fake daemon split one module per area; the app's panels each
+  in their own files.
+- **Wave A (published sources, software):** separate X/Y DPI and the key picker in the app (audit
+  rows M06, M07), key bindings with the Fn layer, deep press and read-back (K02–K04, K08), onboard
+  slots and the checked flash transaction (K06, K07), screen animations and the System Monitor (K09,
+  K10), the real board per region (K11), and actions on the spare keys F13–F24 (M09). Reviewed
+  (R1) and fixed before use.
+- **Captures:** SteelSeries GG 123 in a Windows VM, with each device passed through and one setting
+  changed at a time: the mouse (`rival-1` … `rival-10`), the keyboard (`apex-2` … `apex-30`) and the
+  base station (`arctis-1` … `arctis-5`). What they showed is in `docs/PROTOCOLS.md` (§1, §2, §3e,
+  §3f). The lab VM was deleted afterwards.
+- **Wave B (from the captures):** the mouse's sleep timer, wireless modes, read-backs and pacing;
+  Protection Mode and deep press as GG sends them; switch tables only when changed and every binding
+  layer read back (b1); keyboard macros in a slot (b2); scroll wheel actions and the asleep mouse
+  (b3); the base station's own settings and read-backs (b4). Reviewed (R2): no blocker, six majors,
+  all fixed (R2 fixes, c1).
+- **Wave C (M12's software, taken early):** every GG wheel action and macro play mode (c1),
+  GameSense screen and bitmap handlers (c2), profiles of any device settings with focus rules and
+  presets (c3), lighting zones, an idle scene and Reflect without its screen capture (c5).
+
+Hardware session 2026-11-13, with the owner (hardware test log and hands-on acceptance log):
+
+- **Verified:** keyboard remap (Caps Lock → `b`) and Fn layer (Fn+F1 → `c`) typed as set; all three
+  binding layers read back; all five onboard slots read and backed up, and two writes into the spare
+  slot read back byte for byte; the screen's System Monitor, GPU temperature and an animation; the
+  mouse's DPI stages (faster, slower, separate X and Y), polling rate, sleep timer, High-Efficiency
+  Mode and Wireless Stability read back, a key on a button from the app, a saved DPI kept over a
+  power cycle, a 1-minute sleep timer; the app's experimental switch both ways.
+- **Found and fixed on the way:** a mouse setting saved at once was lost (since M1): commands now keep
+  GG's pace; a bindings read got the previous answer: it waits 13 ms; the GPU temperature parser.
+- **Open:** through the daemon, deep-layer writes were dropped at random (4 of 16); every layer write
+  is now read back and written again, untried. Twice a key typed by itself not long after switch
+  tables went out, with nobody touching the keyboard; replaying gglinux's reports in the lab didn't
+  bring it back, and the cause is unknown. So switch settings, deep press and Protection Mode are on
+  hold on his keyboard. A write to a sleeping mouse said "ok": fixed in b3, untried.
+- **Skipped:** Protection Mode and switching onboard slots by hand (both swap the switch tables).
+
+**Accept:** every M11 audit row built, gated or accepted; the rest of the hands-on checklist (each
+wave B and C unit's checks and review R2's read-only-first list) run with the owner; then one
+`--no-ff` merge into `master` after CI, installed, and the README pictures drawn again (the lighting
+panel grew, so `keyboard.png` is out of date).
+
+### M12 to M16
+
+Planned on 2026-11-06 as one milestone each; where they stand:
+
+- **M12 Profiles, GameSense, lighting:** profiles of any device settings, focus rules and presets
+  (P01–P03), GameSense screen and bitmap handlers (G01, G02), lighting zones and the idle scene
+  (L02, L03) are built in software (M11 wave C). Reflect (L04) lacks its screen capture: a PipeWire
+  video crate and a one-time screen pick with the owner. CS2 game state and Discord (G03): not
+  started; the owner decides.
+- **M13 Headset:** the base station's own settings and read-backs (H01–H09) are built and gated
+  (M11 b4). The ChatMix dial (H10) is not started: the owner's knob is damaged, so it would be off
+  by default. GG offers no USB source or pairing control for this model (H11).
+- **M14 Sonar and M15 Moments:** dropped by the owner on 2026-11-13 ("lets just cut sonar, or keep
+  the features you built until now, do the same for moments also", "keep the work tho, dont just
+  delete it"). What is built stays and keeps working; nothing more is added.
+- **M16 Suite and release:** firmware updates stay in GG itself (a native flasher only with the
+  owner's separate yes); no 3D Aim Trainer (dropped by the owner); the parity checklist is
+  `docs/PARITY.md`; the release is still to do.
+
 ---
 
 ## Feature parity checklist (vs SteelSeries GG)
 
-Each row says where it stands: **verified** (seen working on the owner's hardware), **built** (in
-software and tested against fakes, not yet verified on hardware), **parked** (built; the hardware
-is gone), **blocked** (needs something we don't have yet), **deferred**, or **skipped** (the
-owner's decision).
+The full checklist, one row per feature of the GG feature audit (83 rows) with where it lives, its
+experimental switch and the evidence, is now [docs/PARITY.md](docs/PARITY.md). This is the short
+version, as of M11 (2026-11-13). **Verified** means seen working on the owner's hardware; **built**
+means in software and tested against fakes, not yet verified on hardware; **on hold** means built
+but kept off the owner's keyboard until the phantom key presses are understood (M11); **dropped**
+means the owner decided against it.
 
 **Engine:**
 - Apex per-key RGB, the wave effect, and hand-back to onboard lighting: **verified** (M4a).
-  Breathing, spectrum and reactive lighting: **built**.
-- Apex actuation (global and per key), Rapid Trigger and Rapid Tap: **built** (M5, RAM only,
-  re-sent on connect). Protection mode, dual actuation, key remap, macros and saving to the
-  keyboard's flash: **not built** (the commands are documented, but remapping can wipe the Fn
-  layer's shortcuts and flash writes share opcodes with the firmware updater).
-- Rival 3 DPI, polling, button remap and onboard save: **parked** (M1); its battery: **verified**.
-- Lighting profiles and per-game switching: **built** (M7a). Profiles are lighting profiles only.
+  Breathing, spectrum, gradient, reactive lighting, lighting zones and the idle scene: **built**.
+  Reflect: built except its screen capture.
+- Apex actuation (global and per key), Rapid Trigger and Rapid Tap: **built**, **on hold** (M5,
+  RAM only, re-sent on connect; since M11 only the changed table goes, as GG sends it). Protection
+  Mode and deep press: **built**, **on hold** (M11).
+- Apex key remap and the Fn layer: **verified** (M11). Reading the bindings back: **verified**.
+  Macros in an onboard slot: **built** (M11). Onboard slots (read, back up, load, write, restore):
+  **verified** on the spare slot, a load's effect not watched (M11).
+- Apex screen: the System Monitor and animations **verified**; text, clock, picture and burn-in
+  care **built** (M4b, M9, M11). The real board drawn per region: **verified** on a US board.
+- Rival 3 DPI stages (separate X and Y), polling, button remap with keys and onboard save:
+  **verified** (M1, M11); its battery: **verified**. Sleep timer, High-Efficiency Mode and
+  Wireless Stability: **verified** (M11). Scroll wheel actions and spare-key actions: **built**
+  (M11). Angle snapping and acceleration (done on the PC by GG), Bluetooth Smoothing and mouse
+  macros: not started.
+- Profiles of any device settings, switched by the running program or the focused window, with
+  gglinux's own presets: **built** (M7a, M11).
 - Settings backup and restore, in place of cloud sync (which GG dropped anyway): **built** (M7d).
-- Firmware update: **skipped** — bricking risk.
+- Firmware update: left out on purpose (bricking risk); updates stay in GG itself.
 
-**Sonar** (never turned on live yet, so nothing here is verified):
+**Sonar** (never turned on live yet, so nothing here is verified; frozen as built since
+2026-11-13, so everything not built below is **dropped**):
 - Game / Chat / Media / Aux channels, per-app routing, and the ChatMix slider: **built** (M3a).
-  The base station's ChatMix dial: **skipped** — its knob is damaged.
-- 10-band channel EQ, headphone correction, AutoEQ import: **built** (M3b). A shared preset
-  library: not planned.
+  The base station's ChatMix dial: not started (its knob is damaged).
+- 10-band channel EQ, headphone correction, AutoEQ import: **built** (M3b).
 - Virtual mic with RNNoise suppression, gate and compressor (ClearCast's job): **built** (M3c).
 - Smart Volume: **built** (M7e) — swh's SC4 compressor per channel; needs `swh-plugins`.
 - Streamer mode: **built** (M7c).
-- Virtual surround: **skipped**.
+- Virtual surround, per-channel outputs, mic EQ, preset library and the rest: **dropped**.
 
 **Headset (Nova Pro Wireless):**
 - Status, battery, volume readback, and base-station screen protection: **verified** (M2; waking
   the screen on the wheel, ANC and mic mute not yet watched).
 - ANC, transparency, sidetone, mic volume and light, auto-off, 2.4 GHz mode, on-device EQ:
-  **built** — not yet tried from the UI.
+  **built** — not yet tried from the UI. Their values are read from the base station since M11.
+- The base station's own settings (Bluetooth at power-on and during calls, gain, line out and its
+  stream mix, home screen, screen dim time): **built** (M11, behind `headset_extras`).
 - Kernel backend (prefer `hid-steelseries` when present): **deferred** — see M2.
-
-**OLED:** the Apex screen shows text, a clock or a picture: **built** (M4b). The base station's
-screen is kept dark on purpose (burn-in protection).
 
 **GameSense / Engine Apps:**
 - Event server, colour handlers on the keyboard, `coreProps.json` in Proton prefixes: **built**
-  (M6a). Screen and tactile handlers are accepted but not drawn yet (the screen works since M4b;
-  drawing GameSense screen events on it is still to do; no tactile hardware).
+  (M6a). Screen handlers on the keyboard's screen and full-keyboard bitmaps: **built** (M11). No
+  tactile hardware.
 - Built-in apps — the audio visualizer and the mic-mute light: **built** (M6b); a clock on the
   keyboard screen: **built** (M4b).
-- CS2 Game State Integration and Discord mute: **skipped**.
-- PrismSync: **skipped** — the keyboard is the only RGB device.
+- CS2 Game State Integration and Discord: not started; the owner decides.
+- PrismSync: not needed — the keyboard is the only RGB device.
 
-**Moments:** an instant-replay buffer with a hotkey and a clip library: **built** (M7b;
-`gpu-screen-recorder` isn't installed yet). Games-only clips: **built** (M7e). Event-based
-highlights: **skipped**.
+**Moments** (frozen as built since 2026-11-13): an instant-replay buffer with a hotkey and a clip
+library: **built** (M7b). Games-only clips: **built** (M7e). Event-based highlights, trimming,
+montages and the rest: **dropped**.
 
 **Elsewhere:** GG Home → the UI's device dashboard, listing the three devices live: **verified**
 (M0; unplugging and replugging not yet seen). Start at login, tray, `ggctl` and an Arch
 `PKGBUILD`: **built** (M7d; the tray, start at login and the one-copy guard were built again for
-the native app in M10). The 3D Aim Trainer: **skipped**.
+the native app in M10). The experimental switches in Settings: **verified** (M11). The 3D Aim
+Trainer: **dropped**.
 
 ---
 
