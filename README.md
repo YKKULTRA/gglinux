@@ -36,8 +36,15 @@ confirmed on real hardware so far:
   read back from the mouse.
 
 Read-only paths, such as listing the connected devices and reading headset status and battery,
-were also seen working. **Everything else below is untested on hardware.** New features that write
-to a device start off behind a switch, off by default ([Experimental features](#experimental-features)).
+were also seen working. **Everything else below is untested on hardware.**
+
+> **More is built than is verified.** Key remaps and deep press, onboard profile slots and keyboard
+> macros, Protection Mode, the mouse's sleep timer, power modes and scroll-wheel actions, the base
+> station's Bluetooth, gain and line-out settings, and Reflect lighting are all in gglinux, unit-tested
+> against fake devices, but **off by default** because they write to a device in a way that hasn't
+> been tried on real hardware (or, for some, only on the developer's). Turn any of them on in
+> **Settings → Experimental** or with `ggctl experimental <name> on`; the list is in
+> [Experimental features](#experimental-features). Reports of what happens on your devices help.
 
 Two things are on hold on the developer's keyboard: deep press, and anything that sends switch
 settings (actuation, Rapid Trigger, Rapid Tap, Protection Mode). Twice a key typed by itself not
@@ -369,9 +376,6 @@ switches are saved in `~/.config/gglinux/experimental.json`; all are off on a fr
 | `keyboard_macros` | Keyboard: macros | the macro list; writing it into a slot also needs `keyboard_onboard` |
 | `mouse_power` | Mouse: sleep timer and power settings | the sleep timer, High-Efficiency Mode and Wireless Stability, and reading the mouse's own settings back |
 | `mouse_wheel` | Mouse: scroll wheel actions | changing what the scroll wheel does |
-| `mouse_sensor` | Mouse: angle snapping and sensor settings | nothing yet |
-| `mouse_macros` | Mouse: macros | nothing yet |
-| `mouse_pairing` | Mouse: pairing | nothing yet |
 | `headset_extras` | Headset: Bluetooth, gain and line out | the base station's Bluetooth, gain, line-out and screen settings, and asking it for its screen settings |
 | `lighting_reflect` | Lighting: Reflect screen colours | Reflect lighting zones (the screen capture behind them isn't built yet) |
 

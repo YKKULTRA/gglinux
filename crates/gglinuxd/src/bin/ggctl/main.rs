@@ -35,7 +35,7 @@ mod screen;
 /// What `ggctl --help` prints.
 const USAGE: &str = "\
 ggctl                                   # watch: device list, then live events
-ggctl mouse                             # battery + settings we have applied
+ggctl mouse                             # battery, and the settings the mouse reports (or gglinux applied)
 ggctl mouse dpi 800,1600 [--select N] [--save]   # N counts from 0
 ggctl mouse dpi 400:800,1600:1600       # per-axis X:Y
 ggctl mouse polling 1000 [--save]

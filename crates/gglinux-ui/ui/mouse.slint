@@ -483,7 +483,7 @@ export component MousePanel inherits Card {
     }
     Divider { }
     Toggle { text: "Write to onboard memory as well"; checked: MouseUi.persist; toggled(v) => { MouseUi.persist = v; } }
-    Hint { text: "Without this, settings are lost when the mouse sleeps. With it, they survive, and overwrite what was stored, which cannot be recovered."; }
+    Hint { text: "Saves the settings in the mouse, so they come back after it's switched off and on. They overwrite what was stored, which cannot be recovered."; }
     HorizontalLayout {
         alignment: start;
         Button { text: MouseUi.busy == "save" ? "Saving…" : "Save current settings to mouse"; enabled: MouseUi.busy == ""; clicked => { MouseUi.save(); } }

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Features that write to a device but haven't been tried on the owner's hardware yet.
+//! Features that are built and unit-tested, and write to a device in a way not yet tried on the
+//! developer's hardware.
 //!
-//! Each one is off until it is turned on in Settings → Experimental (or with
+//! Each one is off on a fresh install until it is turned on in Settings → Experimental (or with
 //! `ggctl experimental <name> on`). While a feature is off the daemon refuses to send its
 //! commands, so a new protocol path can be built, tested against fakes and shipped without
 //! ever reaching a device by accident.
@@ -20,17 +21,11 @@ pub enum Feature {
     KeyboardProtection,
     /// Macros stored on the keyboard.
     KeyboardMacros,
-    /// The mouse's sleep timer, battery saving, High-Efficiency Mode, Wireless Stability and
-    /// Bluetooth Smoothing.
+    /// The mouse's sleep timer, High-Efficiency Mode and Wireless Stability, and reading the
+    /// mouse's own settings back.
     MousePower,
     /// What the mouse's scroll wheel does when turned up and down.
     MouseWheel,
-    /// The mouse's angle snapping, acceleration and lift-off settings.
-    MouseSensor,
-    /// Macros stored on the mouse.
-    MouseMacros,
-    /// Pairing the mouse with its dongle.
-    MousePairing,
     /// The headset settings added after M10 (Bluetooth, gain, line out, base-station screen).
     HeadsetExtras,
     /// Keyboard lighting zones that take the colours of the screen.
@@ -38,16 +33,13 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 11] = [
+    pub const ALL: [Feature; 8] = [
         Feature::KeyboardBindings,
         Feature::KeyboardOnboard,
         Feature::KeyboardProtection,
         Feature::KeyboardMacros,
         Feature::MousePower,
         Feature::MouseWheel,
-        Feature::MouseSensor,
-        Feature::MouseMacros,
-        Feature::MousePairing,
         Feature::HeadsetExtras,
         Feature::LightingReflect,
     ];
@@ -61,9 +53,6 @@ impl Feature {
             Feature::KeyboardMacros => "keyboard_macros",
             Feature::MousePower => "mouse_power",
             Feature::MouseWheel => "mouse_wheel",
-            Feature::MouseSensor => "mouse_sensor",
-            Feature::MouseMacros => "mouse_macros",
-            Feature::MousePairing => "mouse_pairing",
             Feature::HeadsetExtras => "headset_extras",
             Feature::LightingReflect => "lighting_reflect",
         }
@@ -78,9 +67,6 @@ impl Feature {
             Feature::KeyboardMacros => "Keyboard: macros",
             Feature::MousePower => "Mouse: sleep timer and power settings",
             Feature::MouseWheel => "Mouse: scroll wheel actions",
-            Feature::MouseSensor => "Mouse: angle snapping and sensor settings",
-            Feature::MouseMacros => "Mouse: macros",
-            Feature::MousePairing => "Mouse: pairing",
             Feature::HeadsetExtras => "Headset: Bluetooth, gain and line out",
             Feature::LightingReflect => "Lighting: Reflect screen colours",
         }
@@ -91,7 +77,9 @@ impl Feature {
     }
 }
 
-/// Which gated features are on. All off by default; a missing field reads as off.
+/// Which gated features are on. All off by default; a missing field reads as off, and a field
+/// of a switch that no longer exists (`mouse_sensor`, `mouse_macros`, `mouse_pairing`: reserved
+/// until 2026-11-14 with nothing behind them) is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Experimental {
@@ -101,9 +89,6 @@ pub struct Experimental {
     pub keyboard_macros: bool,
     pub mouse_power: bool,
     pub mouse_wheel: bool,
-    pub mouse_sensor: bool,
-    pub mouse_macros: bool,
-    pub mouse_pairing: bool,
     pub headset_extras: bool,
     pub lighting_reflect: bool,
 }
@@ -117,9 +102,6 @@ impl Experimental {
             Feature::KeyboardMacros => self.keyboard_macros,
             Feature::MousePower => self.mouse_power,
             Feature::MouseWheel => self.mouse_wheel,
-            Feature::MouseSensor => self.mouse_sensor,
-            Feature::MouseMacros => self.mouse_macros,
-            Feature::MousePairing => self.mouse_pairing,
             Feature::HeadsetExtras => self.headset_extras,
             Feature::LightingReflect => self.lighting_reflect,
         }
@@ -133,9 +115,6 @@ impl Experimental {
             Feature::KeyboardMacros => &mut self.keyboard_macros,
             Feature::MousePower => &mut self.mouse_power,
             Feature::MouseWheel => &mut self.mouse_wheel,
-            Feature::MouseSensor => &mut self.mouse_sensor,
-            Feature::MouseMacros => &mut self.mouse_macros,
-            Feature::MousePairing => &mut self.mouse_pairing,
             Feature::HeadsetExtras => &mut self.headset_extras,
             Feature::LightingReflect => &mut self.lighting_reflect,
         };
@@ -165,7 +144,7 @@ mod tests {
         assert_eq!(parsed, e);
         let parsed: Experimental = serde_json::from_str(r#"{"mouse_power":true}"#).unwrap();
         assert!(parsed.on(Feature::MousePower));
-        assert!(!parsed.on(Feature::MouseSensor));
+        assert!(!parsed.on(Feature::MouseWheel));
     }
 
     #[test]
@@ -212,6 +191,19 @@ mod tests {
         assert!(!old.on(Feature::LightingReflect), "a file from before it");
         let why = old.refusal(Feature::LightingReflect).unwrap();
         assert!(why.contains("hasn't been tried on your hardware yet"));
+    }
+
+    /// Settings files written while the three empty switches existed still read, and keep
+    /// the switches that remain.
+    #[test]
+    fn a_file_with_the_removed_switches_still_reads() {
+        let old: Experimental = serde_json::from_str(
+            r#"{"mouse_power":true,"mouse_sensor":true,"mouse_macros":true,"mouse_pairing":true}"#,
+        )
+        .unwrap();
+        assert!(old.on(Feature::MousePower));
+        assert_eq!(Feature::ALL.iter().filter(|&&f| old.on(f)).count(), 1);
+        assert_eq!(Feature::from_key("mouse_sensor"), None);
     }
 
     #[test]

@@ -1,9 +1,9 @@
 # Changelog
 
 All notable changes to gglinux are recorded in this file, in the style of
-[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). gglinux has not been released or
-tagged yet (the Cargo version is 0.0.1), so everything sits under Unreleased, grouped by the
-milestones in [PLAN.md](PLAN.md). Dates are commit dates.
+[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). The first release is 0.1.0
+(2026-11-14); everything up to it sits under that version, grouped by the milestones in
+[PLAN.md](PLAN.md). Dates are commit dates.
 
 ## Hardware status
 
@@ -35,13 +35,15 @@ Pro TKL Gen 3 keyboard (`1038:1642`), Arctis Nova Pro Wireless headset and base 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-14
+
 ### Mouse and keyboard parity, profiles, GameSense screens, lighting zones (M11)
 
 2026-11-06 to 2026-11-13. Built and tested against fake devices that answer late, as real ones do.
 What was tried on the owner's devices on 2026-11-13 is said per item. Every new device write is
 behind an experimental switch, off by default.
 
-- **Experimental switches.** Settings → Experimental and `ggctl experimental` list eleven switches,
+- **Experimental switches.** Settings → Experimental and `ggctl experimental` list eight switches,
   one per feature that writes to a device and hasn't been tried on the owner's hardware (saved in
   `~/.config/gglinux/experimental.json`, all off). While one is off the daemon refuses its commands
   with "… hasn't been tried on your hardware yet", and the app greys its controls with that

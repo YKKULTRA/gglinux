@@ -3234,7 +3234,7 @@ mod tests {
         assert!(text("Hello\nworld").validate().is_ok());
         assert!(text("1\n2\n3\n4\n5\n6").validate().is_err());
         assert!(text("seventeen chars!!").validate().is_err());
-        assert!(text("Yağız").validate().unwrap_err().contains("'ğ'"));
+        assert!(text("Doğa").validate().unwrap_err().contains("'ğ'"));
         assert!(Screen::Image {
             pixels: vec![0; 640]
         }

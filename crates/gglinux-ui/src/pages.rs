@@ -344,7 +344,7 @@ fn text(p: Part) -> PartText {
             off: None,
         },
         Part::Profiles => PartText {
-            what: "Saved lighting, switched by the game you're playing.",
+            what: "Saved device settings, switched by the game you're playing.",
             off: Some(
                 "Games-only clips find the game through Profiles' rules, so they won't start.",
             ),
